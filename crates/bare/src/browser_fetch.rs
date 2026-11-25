@@ -81,6 +81,7 @@
 //!
 //! Not browser-verified except against Node for the pure parts (`tools/js/fetch_oracle.mjs`).
 
+pub(crate) use crate::resources::{metadata_site, potentially_trustworthy};
 use crate::eng::{Eng, Fault, KeyKind, Ops, Val};
 use crate::browser::{Browser, Dom, IdMap, Owner, R};
 use crate::browser_scoped::*;
@@ -2243,10 +2244,6 @@ fn policy<E: Eng>(d: &Dom<E>, lim: &FetchLimits, url: &Url, mode: Mode, api: &'s
     Ok(cors)
 }
 
-/// HTTPS and local HTTP targets may receive fetch metadata. Local HTTP is also allowed from an HTTPS page.
-pub(crate) fn potentially_trustworthy(u: &Url) -> bool {
-    u.scheme == Scheme::Https || u.host == "localhost" || u.host.ends_with(".localhost") || u.host.trim_matches(['[', ']']).parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
-}
 
 /// Queue the request of an `XMLHttpRequest` with the policy, the caps and the queue of `fetch`. `headers` are combined by name.
 #[allow(clippy::too_many_arguments)] // The request parts; `it` makes the handle of the XHR object.
@@ -2414,22 +2411,6 @@ pub(crate) enum Outcome {
     TooBig,
 }
 
-/// The least-trusted site relation in the URL list. A later redirect cannot make it safer.
-pub(crate) fn metadata_site(doc: &Url, target: &Url, previous: &'static str) -> &'static str {
-    if previous == "cross-site" {
-        return previous;
-    }
-    if doc.same_origin(target) {
-        return previous;
-    }
-    let same_site = doc.scheme == target.scheme && (doc.host == target.host || {
-        // PSL lookup is for DNS hosts only. Numeric addresses are sites of their own.
-        let ip = |h: &str| h.starts_with('[') || h.parse::<std::net::IpAddr>().is_ok();
-        !ip(&doc.host) && !ip(&target.host) && psl::domain_str(&doc.host)
-            .zip(psl::domain_str(&target.host)).is_some_and(|(a, b)| a == b)
-    });
-    if same_site { "same-site" } else { "cross-site" }
-}
 
 fn run_one(client: &mut Client, lim: &FetchLimits, first: Parts<'_>, diag: &mut Vec<String>) -> Outcome {
     run_hops(client, lim, first, diag, None)

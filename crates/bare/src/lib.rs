@@ -180,6 +180,8 @@ mod browser_wasm_memory_tests;
 mod browser_wasm_clone_tests;
 #[cfg(test)]
 mod browser_web_navigator_tests;
+#[cfg(test)]
+mod resources_fetch_metadata_tests;
 mod browser_broadcast;
 mod browser_perf;
 mod browser_html;

@@ -174,7 +174,8 @@ fn import_text<E: Eng>(d: &Dom<E>, href: &str) -> Option<String> {
     let deadline = std::time::Instant::now() + limits.max_time;
     let target = crate::resources::Target { expect: crate::resources::Expect::Script, url };
     let mut client = d.fetch.client.borrow().fork();
-    crate::resources::fetch(&mut client, &target, &limits, deadline, 0).ok().map(|r| r.text)
+    let doc = d.cur_rec().ok().and_then(|r| bare_url::Url::parse(r.href().split('#').next().unwrap_or("")).ok());
+    crate::resources::fetch(&mut client, &target, &limits, deadline, 0, doc.as_ref()).ok().map(|r| r.text)
 }
 
 fn scope_close<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {

@@ -103,3 +103,20 @@ errors and showed "Logging out".
   Fix: structured clone of a `WebAssembly.Module` (WebAssembly step 6).
 - `backend-worker-init-fails`: "globals: PN-less setup requires a LID device jid". Not analysed yet. Hypothesis: a
   consequence of the first error.
+
+## Link attempt 4 (2026-11-25)
+
+Build: main with #1085 (structured clone of a `WebAssembly.Module`). The link handshake worked. The page stayed on "Your
+messages are downloading". The backend worker failed to load again: the `init_script` requests of `webworker_v1` and
+`webworker_v4` got 400, as in attempt 2.
+
+Cause, found with `curl` on new URLs (a new `__spin_t` value for each try, 2 tries for each header):
+
+- The first request for a URL decides the reply, and the CDN keeps it for that URL. Later requests get the same status.
+- A first request with only `User-Agent` gets 400. A first request with `Sec-Fetch-Site: same-origin` gets 200. Each other
+  header alone (`Accept`, `Sec-Fetch-Dest`, `Sec-Fetch-Mode`, `Referer`, `Accept-Language`, `Accept-Encoding`) gets 400.
+- Bare sent the Fetch Metadata only from `fetch()` and on navigations. A `<script src>`, a stylesheet and a worker script
+  went out without it. The URL holds a value per page load (`__spin_t`), so each new page load is a new first request.
+- Attempt 3 got 200. Hypothesis: another request with the metadata (a `fetch` preload) reached that URL first.
+
+Fix: Fetch Metadata on subresource requests (`resources::fetch`).

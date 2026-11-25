@@ -33,7 +33,7 @@ pub(crate) struct Scan {
 
 impl Scan {
     pub(crate) fn new(client: Client, page: Url, lim: Limits, deadline: Instant) -> Scan {
-        Scan { net: Net::new(client), mark: Mark::default(), done: false, page, base: None, lim, deadline, skip: 0, retry_at: 0 }
+        Scan { net: Net::new(client, &page), mark: Mark::default(), done: false, page, base: None, lim, deadline, skip: 0, retry_at: 0 }
     }
 
     /// Read `html` from where the last call stopped, until `end`. `more`: the document is still on its way, so `html` may stop in the
