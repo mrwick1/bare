@@ -129,9 +129,9 @@ fn nested_timers_get_the_four_ms_clamp_from_level_six() {
 fn bad_callbacks_are_explicit() {
     big(|| {
         let mut b = browser();
-        assert_eq!(js(&mut b, "setTimeout('x = 1', 0)"), "unsupported:setTimeout with a string callback (eval)");
-        assert_eq!(js(&mut b, "setInterval('x = 1', 0)"), "unsupported:setInterval with a string callback (eval)");
-        assert_eq!(js(&mut b, "setTimeout(5, 0)"), "unsupported:setTimeout with a non-function callback");
+        assert_eq!(js(&mut b, "setTimeout('x = 1', 0)"), "throw:NotSupportedError:setTimeout with a string callback (eval)");
+        assert_eq!(js(&mut b, "setInterval('x = 1', 0)"), "throw:NotSupportedError:setInterval with a string callback (eval)");
+        assert_eq!(js(&mut b, "setTimeout(5, 0)"), "throw:NotSupportedError:setTimeout with a non-function callback");
         assert_eq!(js(&mut b, "setTimeout()"), "throw:TypeError:Failed to execute 'setTimeout' on 'Window': 1 argument required, but only 0 present.");
         assert_eq!(js(&mut b, "setTimeout.call({}, function () {}, 0)"), "throw:TypeError:Illegal invocation");
         assert_eq!(js(&mut b, "typeof setTimeout.call(undefined, function () {}, 0)"), "number");
@@ -175,12 +175,11 @@ fn a_limit_in_a_task_stops_the_pump_and_no_more_js_runs() {
         assert!(matches!(b.advance_time(5.0, 10), Err(Error::Limit(LimitKind::Steps))));
         assert!(matches!(b.advance_time(5.0, 10), Err(Error::Limit(LimitKind::Steps))));
         assert_eq!(js(&mut b, "log.length"), "0");
-        // Unsupported inside a task also stops the pump
+        // A gate inside a task throws: that task ends and the pump goes on (`docs/internal/design-unsupported-throws.md`)
         let mut b = browser();
         js(&mut b, "var log = []; setTimeout(function () { setTimeout('1') }, 0); setTimeout(function () { log.push('after') }, 1)");
-        assert!(matches!(b.advance_time(5.0, 10), Err(Error::Unsupported(_))));
-        assert!(matches!(b.advance_time(5.0, 10), Err(Error::Unsupported(_))));
-        assert_eq!(js(&mut b, "log.length"), "0");
+        b.advance_time(5.0, 10).expect("the pump goes on");
+        assert_eq!(js(&mut b, "log.length"), "1");
     });
 }
 
@@ -641,13 +640,12 @@ fn a_limit_in_a_resumed_class_method_is_sticky_and_replays_no_effect() {
 }
 
 #[test]
-fn an_async_callback_that_hits_a_gate_stops_the_pump_with_unsupported() {
+fn an_async_callback_that_hits_a_gate_rejects_and_the_pump_goes_on() {
     big(|| {
         let mut b = browser();
         js(&mut b, "var log = []; setTimeout(async function () { await null; log.push('a'); setTimeout('1'); log.push('never'); }, 0); setTimeout(function () { log.push('later'); }, 1); 0");
-        assert!(matches!(b.advance_time(5.0, 10), Err(Error::Unsupported(_))));
-        assert!(matches!(b.advance_time(5.0, 10), Err(Error::Unsupported(_))));
-        assert_eq!(js(&mut b, "log.join()"), "a");
+        b.advance_time(5.0, 10).expect("the pump goes on");
+        assert_eq!(js(&mut b, "log.join()"), "a,later");
     });
 }
 

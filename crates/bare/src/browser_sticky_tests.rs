@@ -69,7 +69,8 @@ fn the_window_draws_the_stuck_boxes_as_chrome_does() {
 #[test]
 fn a_sticky_box_inside_an_inline_box_that_is_not_atomic_is_unsupported() {
     let mut b = browser("<!doctype html><body style='margin:0'><span id=a style='position:sticky;top:0'>x</span>", 400.0, 300.0);
-    assert!(matches!(b.run_script("document.getElementById('a').getBoundingClientRect().top"), Err(Error::Unsupported(_))));
+    let r = b.run_script("document.getElementById('a').getBoundingClientRect().top");
+    assert!(crate::browser_unsupported_throws_tests::is_gate(&mut b, r));
 }
 
 /// A wheel scroll draws the list again and never lays out again, with sticky boxes too (they are one more offset at draw time).

@@ -213,13 +213,13 @@ fn set_attribute_node_attaches_the_same_object_or_fails_loudly() {
         ok(&mut b, &format!("var sv = document.createElementNS('{SVG}', 'svg'), na = document.createAttributeNS('{XLINK}', 'xlink:href'); na.value = '#t'; sv.setAttributeNodeNS(na); [sv.getAttributeNS('{XLINK}', 'href'), na.prefix, na.localName, na.namespaceURI, sv.attributes[0] === na].join()"), format!("#t,xlink,href,{XLINK},true"));
         // a different prefix for an existing namespace and local name is not faked
         let r = js(&mut b, &format!("var na3 = document.createAttributeNS('{XLINK}', 'x:href'); sv.setAttributeNode(na3)"));
-        assert!(r.starts_with("unsupported:setAttributeNode of an attribute with the namespace and local name"), "{r}");
+        assert!(r.starts_with("throw:NotSupportedError:setAttributeNode of an attribute with the namespace and local name"), "{r}");
         ok(&mut b, "[sv.attributes.length, sv.attributes[0] === na, na.ownerElement === sv, na3.ownerElement].join()", "1,true,true,");
         // errors
         ok(&mut b, "try { document.createAttribute('a b') } catch (e) { e.name }", "InvalidCharacterError");
         ok(&mut b, "try { document.createAttributeNS(null, 'x:y') } catch (e) { e.name }", "NamespaceError");
         let r = js(&mut b, "document.createAttributeNS('urn:other', 'x:y')");
-        assert!(r.starts_with("unsupported:createAttributeNS with a namespace other than none"), "{r}");
+        assert!(r.starts_with("throw:NotSupportedError:createAttributeNS with a namespace other than none"), "{r}");
         ok(&mut b, "try { el.setAttributeNode({}) } catch (e) { e.name + ':' + e.message }", "TypeError:parameter 1 is not of type 'Attr'");
     });
 }
@@ -273,12 +273,12 @@ fn text_is_utf8_and_a_lone_surrogate_is_refused() {
         ok(&mut b, "var el = document.createElement('div'); el.setAttribute('data-é', '日本😀'); var a = el.attributes[0]; [a.name, a.value, a.value.length, el.attributes.getNamedItem('data-é') === a].join()", "data-é,日本😀,4,true");
         ok(&mut b, "a.value = 'ü'; el.getAttribute('data-é')", "ü");
         let r = js(&mut b, "a.value = '\\ud800'");
-        assert!(r.starts_with("unsupported:lone surrogate"), "{r}");
+        assert!(r.starts_with("throw:NotSupportedError:lone surrogate"), "{r}");
         ok(&mut b, "a.value", "ü");
         let r = js(&mut b, "document.createAttribute('x\\ud800')");
-        assert!(r.starts_with("unsupported:lone surrogate"), "{r}");
+        assert!(r.starts_with("throw:NotSupportedError:lone surrogate"), "{r}");
         let r = js(&mut b, "el.attributes.getNamedItem('\\udc00')");
-        assert!(r.starts_with("unsupported:lone surrogate"), "{r}");
+        assert!(r.starts_with("throw:NotSupportedError:lone surrogate"), "{r}");
         // a detached attribute value with a pair round trips
         ok(&mut b, "var d = document.createAttribute('d'); d.value = '\\ud83d\\ude00'; d.value.length + ':' + d.value.charCodeAt(0)", "2:55357");
     });

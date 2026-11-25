@@ -79,7 +79,7 @@ fn direction_inheritance_css_and_dir_attribute() {
 fn dir_auto_and_bdi_are_gated_not_guessed() {
     let mut b = at("<!doctype html><html><body><div id=a dir=auto><p id=p>x</p></div><div dir=auto><i dir=ltr id=l></i></div><bdi id=bd>x</bdi><span id=n>y</span></body></html>");
     let d = |id: &str| format!("getComputedStyle(document.getElementById('{id}')).direction");
-    let gate = "unsupported:direction depends on dir=auto or bdi (the text decides it)";
+    let gate = "throw:NotSupportedError:direction depends on dir=auto or bdi (the text decides it)";
     assert_eq!(js(&mut b, &d("a")), gate);
     assert_eq!(js(&mut b, &d("p")), gate);
     assert_eq!(js(&mut b, &d("bd")), gate);
@@ -220,8 +220,8 @@ fn writes_are_no_modification_allowed() {
 fn used_values_that_layout_does_not_keep_are_gated_and_layout_limits_end_the_read() {
     // A percent padding of a grid item needs the grid area, and an auto margin of an item of a wrapping flex container needs the free space of its line.
     let mut b = at("<body style='margin:0'><div style='display:grid;width:200px'><i id=g style='display:block;padding-left:10%'></i></div><div style='display:flex;flex-wrap:wrap'><i id=f style='display:block;margin-left:auto'></i></div></body>");
-    assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('g')).paddingLeft"), "unsupported:a percent padding or margin of a grid item (the grid area is not kept)");
-    assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('f')).marginLeft"), "unsupported:an auto margin of a grid item or of an item of a wrapping flex container (the free space of its line is not kept)");
+    assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('g')).paddingLeft"), "throw:NotSupportedError:a percent padding or margin of a grid item (the grid area is not kept)");
+    assert_eq!(js(&mut b, "getComputedStyle(document.getElementById('f')).marginLeft"), "throw:NotSupportedError:an auto margin of a grid item or of an item of a wrapping flex container (the free space of its line is not kept)");
     // A px value needs no layout, so it is never gated.
     let mut b = at("<body style='margin:0'><div style='display:grid;width:200px'><i id=g style='display:block;padding-left:10px;margin-left:5px'></i></div></body>");
     assert_eq!(js(&mut b, "var g = getComputedStyle(document.getElementById('g')); g.paddingLeft + g.marginLeft + g.width"), "10px5px185px");
@@ -289,7 +289,7 @@ fn supported_names_only_and_gates_for_unavailable_values() {
     assert_eq!(js(&mut b, "document.body.style.setProperty('--gap', ' 8px '); cs.getPropertyValue('--gap') + '|' + cs.getPropertyValue('--none') + '|'"), "8px||");
     // `length` and `item` list sorted supported longhands, then custom properties.
     assert_eq!(js(&mut b, "cs.length > 50 && cs.item(0) === '-webkit-border-horizontal-spacing' && cs.item(cs.length) === '' && cs.item(cs.length - 1)"), "--gap");
-    assert_eq!(js(&mut b, "cs.cssText"), "unsupported:computed cssText (CSSOM and browsers differ; not faked)");
+    assert_eq!(js(&mut b, "cs.cssText"), "throw:NotSupportedError:computed cssText (CSSOM and browsers differ; not faked)");
     assert_eq!(js(&mut b, "cs.parentRule"), "null");
 }
 
@@ -475,7 +475,7 @@ const EXT: &str = "<!doctype html><html><head><link rel=stylesheet href='a.css'>
 fn external_sheets_are_ordered_and_missing_ones_are_gated() {
     let mut b = at(EXT);
     js(&mut b, "var cs = getComputedStyle(document.getElementById('a')); 0");
-    let gate = "unsupported:computed style needs an external stylesheet that the embedder has not supplied (Browser::style_availability lists them)";
+    let gate = "throw:NotSupportedError:computed style needs an external stylesheet that the embedder has not supplied (Browser::style_availability lists them)";
     assert_eq!(missing(&b), ["a.css", "b.css"]);
     assert_eq!(js(&mut b, "cs.color"), gate);
     assert_eq!(js(&mut b, "cs.direction"), gate);
@@ -527,7 +527,7 @@ fn a_pending_sheet_adds_no_rules_when_the_driver_loads_it_later() {
     assert_eq!(js(&mut b, "cs.display"), "flex");
     // If the sheet that the link had is gone, the read is a gate again.
     assert!(b.remove_external_stylesheet("a.css"));
-    assert!(js(&mut b, "cs.display").starts_with("unsupported:computed style needs an external stylesheet"));
+    assert!(js(&mut b, "cs.display").starts_with("throw:NotSupportedError:computed style needs an external stylesheet"));
     // A second driver with `false` is strict again.
     b.set_pending_sheets(false);
     js(&mut b, "document.head.children[0].setAttribute('href', 'b.css'); 0");

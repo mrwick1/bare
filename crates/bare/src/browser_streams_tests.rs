@@ -230,7 +230,7 @@ fn explicit_gates_are_unsupported_and_nothing_is_ignored() {
             ("new ReadableStream({}).tee()", "ReadableStream tee and async iteration"),
         ] {
             let mut b2 = mk();
-            assert_eq!(js(&mut b2, src), format!("unsupported:{what}"), "{src}");
+            assert_eq!(js(&mut b2, src), format!("throw:NotSupportedError:{what}"), "{src}");
         }
         // A size that is not callable is a TypeError (as in the standard), not a gate.
         assert!(js(&mut b, "new ReadableStream({}, { size: 3 })").starts_with("throw:TypeError"));
@@ -464,7 +464,7 @@ fn unsupported_pipe_operations_poison_the_custom_stream_layer() {
         let mut b = mk();
         assert_eq!(js(&mut b, "var ctl, s = new ReadableStream({ start(c) { ctl = c; } }); 0"), "0");
         let first = js(&mut b, "s.tee()");
-        assert!(first.starts_with("unsupported:"));
+        assert!(first.starts_with("throw:NotSupportedError:"));
         assert_eq!(js(&mut b, "ctl.enqueue('must not queue')"), first);
         assert_eq!(b.stream_stats().queued_chunks, 0);
     });

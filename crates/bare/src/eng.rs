@@ -218,6 +218,8 @@ pub trait Ops<E: Eng>: Sized {
     fn gc_due(& self) -> bool;
     fn api_err<'s>(&mut self, e: Fault<E>) -> bare_js_api::Error<'s>;
     fn api_unerr(&mut self, e: bare_js_api::Error<'_>) -> Fault<E>;
+    /// A host call ended with `Abort::Unsupported`. True when it is a gate, not a heap error: then the saved fault is cleared.
+    fn take_gate(&mut self) -> bool;
     fn h_set_proto(&mut self, o: E::Obj, proto: Option<E::Obj>) -> Result<bool, Fault<E>>;
     fn h_get_proto(&mut self, o: E::Obj) -> Result<Option<E::Obj>, Fault<E>>;
     fn h_peek_own(&mut self, o: E::Obj, key: E::Key) -> Result<Option<Prop<E>>, Fault<E>>;
