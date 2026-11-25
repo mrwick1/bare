@@ -189,6 +189,8 @@ mod browser_web_api_tests;
 #[cfg(test)]
 mod browser_gaps_tests;
 #[cfg(test)]
+mod browser_query_item_tests;
+#[cfg(test)]
 mod browser_caches_tests;
 #[cfg(test)]
 mod browser_sw_tests;

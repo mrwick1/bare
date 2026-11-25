@@ -177,6 +177,9 @@ struct Table {
     entries: Vec<Entry>,
     /// Made at the first probe of a table of more than `SCAN_MAX` entries. It has room for twice the entries.
     index: OnceCell<Index>,
+    /// The slots of `index` that are not empty (live or `DELETED`). A probe stops only at an empty slot, so `push` makes a new index before
+    /// they pass half of it.
+    filled: Cell<u32>,
     /// Dictionary only: deleted slots to reuse, and the number of `TOMB` entries.
     free: Vec<u32>,
     tombs: u32,
@@ -185,7 +188,7 @@ struct Table {
 
 impl Table {
     fn new(entries: Vec<Entry>, dict: bool) -> Table {
-        Table { entries, index: OnceCell::new(), free: Vec::new(), tombs: 0, dict }
+        Table { entries, index: OnceCell::new(), filled: Cell::new(0), free: Vec::new(), tombs: 0, dict }
     }
 
     #[inline]
@@ -206,6 +209,7 @@ impl Table {
             }
             slots[i] = p as u32 + 1;
         }
+        self.filled.set((self.entries.len() - self.tombs as usize) as u32);
         slots
     }
 
@@ -229,7 +233,7 @@ impl Table {
     fn push(&mut self, e: Entry) {
         self.entries.push(e);
         let Some(slots) = self.index.get_mut() else { return };
-        if self.entries.len() * 2 > slots.len() {
+        if self.entries.len() * 2 > slots.len() || (self.filled.get() as usize + 1) * 2 > slots.len() {
             self.index = OnceCell::new();
             return;
         }
@@ -237,6 +241,9 @@ impl Table {
         let mut i = slot_of(e.bits(), mask);
         while slots[i] != 0 && slots[i] != DELETED {
             i = (i + 1) & mask;
+        }
+        if slots[i] == 0 {
+            self.filled.set(self.filled.get() + 1);
         }
         slots[i] = self.entries.len() as u32;
     }
@@ -972,3 +979,7 @@ impl Site {
 #[cfg(test)]
 #[path = "shapes_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "shapes_dict_churn_tests.rs"]
+mod dict_churn_tests;
