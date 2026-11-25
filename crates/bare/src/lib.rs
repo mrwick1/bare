@@ -80,6 +80,8 @@ mod browser_subtle;
 #[cfg(test)]
 mod browser_subtle_tests;
 #[cfg(test)]
+mod browser_subtle_sign_tests;
+#[cfg(test)]
 mod browser_web_tests;
 #[cfg(test)]
 mod browser_web_filelist_tests;
