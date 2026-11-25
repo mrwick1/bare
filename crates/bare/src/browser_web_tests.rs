@@ -343,3 +343,6 @@ fn blobs_are_bounded_and_collected() {
         assert_eq!(js(&mut b, "JSON.stringify(itr.next().value)"), "[\"a\",\"b\"]");
     });
 }
+
+#[path = "browser_web_float16_tests.rs"]
+mod float16_tests;

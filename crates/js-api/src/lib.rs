@@ -530,6 +530,7 @@ pub enum Elem {
     BI64,
     BU64,
     Data,
+    F16,
 }
 
 /// A typed array or `DataView` ([`Scope::view`]). `len` is in elements (bytes for a `DataView`); `offset` is in bytes.
