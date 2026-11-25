@@ -192,6 +192,7 @@ pub(crate) fn intrinsic(rt: &mut Realm) -> (Obj, Obj) {
             indexed("includes", 1, search, 1),
             m("join", 1, join),
             m("map", 1, map),
+            m("filter", 1, filter),
             m("forEach", 1, for_each),
             m("reduce", 1, reduce),
             m("sort", 1, sort),
@@ -675,6 +676,29 @@ fn map(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     Ok(result)
 }
 
+fn filter(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+    let (src, len) = validated(rt, this)?;
+    let cb = arg(args, 0);
+    callback(rt, cb)?;
+    let this_arg = arg(args, 1);
+    let mut kept = Vec::new();
+    for i in 0..len {
+        let value = item(rt, src, i)?;
+        let selected = rt.call_function(cb, this_arg, &[value, Realm::num(i as f64), this])?;
+        if Realm::truthy(selected) {
+            if kept.try_reserve(1).is_err() {
+                return range(rt, "out of memory");
+            }
+            kept.push(value);
+        }
+    }
+    let (result, dst) = for_species(rt, this, src.elem.expect("typed array"), kept.len())?;
+    for (i, value) in kept.into_iter().enumerate() {
+        finish(rt, dst, i, value)?;
+    }
+    Ok(result)
+}
+
 fn for_each(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let (src, len) = validated(rt, this)?;
     let cb = arg(args, 0);
@@ -829,3 +853,7 @@ pub(crate) fn iterator_next(rt: &mut Realm, this: Value, _args: &[Value]) -> R<V
 #[cfg(test)]
 #[path = "bi_bigint_typed_tests.rs"]
 mod bigint_tests;
+
+#[cfg(test)]
+#[path = "bi_typed_filter_tests.rs"]
+mod filter_tests;
