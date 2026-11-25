@@ -105,6 +105,11 @@ const fn currency_key(code: &str) -> [u8; 3] {
     [*a, *b, *c]
 }
 
+/// The currency codes of the symbol table, sorted.
+pub fn currencies() -> impl Iterator<Item = &'static str> {
+    SYMBOLS.iter().map(|s| s.0)
+}
+
 /// The digits after the point of currency `code` (2 unless the table says otherwise).
 pub fn currency_digits(code: &str) -> u8 {
     let Ok(key) = <[u8; 3]>::try_from(code.as_bytes()) else { return 2 };
