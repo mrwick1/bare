@@ -463,13 +463,35 @@ pub fn load(targets: &[Target], limits: &Limits) -> Loaded {
     let mut retained = 0;
     let mut results = Vec::with_capacity(targets.len());
     for target in targets {
-        let result = fetch(&mut client, target, limits, deadline, retained);
+        let result = fetch(&mut client, target, limits, deadline, retained, None);
         if let Ok(r) = &result {
             retained += r.text.len();
         }
         results.push(result);
     }
     Loaded { results, retained }
+}
+
+/// HTTPS and local HTTP targets may receive fetch metadata. Local HTTP is also allowed from an HTTPS page.
+pub(crate) fn potentially_trustworthy(u: &Url) -> bool {
+    u.scheme == bare_url::Scheme::Https || u.host == "localhost" || u.host.ends_with(".localhost") || u.host.trim_matches(['[', ']']).parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+/// The least-trusted site relation in the URL list. A later redirect cannot make it safer.
+pub(crate) fn metadata_site(doc: &Url, target: &Url, previous: &'static str) -> &'static str {
+    if previous == "cross-site" {
+        return previous;
+    }
+    if doc.same_origin(target) {
+        return previous;
+    }
+    let same_site = doc.scheme == target.scheme && (doc.host == target.host || {
+        // PSL lookup is for DNS hosts only. Numeric addresses are sites of their own.
+        let ip = |h: &str| h.starts_with('[') || h.parse::<std::net::IpAddr>().is_ok();
+        !ip(&doc.host) && !ip(&target.host) && psl::domain_str(&doc.host)
+            .zip(psl::domain_str(&target.host)).is_some_and(|(a, b)| a == b)
+    });
+    if same_site { "same-site" } else { "cross-site" }
 }
 
 fn redirect_target(current: &Url, location: &str) -> Result<Url, LoadError> {
@@ -479,21 +501,38 @@ fn redirect_target(current: &Url, location: &str) -> Result<Url, LoadError> {
 }
 
 /// Download one target with the caps of `limits`. `retained` is the text that the caller already keeps (the total cap),
-/// and `deadline` ends the work. The caller counts fetches.
-pub fn fetch(client: &mut http::Client, target: &Target, limits: &Limits, deadline: Instant, retained: usize) -> Result<Resource, LoadError> {
+/// and `deadline` ends the work. The caller counts fetches. `doc` is the URL of the document that asks: the request then sends the
+/// Fetch Metadata (`Sec-Fetch-Site`, `-Mode`, `-Dest`) to a potentially trustworthy URL, as Chrome does.
+pub fn fetch(client: &mut http::Client, target: &Target, limits: &Limits, deadline: Instant, retained: usize, doc: Option<&Url>) -> Result<Resource, LoadError> {
     if Instant::now() >= deadline {
         return Err(LoadError::TimedOut);
     }
     let mut current = Url { scheme: target.url.scheme, host: target.url.host.clone(), port: target.url.port, path: target.url.path.clone() };
     let mut redirects = 0;
+    let mut site = "same-origin";
+    let dest = match target.expect { Expect::Script | Expect::Module => "script", Expect::Style => "style", Expect::Opaque => "empty" };
     let mut streamed = loop {
         if Instant::now() >= deadline { return Err(LoadError::TimedOut); }
         let cors_origin = client.embedder_document().filter(|doc| target.expect == Expect::Module && !doc.same_origin(&current))
             .map(|doc| Url { scheme: doc.scheme, host: doc.host.clone(), port: doc.port, path: String::new() }.to_string());
-        let headers = [("Origin", cors_origin.as_deref().unwrap_or("")), ("Sec-Fetch-Mode", "cors")];
+        let mut headers = Vec::with_capacity(4);
+        if let Some(o) = &cors_origin {
+            headers.push(("Origin", o.as_str()));
+        }
+        let metadata = doc.filter(|_| potentially_trustworthy(&current));
+        if let Some(d) = metadata {
+            site = metadata_site(d, &current, site);
+            headers.push(("Sec-Fetch-Site", site));
+        }
+        if cors_origin.is_some() || metadata.is_some() {
+            headers.push(("Sec-Fetch-Mode", if cors_origin.is_some() { "cors" } else { "no-cors" }));
+        }
+        if metadata.is_some() {
+            headers.push(("Sec-Fetch-Dest", dest));
+        }
         let mut req = http::Request::get(&current);
+        req.headers = &headers;
         if cors_origin.is_some() {
-            req.headers = &headers;
             req.cookies.on = false;
         }
         // Modules use a separate network path for CORS responses so a response
@@ -1177,7 +1216,7 @@ mod tests {
         let server = serve(|_| Reply::js("x"));
         let target = Target { expect: Expect::Script, url: Url::parse(&server.url("/x")).unwrap() };
         let limits = Limits { max_resource_bytes: usize::MAX, max_total_bytes: usize::MAX, ..Limits::default() };
-        let got = fetch(&mut http::Client::new(), &target, &limits, Instant::now() + Duration::from_secs(2), 0).unwrap();
+        let got = fetch(&mut http::Client::new(), &target, &limits, Instant::now() + Duration::from_secs(2), 0, None).unwrap();
         assert_eq!(got.text, "x");
     }
 
@@ -1189,7 +1228,7 @@ mod tests {
         assert_eq!(redirect_target(&from, "/next").unwrap().scheme, bare_url::Scheme::Https);
         let server = serve(|p| if p == "/a" { Reply::new(302, None, "").header("Location", "/b") } else { Reply::js("x") });
         let target = Target { expect: Expect::Script, url: Url::parse(&server.url("/a")).unwrap() };
-        let got = fetch(&mut http::Client::new(), &target, &Limits::default(), Instant::now() + Duration::from_secs(2), 0).unwrap();
+        let got = fetch(&mut http::Client::new(), &target, &Limits::default(), Instant::now() + Duration::from_secs(2), 0, None).unwrap();
         assert_eq!(got.text, "x");
         assert_eq!((server.hits("/a"),server.hits("/b")),(1,1));
     }
