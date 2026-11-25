@@ -78,7 +78,7 @@ impl Realm {
     /// machine would collect with the stack of the caller out of the roots.
     pub(crate) fn run_code(&mut self, ci: usize, native: bool) -> R<Value> {
         let (f, g) = (self.new_function(ci, Value::UNDEFINED), self.global.value());
-        if native && self.nested_too_deep() {
+        if native && self.stack_full() {
             return Err(self.nest_limit());
         }
         if native { self.call_function(f, g, &[]) } else { self.a_call(f, g, &[]) }

@@ -57,8 +57,8 @@ impl Realm {
     }
 
     fn proxy_op<T>(&mut self, proxy: Obj, name: &str, run: impl FnOnce(&mut Self, Obj, Value, Option<Value>) -> R<T>) -> R<T> {
-        if self.proxy_depth >= 100 {
-            return Err(self.error(ErrKind::Range, "maximum Proxy depth exceeded"));
+        if self.stack_full() {
+            return Err(self.error(ErrKind::Range, "maximum call stack size exceeded"));
         }
         if self.fuel == 0 {
             return Err(crate::interp::STOP);
@@ -67,17 +67,17 @@ impl Realm {
         let target = self.proxy_target(proxy)?;
         let handler = proxy.slot(&self.shapes, HANDLER);
         self.proxy_depth += 1;
-        let result = (|| {
-            let trap = self.get_named(handler, name)?;
+        let result = self.grow(|this| {
+            let trap = this.get_named(handler, name)?;
             let trap = if trap.is_undefined() || trap.is_null() {
                 None
             } else if Self::obj(trap).is_some_and(|o| o.is_callable()) {
                 Some(trap)
             } else {
-                return self.type_error("Proxy trap must be callable");
+                return this.type_error("Proxy trap must be callable");
             };
-            run(self, target, handler, trap)
-        })();
+            run(this, target, handler, trap)
+        });
         self.proxy_depth -= 1;
         result
     }

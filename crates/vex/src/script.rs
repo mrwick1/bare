@@ -502,6 +502,10 @@ mod bi_uri_tests;
 mod array_push_tests;
 
 #[cfg(test)]
+#[path = "reenter_depth_tests.rs"]
+mod reenter_depth_tests;
+
+#[cfg(test)]
 #[path = "script_key_add_tests.rs"]
 mod key_add_tests;
 

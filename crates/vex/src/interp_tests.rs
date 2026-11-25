@@ -567,7 +567,7 @@ fn get_field_on_primitives_and_on_undefined() {
     assert_eq!(call1(&mut vm, f, a), n(2));
     assert_eq!(call1(&mut vm, f, n(5)), Value::UNDEFINED);
     match vm.call(f, Value::UNDEFINED, &[Value::UNDEFINED]) {
-        Err(Exit::Throw(e)) => assert_eq!(vm.realm.error_text(e), "TypeError: cannot read properties of undefined (reading 'length')"),
+        Err(Exit::Throw(e)) => assert_eq!(vm.realm.error_text(e), "TypeError: Cannot read properties of undefined (reading 'length')"),
         other => panic!("{other:?}"),
     }
 }
@@ -911,7 +911,7 @@ fn a_thrown_error_is_an_object_with_a_name_and_a_message() {
     f.e(Op::Ret, 2, 0, 0);
     f.handlers.push((g, g + 1, h, 2, 0));
     let (vm, v) = run_main(&sh, vec![f.build()]);
-    assert_eq!(vm.realm.error_text(v), "TypeError: cannot read properties of undefined (reading 'x')");
+    assert_eq!(vm.realm.error_text(v), "TypeError: Cannot read properties of undefined (reading 'x')");
 }
 
 // ---- collection ----
