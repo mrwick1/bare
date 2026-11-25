@@ -96,7 +96,7 @@ fn argument_conversion_and_required_argument() {
         ok(&mut b, "try { document.getElementsByName() } catch (e) { e.name }", "TypeError");
         ok(&mut b, "try { document.getElementsByName(Symbol()) } catch (e) { e.name }", "TypeError");
         ok(&mut b, "try { document.getElementsByName({ toString: function () { throw new RangeError('boom') } }) } catch (e) { e.name }", "RangeError");
-        ok(&mut b, "try { document.getElementsByName('\\ud800') } catch (e) { 'threw' }", "unsupported:lone surrogate in a DOM string (the native document is UTF-8)");
+        ok(&mut b, "try { document.getElementsByName('\\ud800') } catch (e) { e.name }", "NotSupportedError");
         // Only a Document is `this`.
         ok(&mut b, "try { document.getElementsByName.call({}, 'x') } catch (e) { e.name }", "TypeError");
         ok(&mut b, "try { document.getElementsByName.call(document.body, 'x') } catch (e) { e.name }", "TypeError");
@@ -299,7 +299,7 @@ fn a_borrowed_document_stops_the_script_instead_of_an_empty_list() {
         let doc = b.document();
         let _guard = doc.borrow_mut();
         let r = js(&mut b, "L[0]");
-        assert!(r.starts_with("other:") || r.starts_with("unsupported:") || r.starts_with("throw"), "{r}");
+        assert!(r.starts_with("other:") || r.starts_with("throw:NotSupportedError:") || r.starts_with("throw"), "{r}");
         assert_ne!(r, "undefined");
     });
 }

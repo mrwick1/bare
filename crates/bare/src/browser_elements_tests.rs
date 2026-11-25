@@ -197,7 +197,7 @@ fn document_title_reads_and_sets_the_title_element() {
 
 #[test]
 fn only_a_fragment_without_a_host_can_be_inserted() {
-    let want = "unsupported:inserting a ShadowRoot or DocumentFragment as a node (fragment insertion)";
+    let want = "throw:NotSupportedError:inserting a ShadowRoot or DocumentFragment as a node (fragment insertion)";
     let mut b = browser("<template id=t><p>1</p></template><div id=host></div>");
     // a shadow root stays an error, however it is inserted
     for call in ["h.appendChild(r)", "h.insertBefore(r, null)", "h.append(r)", "h.append('x', r)", "h.appendChild(document.createElement('i')); h.replaceChild(r, h.lastChild)", "h.lastChild.replaceWith(r)"] {

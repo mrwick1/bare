@@ -278,14 +278,14 @@ fn a_limit_in_a_promise_reaction_of_a_handler_is_sticky_and_replays_nothing() {
 }
 
 #[test]
-fn unsupported_in_a_handler_stops_the_dispatch() {
+fn unsupported_in_a_handler_throws_and_the_dispatch_goes_on() {
     big(|| {
         let mut b = browser();
         js(&mut b, "var i = document.getElementById('i'), log = []; i.oninput = function () { log.push('h'); document.createElementNS('urn:x', 'a'); log.push('never') }; i.addEventListener('input', function () { log.push('after') });");
         let i = b.query("#i").unwrap().unwrap();
-        assert!(matches!(b.type_text(i, "a"), Err(Error::Unsupported(_))));
-        assert_eq!(js(&mut b, "log.join()"), "h");
-        assert!(b.take_reports().is_empty());
+        b.type_text(i, "a").expect("the page goes on");
+        assert_eq!(js(&mut b, "log.join()"), "h,after");
+        assert!(b.take_reports().iter().any(|r| r.message.contains("NotSupportedError")));
     });
 }
 

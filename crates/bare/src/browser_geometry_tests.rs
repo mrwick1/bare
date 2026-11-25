@@ -131,7 +131,7 @@ fn part(t: &str) -> SheetPart {
 fn external_sheets_embedded_sheets_and_inline_styles_cascade_in_order() {
     let mut b = at("<!doctype html><html><head><link rel=stylesheet href=a.css><style>#t { height: 30px } #x { width: 1px }</style></head><body><div id=t></div><div id=x style='width: 12px'></div></body></html>");
     // a linked sheet that is not supplied is a gate, never "no rules"
-    let gate = "unsupported:computed style needs an external stylesheet that the embedder has not supplied (Browser::style_availability lists them)";
+    let gate = "throw:NotSupportedError:computed style needs an external stylesheet that the embedder has not supplied (Browser::style_availability lists them)";
     assert_eq!(size(&mut b, "t"), gate);
     b.set_external_stylesheet("a.css", vec![part("#t { width: 77px; height: 11px }")]).unwrap();
     // the embedded sheet comes later in the document, so its height wins

@@ -18,7 +18,9 @@ fn page(body: &str) -> Browser {
 }
 
 fn unsupported(body: &str, src: &str) -> bool {
-    matches!(page(body).run_script(src), Err(Error::Unsupported(_)))
+    let mut b = page(body);
+    let r = b.run_script(src);
+    crate::browser_unsupported_throws_tests::is_gate(&mut b, r)
 }
 
 #[test]
@@ -34,7 +36,8 @@ fn click_gates_default_actions_that_are_not_built() {
 fn click_gate_comes_before_any_event() {
     let mut b = page("<input id=x type=checkbox>");
     b.run_script("var n = 0; document.addEventListener('click', function () { n++ })").unwrap();
-    assert!(matches!(b.run_script("document.getElementById('x').click()"), Err(Error::Unsupported(_))));
+    let r = b.run_script("document.getElementById('x').click()");
+    assert!(crate::browser_unsupported_throws_tests::is_gate(&mut b, r));
     let n = b.run_script("n").unwrap();
     assert_eq!(b.it.display(n), "0");
 }

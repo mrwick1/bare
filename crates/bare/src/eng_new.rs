@@ -450,6 +450,13 @@ impl Ops<New> for Realm {
     fn api_unerr(&mut self, e: bare_js_api::Error<'_>) -> Fault<New> {
         fault(self, e)
     }
+    fn take_gate(&mut self) -> bool {
+        if matches!(HOST_FAULT.get(), Some(Fault::Heap(_))) {
+            return false;
+        }
+        HOST_FAULT.set(None);
+        true
+    }
     fn h_set_proto(&mut self, o: NV, proto: Option<NV>) -> Result<bool, Fault<New>> {
         run(self, |r| {
             let ol = lc(r, o.0);

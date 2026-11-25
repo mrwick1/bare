@@ -304,7 +304,7 @@ fn conversions_run_before_the_block_is_read() {
     assert_eq!(js(&mut b, "s.color = { toString: function () { return 'blue'; } }; s.color"), "blue");
     // Lone surrogates cannot be stored.
     let r = js(&mut b, "s.setProperty('color', '\\uD800')");
-    assert!(r.starts_with("unsupported:"), "{r}");
+    assert!(r.starts_with("throw:NotSupportedError:"), "{r}");
     assert_eq!(js(&mut b, "a.getAttribute('style')"), "width: 1px; color: blue;");
 }
 
@@ -603,7 +603,7 @@ fn lone_surrogates_are_refused_at_every_entry() {
         "s.setProperty('--a', '\\uD800')", "s.setProperty('\\uD800', '')", "a.style = '\\uD800'", "s.color = {toString: function () { return 'x\\uD800y'; }}",
     ] {
         let r = js(&mut b, src);
-        assert!(r.starts_with("unsupported:"), "{src}: {r}");
+        assert!(r.starts_with("throw:NotSupportedError:"), "{src}: {r}");
         assert_eq!(attr(&mut b), "color: red;", "{src}");
     }
     // A valid pair is stored and read back.

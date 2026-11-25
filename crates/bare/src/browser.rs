@@ -913,7 +913,10 @@ impl<E: Eng> Dom<E> {
 impl<'p, E: Eng> bare_js_api::Host<E::Vm> for Dom<E> {
     #[inline]
     fn call<'s>(&self, s: &mut bare_js_api::Scope<'s, E::Vm>, id: u32, this: bare_js_api::Local<'s>, args: bare_js_api::Args<'s>, is_new: bool) -> Result<bare_js_api::Local<'s>, bare_js_api::Error<'s>> {
-        self.call_scoped(s, id, this, args, is_new)
+        match self.call_scoped(s, id, this, args, is_new) {
+            Err(bare_js_api::Error::Abort(bare_js_api::Abort::Unsupported(what))) if s.engine().take_gate() => Err(self.gate_throw(s, what)),
+            r => r,
+        }
     }
 
     fn trace(&self, key: u32, t: &mut bare_js_api::Tracer<'_, E::Raw>) {
@@ -1170,6 +1173,17 @@ impl<'p, E: Eng> bare_js_api::Host<E::Vm> for Dom<E> {
         let raw = |it: &mut E::Vm, l: &[bare_js_api::Local<'s>]| l.iter().map(|&l| bare_js_api::Engine::raw(it, l)).collect::<Vec<_>>();
         let (unhandled, handled) = (raw(it, unhandled), raw(it, handled));
         crate::browser_rejection::notify(self, it, &unhandled, &handled, dropped).map_err(|e| it.api_err(e))
+    }
+}
+
+impl<E: Eng> Dom<E> {
+    /// A gate that a script reached: the console gets the feature and the script gets a `NotSupportedError` that it can catch
+    /// (`docs/internal/design-unsupported-throws.md`). The page goes on.
+    #[cold]
+    #[inline(never)]
+    fn gate_throw<'s>(&self, s: &mut bare_js_api::Scope<'s, E::Vm>, what: &'static str) -> bare_js_api::Error<'s> {
+        crate::browser_console::push_text(self, s.engine(), crate::browser_console::ConsoleLevel::Error, &format!("bare: not supported: {what}"));
+        self.dom_err_s(s, "NotSupportedError", what)
     }
 }
 

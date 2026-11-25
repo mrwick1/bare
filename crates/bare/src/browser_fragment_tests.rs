@@ -177,15 +177,14 @@ fn unsupported_contexts_fail_before_any_change() {
         let mut b = browser();
         let before = b.document().borrow().len();
         let r = js(&mut b, &format!("var e = document.createElement('{name}'); var k = e.appendChild(document.createElement('i')); e.innerHTML = '<b>x</b>'; 'done'"));
-        assert!(r.starts_with("other:Unsupported"), "{name}: {r}");
+        assert!(r.starts_with("throw:NotSupportedError"), "{name}: {r}");
         // The old child is still there. Only the two nodes of the script were made.
         assert_eq!(b.document().borrow().len(), before + 2, "{name}");
         assert_eq!(js(&mut b, "[e.childNodes.length, k.parentNode === e].join()"), "1,true", "{name}");
-        // Unsupported is not a JS exception: try/catch/finally cannot see it.
+        // A gate is a `NotSupportedError`: try/catch/finally see it (`docs/internal/design-unsupported-throws.md`).
         let mut b = browser();
-        let r = js(&mut b, &format!("var fin = 0, caught = 0; try {{ document.createElement('{name}').innerHTML = ''; }} catch (x) {{ caught = 1 }} finally {{ fin = 1 }}"));
-        assert!(r.starts_with("other:Unsupported"), "{name}: {r}");
-        assert_eq!(js(&mut b, "fin + ',' + caught"), "0,0", "{name}");
+        js(&mut b, &format!("var fin = 0, caught = 0; try {{ document.createElement('{name}').innerHTML = ''; }} catch (x) {{ caught = 1 }} finally {{ fin = 1 }}"));
+        assert_eq!(js(&mut b, "fin + ',' + caught"), "1,1", "{name}");
     }
 }
 
@@ -211,7 +210,7 @@ fn markup_the_tree_builder_cannot_read_correctly_is_refused_before_any_change() 
     for html in ["<p>a</p><frameset><b></b></frameset>", "<frameset><frame></frameset>", "<div><frame>"] {
         let mut b = browser();
         let r = js(&mut b, &format!("var e = document.getElementById('a'); e.innerHTML = '{html}'"));
-        assert!(r.starts_with("other:Unsupported"), "{html}: {r}");
+        assert!(r.starts_with("throw:NotSupportedError"), "{html}: {r}");
         assert_eq!(js(&mut b, "e.childNodes.length + e.firstChild.id"), "1p", "{html}");
     }
     // These words are plain text or comments, so they are fine.
@@ -299,7 +298,7 @@ fn tostring_runs_before_the_target_is_read_and_may_change_it() {
     // A lone surrogate cannot be stored: Unsupported, and nothing changed (valid pairs are fine).
     assert_eq!(js(&mut b, "d.innerHTML = '\\ud83d\\ude00'; d.textContent.length"), "2");
     let r = js(&mut b, "var kept2 = d.firstChild; d.innerHTML = 'a\\ud800b'");
-    assert!(r.starts_with("other:Unsupported"), "{r}");
+    assert!(r.starts_with("throw:NotSupportedError"), "{r}");
     assert_eq!(js(&mut b, "[d.firstChild === kept2, d.textContent.length].join()"), "true,2");
 }
 
@@ -512,13 +511,13 @@ fn outer_html_setter_uses_the_parent_as_context() {
 fn outer_html_setter_gates_what_the_parser_does_not_build() {
     let mut b = browser();
     let got = js(&mut b, "var p = document.createElement('html'), e = document.createElement('p'); p.appendChild(e); e.outerHTML = 'x'; p.childNodes.length");
-    assert!(got.starts_with("other:Unsupported"), "{got}");
+    assert!(got.starts_with("throw:NotSupportedError"), "{got}");
     // a table parent is a table context
     assert_eq!(js(&mut b, "var p = document.createElement('tr'), e = document.createElement('p'); p.appendChild(e); e.outerHTML = '<td>x</td>'; p.innerHTML"), "<td>x</td>");
     // The tree is unchanged after a gate.
     js(&mut b, "var p = document.createElement('html'), e = document.createElement('p'); p.appendChild(e); e.outerHTML = 'x'");
     assert_eq!(js(&mut b, "[p.firstChild === e, e.parentNode === p].join()"), "true,true");
-    assert!(js(&mut b, "var d = document.createElement('div'); d.innerHTML = '<a></a>'; d.firstChild.outerHTML = '<frameset></frameset>'").starts_with("other:Unsupported"));
+    assert!(js(&mut b, "var d = document.createElement('div'); d.innerHTML = '<a></a>'; d.firstChild.outerHTML = '<frameset></frameset>'").starts_with("throw:NotSupportedError"));
     assert_eq!(js(&mut b, "document.createElement('noscript').outerHTML"), "<noscript></noscript>");
 }
 
