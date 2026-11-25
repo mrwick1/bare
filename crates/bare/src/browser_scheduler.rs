@@ -148,6 +148,8 @@ pub(crate) enum Task<E: Eng> {
     AbortTimeout(E::Obj),
     /// The `error` event of a `Worker` that did not start (`browser_worker.rs`). The task roots its worker.
     Worker(E::Obj),
+    /// The `error` event of a `Notification` (`browser_notification.rs`). The task roots its notification.
+    Notification(E::Obj),
     /// The delivery of `IntersectionObserver` entries (`browser_intersection.rs`). At most one is queued.
     Notify,
     /// An idle period (`browser_idle.rs`). At most one is queued.
@@ -361,6 +363,7 @@ enum Run<E: Eng> {
     Scroll,
     AbortTimeout(E::Obj),
     Worker(E::Obj),
+    Notification(E::Obj),
     Notify,
     Idle,
     IdleTimeout(u32),
@@ -426,7 +429,7 @@ impl<E: Eng> Dom<E> {
         }
         // A port with a peer in another page that listens is a root: a message can come at any time.
         out.extend(s.ports.iter().filter(|(_, p)| !p.keys.is_empty() || p.remote.is_some() && p.enabled).map(|(&o, _)| E::obj_raw(o)));
-        out.extend(s.tasks.values().filter_map(|t| if let Task::AbortTimeout(o) | Task::Worker(o) = t { Some(E::obj_raw(*o)) } else { None }));
+        out.extend(s.tasks.values().filter_map(|t| if let Task::AbortTimeout(o) | Task::Worker(o) | Task::Notification(o) = t { Some(E::obj_raw(*o)) } else { None }));
         // The window is a port too (`queue_window`), but its wrapper has no `Owner::Port`, so `Dom::trace` never reaches
         // `sched_trace_port` for it. Trace its queue here, so a queued `message` keeps its data (a rope, say) through a collection.
         if let Some(&g) = self.global.get()
@@ -496,7 +499,7 @@ impl<E: Eng> Dom<E> {
         let ports = &s.ports;
         s.tasks.retain(|_, t| match t {
             Task::Deliver(o) => ports.contains_key(o),
-            Task::Timer(_) | Task::Select(_) | Task::SelectionChange(_) | Task::DocSelectionChange | Task::Render | Task::Scroll | Task::AbortTimeout(_) | Task::Worker(_) | Task::Notify | Task::Idle | Task::IdleTimeout(_) | Task::Media(..) | Task::Motion(..) | Task::Toggle(..) => true,
+            Task::Timer(_) | Task::Select(_) | Task::SelectionChange(_) | Task::DocSelectionChange | Task::Render | Task::Scroll | Task::AbortTimeout(_) | Task::Worker(_) | Task::Notification(_) | Task::Notify | Task::Idle | Task::IdleTimeout(_) | Task::Media(..) | Task::Motion(..) | Task::Toggle(..) => true,
         });
         s.queued = s.ports.values().map(|p| p.inbox.len()).sum();
         s.queued_bytes = s.ports.values().flat_map(|p| p.inbox.iter().map(|m| m.bytes)).sum();
@@ -716,6 +719,7 @@ impl<E: Eng> Dom<E> {
             Task::IdleTimeout(id) => Run::IdleTimeout(id),
             Task::AbortTimeout(o) => Run::AbortTimeout(o),
             Task::Worker(o) => Run::Worker(o),
+            Task::Notification(o) => Run::Notification(o),
             Task::Deliver(port) => match s.ports.get_mut(&port) {
                 Some(p) if p.keys.front() == Some(&key) => {
                     p.keys.pop_front();
@@ -861,6 +865,11 @@ impl<E: Eng> Dom<E> {
             Run::Worker(o) => it.host_scope_o(|it| {
                 it.charge_o(1)?;
                 self.worker_failed(it, o)?;
+                it.host_checkpoint().map(|_| ())
+            }),
+            Run::Notification(o) => it.host_scope_o(|it| {
+                it.charge_o(1)?;
+                self.notification_failed(it, o)?;
                 it.host_checkpoint().map(|_| ())
             }),
             Run::Deliver { port, error, data, ports, from } => {

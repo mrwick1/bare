@@ -362,6 +362,8 @@ pub(crate) enum Owner<E: Eng> {
     Port(E::Obj),
     /// A `Worker`, an event target with entries in `browser_worker.rs`.
     Worker(E::Obj),
+    /// A `Notification`, an event target with an entry in `browser_notification.rs`.
+    Notification(E::Obj),
     /// A `MediaQueryList`, an event target with an entry in `browser_platform.rs`.
     Mql(E::Obj),
     /// The window object of a frame, an event target with entries in `browser_frames.rs`.
@@ -395,7 +397,7 @@ impl<E: Eng> Owner<E> {
     fn target(self) -> Option<Target<E>> {
         match self {
             Owner::Target(t) => Some(t),
-            Owner::Xhr(o) | Owner::Abort(o) | Owner::Port(o) | Owner::Worker(o) | Owner::Mql(o) | Owner::Frame(o) => Some(Target::Obj(o)),
+            Owner::Xhr(o) | Owner::Abort(o) | Owner::Port(o) | Owner::Worker(o) | Owner::Notification(o) | Owner::Mql(o) | Owner::Frame(o) => Some(Target::Obj(o)),
             Owner::Event(_) | Owner::TokIter(_) | Owner::Resize(_) | Owner::Mo(_) | Owner::Io(_) | Owner::Walk(_) | Owner::Range(_) | Owner::Sel(_) | Owner::Attr(_) | Owner::Web(_) | Owner::Geom(_) | Owner::Idle(_) | Owner::Wasm(_) | Owner::Ctl(_) | Owner::Computed(_) | Owner::Source(_) | Owner::Reserved | Owner::Url(_) | Owner::Params(_) | Owner::Iter(_) | Owner::Loc(_) | Owner::Fetch(_) | Owner::Stream(_) => None,
         }
     }
@@ -892,6 +894,8 @@ pub struct Dom<E: Eng = New> {
     /// `Worker` (`browser_worker.rs`).
     pub(crate) worker: crate::browser_worker::WorkerHost<E>,
     pub(crate) broadcast: crate::browser_broadcast::BroadcastHost<E>,
+    /// `Notification` (`browser_notification.rs`).
+    pub(crate) notification: crate::browser_notification::NotificationHost<E>,
     /// Freeing the nodes of dead trees (`browser_reclaim.rs`).
     pub(crate) reclaim: crate::browser_reclaim::Reclaim,
 }
@@ -930,6 +934,7 @@ impl<E: Eng> Dom<E> {
         crate::browser_geom::roots(self, out);
         crate::browser_worker::roots(self, out);
         crate::browser_broadcast::roots(self, out);
+        crate::browser_notification::roots(self, out);
     }
 }
 
@@ -946,7 +951,7 @@ impl<'p, E: Eng> bare_js_api::Host<E::Vm> for Dom<E> {
         let st = self.st.borrow();
         let owner = st.owners.get(key);
         match owner {
-            Some(owner @ (Owner::Target(_) | Owner::Xhr(_) | Owner::Abort(_) | Owner::Port(_) | Owner::Worker(_) | Owner::Mql(_) | Owner::Frame(_))) => {
+            Some(owner @ (Owner::Target(_) | Owner::Xhr(_) | Owner::Abort(_) | Owner::Port(_) | Owner::Worker(_) | Owner::Notification(_) | Owner::Mql(_) | Owner::Frame(_))) => {
                 let Some(tg) = owner.target() else { return };
                 if st.n_listeners != 0 {
                     for l in st.listeners.get(&tg).into_iter().flatten() {
@@ -1044,6 +1049,7 @@ impl<'p, E: Eng> bare_js_api::Host<E::Vm> for Dom<E> {
                     ports_died = true;
                 }
                 Some(Owner::Worker(o)) => crate::browser_worker::forget(self, o),
+                Some(Owner::Notification(o)) => crate::browser_notification::forget(self, o),
                 Some(Owner::Mql(o)) => crate::browser_platform::forget_mql(self, o),
                 Some(Owner::Frame(o)) => crate::browser_frames::forget_window(self, o),
                 Some(Owner::TokIter(o)) => crate::browser_platform::forget_iter(self, o),
@@ -1725,6 +1731,7 @@ impl<E: Eng> Dom<E> {
         crate::browser_editing::install(self, s)?;
         crate::browser_worker::install(self, s)?;
         crate::browser_broadcast::install(self, s)?;
+        crate::browser_notification::install(self, s)?;
         crate::browser_xhr::install(self, s)?;
         crate::browser_encoding::install(self, s)?;
         crate::browser_web::install(self, s)?;
@@ -2159,6 +2166,7 @@ impl<E: Eng> Browser<E> {
             wasm: Default::default(),
             worker: Default::default(),
             broadcast: Default::default(),
+            notification: Default::default(),
             reclaim: Default::default(),
         });
         E::install_dom(&mut it, &dom)?;
