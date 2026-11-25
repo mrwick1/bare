@@ -1,6 +1,6 @@
 # Design: a persistent profile
 
-Status: draft for owner review (2026-11-25). No code is built yet.
+Status: approved (owner, 2026-11-25): build option A in steps 1-5, one PR each.
 
 ## 1. Problem
 
@@ -114,8 +114,9 @@ The WhatsApp check after step 3: link once, close bare, open the profile, see th
 - Open time of a profile with 50 MB of IndexedDB, and peak RSS.
 - The WhatsApp journey: time from open to chat list with a saved profile.
 
-## 11. Questions for the owner
+## 11. Owner answers (2026-11-25)
 
-1. Encrypt the profile files? Chrome encrypts cookies with a key from the keyring. The plan above relies on file modes only,
-   as `state.json` does today.
-2. Default profile: should `open` with no `profile` stay in memory only (as now), or use a profile named `default`?
+1. Encryption: no. File modes only (0700 and 0600), as `state.json` today.
+2. Default profile: `open` with no `profile` uses the profile `default`, as a normal browser does. Only the entry points
+   (bare-mcp, bare-drive, bare) do this; `Browser::new` in tests stays in memory. When `default` is locked by another process
+   (two agents at once), the open goes on in memory and says so in its receipt, so a second agent is not blocked.

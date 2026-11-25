@@ -15,6 +15,7 @@ mod browser_dom;
 mod browser_dom_old;
 mod browser_fragment;
 mod browser_idb;
+mod profile_record;
 mod browser_shadow;
 mod browser_events;
 mod browser_error_event;
@@ -234,6 +235,8 @@ mod browser_idb_tx_tests;
 mod browser_idb_cursor_tests;
 #[cfg(test)]
 mod browser_idb_store_tests;
+#[cfg(test)]
+mod profile_record_tests;
 #[cfg(test)]
 mod browser_idb_many_requests_tests;
 #[cfg(test)]
