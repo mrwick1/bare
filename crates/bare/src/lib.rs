@@ -258,6 +258,8 @@ mod browser_idb_many_requests_tests;
 mod browser_idb_reread_tests;
 #[cfg(test)]
 mod browser_idb_log_tests;
+#[cfg(test)]
+mod browser_idb_worker_tests;
 pub mod resources;
 mod browser_loader;
 mod browser_shims;

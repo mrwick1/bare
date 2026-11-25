@@ -1,7 +1,8 @@
 # Design: a persistent profile
 
 Status: approved (owner, 2026-11-25): build option A in steps 1-5, one PR each. Step 3 (the IndexedDB log) is built: see section 8.2 and
-`progress/2026-11-25-profile-indexeddb-log.md`.
+`progress/2026-11-25-profile-indexeddb-log.md`. Step 4 (IndexedDB in thread workers) is built: see section 8.3 and
+`progress/2026-11-25-indexeddb-workers.md`.
 
 ## 1. Problem
 
@@ -127,6 +128,12 @@ each one gets a tag and its fields:
   after the lock is free.
 - A put of a `WebAssembly.Module` into a store of a profile fails with `DataCloneError` as a request error. The standard throws at
   the call. The host checks the record after the call returns.
+
+### 8.3 As built in step 4 (2026-11-25)
+
+- A worker on the page thread used the store and the log of its page before this step. A worker on its own thread now uses the
+  same stores (`IdbShare`), so its commits go to the same logs through the same code path. The `Saver` of the page writes them.
+- The concurrency model and its limits are in section 10 of `design-indexeddb-store.md`.
 
 ## 9. Steps, one PR each
 
