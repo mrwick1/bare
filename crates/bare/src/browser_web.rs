@@ -1613,13 +1613,18 @@ pub(crate) enum WebClone {
     /// A `Blob` or a `File`: the bytes are shared, not copied.
     Blob { bytes: std::sync::Arc<[u8]>, ty: String, file: Option<(String, f64)> },
     Key(crate::browser_subtle::Key),
+    /// A `WebAssembly.Module`: the compiled code is shared, not copied.
+    WasmModule(wasmi::Module),
 }
 
-/// The data of `o` if it is a `Blob`, a `File` or a `CryptoKey`, with its byte cost.
+/// The data of `o` if it is a `Blob`, a `File`, a `CryptoKey` or a `WebAssembly.Module`, with its byte cost.
 pub(crate) fn clone_out<E: Eng>(d: &Dom<E>, o: E::Obj) -> Option<(Box<dyn std::any::Any + Send>, usize)> {
     if let Some(b) = d.web.s.borrow().blobs.get(&o) {
         let n = b.bytes.len() + b.ty.len() + b.file.as_ref().map_or(0, |f| f.0.len());
         return Some((Box::new(WebClone::Blob { bytes: b.bytes.clone(), ty: b.ty.clone(), file: b.file.clone() }), n));
+    }
+    if let Some(m) = crate::browser_wasm::module_data(d, o) {
+        return Some((Box::new(WebClone::WasmModule(m)), 64));
     }
     let k = crate::browser_subtle::key_data(d, o)?;
     Some((Box::new(WebClone::Key(k)), 64))
@@ -1634,5 +1639,6 @@ pub(crate) fn clone_in<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, data: &WebClon
             new_blob_s(d, s, proto, BlobData { bytes: bytes.clone(), ty: ty.clone(), file: file.clone() })
         }
         WebClone::Key(k) => crate::browser_subtle::new_key(d, s, k.clone()),
+        WebClone::WasmModule(m) => crate::browser_wasm::module_obj(d, s, m),
     }
 }

@@ -638,6 +638,7 @@ impl<E: Eng> Browser<E> {
     fn child_browser(&self, cfg: &Cfg, of: Of<E::Obj>, url: &str, html: &str) -> Result<(Browser<E>, f64), String> {
         let doc = tree::parse(html);
         let mut b = Browser::<E>::make(doc, cfg.browser, cfg.env.eval, cfg.env.heap).map_err(|_| "the realm could not be made".to_string())?;
+        crate::browser_wasm::adopt_engine(&b.dom, crate::browser_wasm::engine(&self.dom));
         // The size of the iframe box in the parent when a layout exists, else the size of a default iframe.
         let box_size = if let Of::Frame(node) = of { self.dom.cached_box_size(node) } else { None };
         let (w, h) = box_size.unwrap_or((300.0, 150.0));
