@@ -62,6 +62,14 @@ fn isolation_request_comes_from_the_final_document_response() {
 fn a_navigated_document_enforces_corp_and_shares_memory_with_its_worker() {
     std::thread::Builder::new().stack_size(32 << 20).spawn(|| {
         let third_party = serve(|path| {
+            if path == "/module" {
+                return Reply::js("globalThis.moduleAllowed = true;")
+                    .header("Access-Control-Allow-Origin", "*");
+            }
+            if path == "/module-blocked" {
+                return Reply::js("globalThis.moduleBlocked = false;")
+                    .header("Cross-Origin-Resource-Policy", "cross-origin");
+            }
             if path == "/redirect" {
                 return Reply::new(302, None, "").header("Location", "/blocked")
                     .header("Cross-Origin-Resource-Policy", "cross-origin");
@@ -81,12 +89,15 @@ fn a_navigated_document_enforces_corp_and_shares_memory_with_its_worker() {
         let allowed = third_party.url("/allowed");
         let redirect = third_party.url("/redirect");
         let cors = third_party.url("/cors");
+        let module = third_party.url("/module");
+        let blocked_module = third_party.url("/module-blocked");
         let server = serve(move |path| {
             match path {
                 "/page" => Reply::new(200, Some("text/html"), format!(r#"
                     <script>
                       var blocked = true, allowed = false, denied = false, corsAllowed = false;
                       var frameAllowed = false, frameBlocked = true;
+                      var moduleAllowed = false, moduleBlocked = true;
                       addEventListener("message", e => {{
                         if (e.data === "allowed-frame") frameAllowed = true;
                         if (e.data === "blocked-frame") frameBlocked = false;
@@ -94,6 +105,8 @@ fn a_navigated_document_enforces_corp_and_shares_memory_with_its_worker() {
                     </script>
                     <script src="{blocked}"></script><script src="{redirect}"></script><script src="{allowed}"></script>
                     <iframe src="/allowed-frame"></iframe><iframe src="/blocked-frame"></iframe>
+                    <script type="module" src="{module}"></script>
+                    <script type="module" src="{blocked_module}"></script>
                     <script>
                       var shared = new SharedArrayBuffer(4);
                       var view = new Int32Array(shared), done = false;
@@ -139,7 +152,7 @@ fn a_navigated_document_enforces_corp_and_shares_memory_with_its_worker() {
             let deadline = Instant::now() + std::time::Duration::from_secs(5);
             loop {
                 if let Some(AnyBrowser::New(browser)) = session.browser()
-                    && browser.run_script("crossOriginIsolated && blocked && allowed && done && denied && corsAllowed && frameAllowed && frameBlocked").ok().and_then(|v| v.as_bool()) == Some(true)
+                    && browser.run_script("crossOriginIsolated && blocked && allowed && done && denied && corsAllowed && frameAllowed && frameBlocked && moduleAllowed && moduleBlocked").ok().and_then(|v| v.as_bool()) == Some(true)
                 {
                     break;
                 }
@@ -148,7 +161,7 @@ fn a_navigated_document_enforces_corp_and_shares_memory_with_its_worker() {
                     let state = session.browser().and_then(|browser| match browser {
                         AnyBrowser::New(browser) => {
                             use crate::eng::Ops;
-                            browser.run_script("[crossOriginIsolated, typeof blocked, typeof allowed, typeof done, typeof worker, globalThis.blocked, globalThis.allowed, globalThis.done, globalThis.denied, globalThis.corsAllowed, globalThis.frameAllowed, globalThis.frameBlocked].join(',')").ok().map(|v| browser.it.display_o(v))
+                            browser.run_script("[crossOriginIsolated, typeof blocked, typeof allowed, typeof done, typeof worker, globalThis.blocked, globalThis.allowed, globalThis.done, globalThis.denied, globalThis.corsAllowed, globalThis.frameAllowed, globalThis.frameBlocked, globalThis.moduleAllowed, globalThis.moduleBlocked].join(',')").ok().map(|v| browser.it.display_o(v))
                         }
                     });
                     panic!("isolated document did not finish (live={live}, state={state:?})");

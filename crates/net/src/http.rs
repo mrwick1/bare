@@ -468,6 +468,10 @@ impl Client {
         self.require_corp.is_some()
     }
 
+    pub fn embedder_document(&self) -> Option<&Url> {
+        self.require_corp.as_deref()
+    }
+
     /// Check the network response that supplies an isolated worker's entry script.
     pub fn require_isolated_worker_entry(&mut self, entry: Url) {
         self.worker_entry = Some(Arc::new(entry));
@@ -491,13 +495,16 @@ impl Client {
             return Ok(());
         }
         let cors = metadata("sec-fetch-mode") == Some("cors") || plan.method == Method::Options && metadata("access-control-request-method").is_some();
-        if cors && let (Some(origin), Some(allowed)) = (metadata("origin"), response.single_header("access-control-allow-origin")) {
-            let credentialed = plan.cookies.on || plan.headers.iter().any(|(key, _)| key.eq_ignore_ascii_case("authorization"));
-            if (allowed == origin || allowed == "*" && !credentialed)
-                && (!credentialed || response.single_header("access-control-allow-credentials") == Some("true"))
-            {
-                return Ok(());
+        if cors {
+            if let (Some(origin), Some(allowed)) = (metadata("origin"), response.single_header("access-control-allow-origin")) {
+                let credentialed = plan.cookies.on;
+                if (allowed == origin || allowed == "*" && !credentialed)
+                    && (!credentialed || response.single_header("access-control-allow-credentials") == Some("true"))
+                {
+                    return Ok(());
+                }
             }
+            return Err("the resource is blocked by CORS".into());
         }
         match response.single_header("cross-origin-resource-policy") {
             Some("cross-origin") => Ok(()),
