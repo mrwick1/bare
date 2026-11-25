@@ -138,4 +138,6 @@ allow:Atomics.pause
 allow:Atomics.waitAsync
 allow:Float32Array test/built-ins/Atomics/
 allow:Float64Array test/built-ins/Atomics/
+allow:Uint16Array test/built-ins/Atomics/
+allow:Uint8ClampedArray test/built-ins/Atomics/
 allow:growable-sharedarraybuffer
