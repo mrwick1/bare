@@ -264,6 +264,16 @@ impl Ops<New> for Realm {
         })
     }
     fn run_script_o(&mut self, source: &str) -> Result<Value, Fault<New>> {
+        // TMP-REWRITE probe: never merge.
+        let mut owned = None;
+        if let Ok(f) = std::env::var("TMP_REWRITE_FILE") {
+            let mut t = source.to_string();
+            for l in std::fs::read_to_string(f).unwrap_or_default().lines() {
+                if let Some((a, b)) = l.split_once('\t') { if t.contains(a) { eprintln!("TMP-REWRITE hit {}", &a[..a.len().min(40)]); t = t.replacen(a, b, 1); } }
+            }
+            owned = Some(t);
+        }
+        let source = owned.as_deref().unwrap_or(source);
         run_v(self, |r| r.run_script(source))
     }
     fn call_scoped_o(&mut self, f: Value, this: Value, args: &[Value], scope: &[NV]) -> Result<Value, Fault<New>> {

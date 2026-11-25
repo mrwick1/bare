@@ -73,7 +73,7 @@ impl NodeId {
         self.0.get() as usize - 1
     }
 
-    fn from_index(index: usize) -> NodeId {
+    pub fn from_index(index: usize) -> NodeId {
         NodeId(NonZeroU32::new(u32::try_from(index + 1).expect("more than 4 billion nodes")).unwrap())
     }
 }

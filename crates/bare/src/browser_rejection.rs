@@ -105,6 +105,7 @@ fn reason_text<E: Eng>(d: &Dom<E>, it: &mut E::Vm, reason: E::Raw) -> String {
 pub(crate) fn notify<E: Eng>(d: &Dom<E>, it: &mut E::Vm, unhandled: &[E::Raw], handled: &[E::Raw], dropped: u32) -> R<E, ()> {
     for &p in unhandled {
         let Some(PState::Rejected(reason)) = it.promise_status(p) else { continue };
+        eprintln!("TMP-REJ {}", reason_text(d, it, reason)); // TMP-PROBE
         let not_canceled = if listens(d, "unhandledrejection") {
             let ev = build(d, it, "unhandledrejection", [false, true, false], p, reason)?;
             d.dispatch(it, Target::Window, ev)?

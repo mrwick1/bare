@@ -87,6 +87,7 @@ impl<E: Eng> Dom<E> {
         }
     }
 
+    pub(crate) fn reclaim_stats_probe(&self) -> (bool, bool, usize, u32, u32, u64) { let r=&self.reclaim; (r.due.get(), r.compact.get(), r.base.get(), r.misses.get(), r.runs.get(), r.freed.get()) }
     /// Wrappers died: the nodes of their trees may be free.
     pub(crate) fn reclaim_wanted(&self) {
         self.reclaim.due.set(true);
@@ -98,10 +99,19 @@ impl<E: Eng> Dom<E> {
     #[inline]
     pub(crate) fn reclaim(&self, collect: bool) -> usize {
         let r = &self.reclaim;
-        if !(r.due.get() || r.always.get() || r.compact.get()) {
+        if !(r.due.get() || r.always.get() || r.compact.get() || self.reclaim_grown()) {
             return 0;
         }
         self.reclaim_walk(collect)
+    }
+
+    /// The arena grew enough since the last walk (the gate of `reclaim_walk`). A removed tree that no wrapper names is dead without a collect.
+    #[inline]
+    fn reclaim_grown(&self) -> bool {
+        let r = &self.reclaim;
+        let base = r.base.get();
+        let floor = if cfg!(test) { r.floor.get() } else { FLOOR };
+        self.doc.try_borrow().is_ok_and(|d| d.arena_bytes() >= base + (floor.max(base / 4) << r.misses.get()))
     }
 
     #[inline]

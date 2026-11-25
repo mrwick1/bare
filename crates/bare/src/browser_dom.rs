@@ -147,6 +147,7 @@ impl<E: Eng> Dom<E> {
         if doc.live_len() + nodes > self.lim.max_nodes {
             return Err(self.lim("dom-nodes"));
         }
+        if text > 40_000 && doc.live_text_bytes() > 8 << 20 { thread_local!(static N: std::cell::Cell<u32> = const { std::cell::Cell::new(0) }); if N.with(|n| { n.set(n.get() + 1); n.get() == 3 }) { eprintln!("TMP-BT {}", std::backtrace::Backtrace::force_capture()); } }
         // The list holds the live text and the dead text, so a list under the cap is one test.
         let all = doc.text_bytes().saturating_add(text);
         if all > self.lim.max_text_bytes {
@@ -160,7 +161,14 @@ impl<E: Eng> Dom<E> {
     #[cold]
     #[inline(never)]
     fn text_room(&self, doc: &Document, text: usize, all: usize) -> R<E, ()> {
-        if doc.live_text_bytes().saturating_add(text) > self.lim.max_text_bytes || all > self.lim.max_text_bytes.saturating_mul(2) {
+        if doc.live_text_bytes().saturating_add(text) > self.lim.max_text_bytes || all > self.lim.max_text_bytes.saturating_mul(2) { // TMP-CAP probe
+            let st = self.st.borrow(); let (mut dt, mut wr, mut db, mut big) = (0usize, 0usize, 0usize, Vec::new());
+            for i in 0..doc.len() { let Some(id) = doc.node_at(i) else { continue }; if doc.is_free(id) { continue; }
+                if let bare_html::dom::NodeData::Text(sp) = doc.data(id) { let l = doc.text(*sp).len();
+                    if doc.parent(id).is_none() { dt += 1; db += l; if st.by_node.contains_key(&id) { wr += 1; } }
+                    if l > 200_000 { big.push((l, doc.parent(id).is_none(), doc.text(*sp).chars().take(80).collect::<String>())); } } }
+            big.sort_by(|a, b| b.0.cmp(&a.0)); big.truncate(6);
+            eprintln!("TMP-CAP live={} all={} want={} max={} ce={} recl={:?} det_text={dt} det_bytes={db} det_wrapped={wr} big={big:?}", doc.live_text_bytes(), all, text, self.lim.max_text_bytes, self.ce.on.get(), self.reclaim_stats_probe());
             return Err(self.lim("dom-text"));
         }
         self.compact_wanted(all);

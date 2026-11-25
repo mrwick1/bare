@@ -2500,6 +2500,25 @@ impl Vm {
                     Op::Jmp => jump!(true, next, sj!()),
                     Op::JmpBack => {
                         if realm.fuel == 0 {
+                            // TMP-FUEL: dump the frames where the budget ran out.
+                            {
+                                eprintln!("FUEL-PROBE");
+                                let (mut f, mut c, mut at) = (fp, ci as usize, pc);
+                                for _ in 0..14 {
+                                    let cd = &prog[c];
+                                    let off = cd.lines.iter().rev().find(|l| l.0 as usize <= at).map_or(0, |l| l.1);
+                                    let nm = if cd.fn_name == crate::bytecode::NO_NAME { String::new() } else { format!("{}", realm.text(cd.atoms[cd.fn_name as usize])) };
+                                    eprintln!("  FRAME ci={c} name={nm} off={off}");
+                                    if f < REC { break; }
+                                    let rec = f - REC;
+                                    let (Some(cp), Some(cc)) = (stack[rec + 3].as_int(), stack[rec + 5].as_int()) else { break };
+                                    let cc = cc as usize;
+                                    if cc >= prog.len() || rec < prog[cc].nregs as usize { break; }
+                                    f = rec - prog[cc].nregs as usize;
+                                    c = cc;
+                                    at = cp as usize;
+                                }
+                            }
                             return M::done(Err(Exit::Fuel));
                         }
                         realm.fuel -= 1;
@@ -2604,7 +2623,32 @@ impl Vm {
                         r!(a!()) = Value::bool(v);
                         pc = next;
                     }
-                    Op::Throw => { std::hint::cold_path(); throw!(r!(a!())) }
+                    Op::Throw => { std::hint::cold_path();
+                        // TMP-PROBE: dump the frames of a matching throw.
+                        {
+                            let tv = r!(a!());
+                            let msg = realm.get_named(tv, "message").ok().and_then(Realm::str_of).map(|s| format!("{}", realm.text(s))).unwrap_or_default();
+                            thread_local!(static SEEN: std::cell::RefCell<std::collections::HashSet<String>> = Default::default());
+                            if SEEN.with(|s| s.borrow_mut().insert(msg.clone())) {
+                                eprintln!("THROW-PROBE {}", msg.chars().take(120).collect::<String>());
+                                let (mut f, mut c, mut at) = (fp, ci as usize, pc);
+                                for _ in 0..6 {
+                                    let cd = &prog[c];
+                                    let off = cd.lines.iter().rev().find(|l| l.0 as usize <= at).map_or(0, |l| l.1);
+                                    let nm = if cd.fn_name == crate::bytecode::NO_NAME { String::new() } else { format!("{}", realm.text(cd.atoms[cd.fn_name as usize])) };
+                                    eprintln!("  FRAME ci={c} name={nm} off={off}");
+                                    if f < REC { break; }
+                                    let rec = f - REC;
+                                    let (Some(cp), Some(cc)) = (stack[rec + 3].as_int(), stack[rec + 5].as_int()) else { break };
+                                    let cc = cc as usize;
+                                    if cc >= prog.len() || rec < prog[cc].nregs as usize { break; }
+                                    f = rec - prog[cc].nregs as usize;
+                                    c = cc;
+                                    at = cp as usize;
+                                }
+                            }
+                        }
+                        throw!(r!(a!())) }
                     Op::ForInOpen => {
                         std::hint::cold_path();
                         let recv = r!(b!());

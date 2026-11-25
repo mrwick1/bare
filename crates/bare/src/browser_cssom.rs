@@ -938,6 +938,8 @@ fn insert<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, t: Local<'s>, a: Args<'s>) 
     if i > len {
         return Err(d.dom_err_s(s, "IndexSizeError", "Rule index is out of range"));
     }
+    // TMP-FELA probe.
+    if len % 1000 == 0 && len > 0 { eprintln!("TMP-FELA len={len} at={i} ctor={ctor} text={}", text.chars().take(90).collect::<String>()); }
     let parsed = parse_cssom(&text);
     if parsed.len() != 1 {
         return Err(d.dom_err_s(s, "SyntaxError", "Expected one CSS rule"));

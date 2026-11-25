@@ -2239,6 +2239,7 @@ impl<E: Eng> Browser<E> {
         ids.document = self.observe_document;
         let _context = bare_observe::process::enter(ids);
         let c = self.it.collect(extra)?;
+        { static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0); let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed); if n % 20 == 0 { eprintln!("TMP-COLLECT #{n} arena={}", self.dom.doc.try_borrow().map_or(0, |d| d.arena_bytes())); } }
         // Every collection may leave trees that no wrapper names.
         self.dom.reclaim_wanted();
         // The caller is at a safe point (no script runs, no host call is on the stack): the trees that lost their wrappers can go.

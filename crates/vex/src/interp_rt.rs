@@ -704,6 +704,8 @@ impl Realm {
     // ---- errors ----
 
     pub fn error(&mut self, kind: ErrKind, msg: &str) -> Value {
+        // TMP-PROBE: each distinct engine error message once.
+        { thread_local!(static SEEN: std::cell::RefCell<std::collections::HashSet<String>> = Default::default()); if SEEN.with(|s| s.borrow_mut().insert(msg.to_string())) { eprintln!("ERR-PROBE {:?} {}", kind as u8, msg.chars().take(200).collect::<String>()); } }
         let m = Str::from_str(&mut self.heap, msg).expect("memory");
         self.make_error(self.error_protos[kind as usize], Some(m.value()))
     }

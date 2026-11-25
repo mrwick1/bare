@@ -1927,6 +1927,7 @@ impl<E: Eng> Run<'_, E> {
                 did += n;
                 self.after_js()?;
             }
+            if self.res.rounds % 64 == 1 { eprintln!("TMP-ROUND r={} arena={} due={} split={}", self.res.rounds, self.dom.doc.try_borrow().map_or(0, |d| d.arena_bytes()), self.b.collect_due(), self.split); }
             if self.res.rounds.is_multiple_of(self.lim.collect_every.max(1)) || self.b.collect_due() {
                 self.b.collect(&[]).map_err(fatal_of)?;
             }
