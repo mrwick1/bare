@@ -1580,7 +1580,7 @@ pub(crate) fn query_selector_all<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this
     let n = d.nd_s(s, this)?;
     let text = d.arg_str_s(s, a, 0)?;
     let r = d.query_s(s, n, &text, true)?;
-    wrap_all_s(d, s, &r)
+    wrap_coll_s(d, s, &r)
 }
 
 /// Does the selector match `n`? The cost charged is an upper bound of the matcher's work.
