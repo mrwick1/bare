@@ -449,6 +449,8 @@ pub struct Document {
     slots: RefCell<Option<slots::Slots>>,
     // The slot assignment, made when it is read (`Document::assigned_nodes`) and dropped when `revision` moves.
     template_content: HashMap<u32, NodeId, BuildHasherDefault<Fnv>>,
+    // True once `create_document` made a `Document` node other than the root (`DOMParser`, `createHTMLDocument`).
+    more_docs: bool,
     // The `::before` and `::after` nodes of each element that has one, by `NodeId::index` of the element (`pseudo.rs`).
     pseudo_of: HashMap<u32, [Option<pseudo::Gen>; 2], BuildHasherDefault<Fnv>>,
     // The way back: the element and the side (`0` before, `1` after) of each `::before` and `::after` node.
@@ -961,6 +963,7 @@ impl Document {
             shadow_flags: HashMap::default(),
             slots: RefCell::new(None),
             template_content: HashMap::default(),
+            more_docs: false,
             pseudo_of: HashMap::default(),
             pseudo_hosts: HashMap::default(),
             watcher: None,
@@ -1465,7 +1468,14 @@ impl Document {
 
     /// A new `Document` node that is not the top of this tree: the host uses it for the inert document that owns the contents of the templates. It has no children.
     pub fn create_document(&mut self) -> NodeId {
+        self.more_docs = true;
         self.new_node(NodeData::Document)
+    }
+
+    /// True when the arena holds a `Document` node other than the root. A page with one document pays this check only.
+    #[inline]
+    pub fn has_more_documents(&self) -> bool {
+        self.more_docs
     }
 
     /// True when some `template` of this document has contents.
