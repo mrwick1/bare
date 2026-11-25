@@ -357,6 +357,8 @@ mod browser_img;
 #[cfg(test)]
 mod browser_img_tests;
 #[cfg(test)]
+mod images_blob_url_tests;
+#[cfg(test)]
 mod browser_media_tests;
 #[cfg(test)]
 mod browser_elements_tests;
