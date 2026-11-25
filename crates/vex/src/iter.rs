@@ -89,11 +89,15 @@ impl Realm {
     /// `GetIterator(v, sync)`: the iterator and its `next` method.
     #[cold]
     pub(crate) fn iter_open_generic(&mut self, v: Value) -> R<(Value, Value)> {
-        let m = if v.is_undefined() || v.is_null() { Value::UNDEFINED } else { self.get_prop(v, Key::Name(self.wk[crate::bi_symbol::ITERATOR]))? };
-        if !Realm::obj(m).is_some_and(|o| o.is_callable()) {
-            return self.type_error("the value is not iterable");
-        }
+        let Some(m) = self.iter_method(v)? else { return self.type_error("the value is not iterable") };
         self.iter_open_method(v, m)
+    }
+
+    /// The `Symbol.iterator` method of `v`, or `None` when `v` has none that can be called.
+    #[cold]
+    pub(crate) fn iter_method(&mut self, v: Value) -> R<Option<Value>> {
+        let m = if v.is_undefined() || v.is_null() { Value::UNDEFINED } else { self.get_prop(v, Key::Name(self.wk[crate::bi_symbol::ITERATOR]))? };
+        Ok(Realm::obj(m).is_some_and(|o| o.is_callable()).then_some(m))
     }
 
     pub(crate) fn iter_open_method(&mut self, v: Value, method: Value) -> R<(Value, Value)> {
