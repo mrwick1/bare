@@ -98,6 +98,11 @@ pub trait LazyCompile {
     fn source_of(&self, _ci: usize) -> Option<&str> {
         None
     }
+    /// The line and the column (1-based, the column in UTF-16 units) of the byte `off` of the source of the code `ci`, for a stack frame.
+    fn line_col(&self, ci: usize, off: usize) -> Option<(usize, usize)> {
+        let src = self.source_of(ci)?;
+        Some(crate::error_stack::Lines::new(src).get(src, off))
+    }
     /// The source text of the page that the code `ci` came from, for `Function.prototype.toString`. `None` for the prelude: its
     /// functions are built-ins, and their text is `[native code]`.
     fn page_source_of(&self, _ci: usize) -> Option<&str> {
