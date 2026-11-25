@@ -189,9 +189,11 @@ pub(crate) fn intrinsic(rt: &mut Realm) -> (Obj, Obj) {
             m("subarray", 2, subarray),
             m("slice", 2, slice),
             m("fill", 1, fill),
-            indexed("indexOf", 1, search, 0),
-            indexed("includes", 1, search, 1),
+            indexed("indexOf", 1, search::<false>, 0),
+            indexed("includes", 1, search::<false>, 1),
+            indexed("lastIndexOf", 1, search::<true>, 0),
             m("join", 1, join),
+            m("toLocaleString", 0, to_locale_string),
             m("map", 1, map),
             m("filter", 1, filter),
             m("forEach", 1, for_each),
@@ -203,7 +205,11 @@ pub(crate) fn intrinsic(rt: &mut Realm) -> (Obj, Obj) {
             m("findLastIndex", 1, find::<true, true>),
             m("reduce", 1, reduce::<false>),
             m("reduceRight", 1, reduce::<true>),
-            m("sort", 1, sort),
+            m("reverse", 0, reverse::<false>),
+            m("toReversed", 0, reverse::<true>),
+            m("sort", 1, sort::<false>),
+            m("toSorted", 1, sort::<true>),
+            m("with", 2, with),
             m("at", 1, at),
             indexed("keys", 0, iterator, 0),
             indexed("values", 0, iterator, 1),
@@ -293,9 +299,9 @@ impl Realm {
 
 pub(crate) fn typed_ctor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let elem = Element::from_id(native_param(rt));
-    let proto = instance_proto(rt)?;
     let v = arg(args, 0);
     let dest = if let Some(o) = Realm::obj(v) {
+        let proto = instance_proto(rt)?;
         match o.kind() {
             K_BUFFER => {
                 let view = rt.typed_view_from_args(o, elem, args)?;
@@ -327,7 +333,11 @@ pub(crate) fn typed_ctor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Valu
             }
         }
     } else {
+        if rt.nt.is_undefined() {
+            return rt.type_error("constructor requires new");
+        }
         let len = to_index(rt, v)?;
+        let proto = instance_proto(rt)?;
         rt.alloc_typed(proto, elem, len)?
     };
     Ok(dest.value())
@@ -389,13 +399,17 @@ fn make_len(rt: &mut Realm, c: Value, len: usize) -> R<(Value, View)> {
 fn for_species(rt: &mut Realm, this: Value, elem: Element, len: usize) -> R<(Value, View)> {
     let c = species_ctor(rt, this)?;
     if c.is_undefined() {
-        let proto = rt.buffer_intrinsic(elem.name());
-        let o = rt.alloc_typed(proto, elem, len)?;
-        return Ok((o.value(), View::of(o).expect("typed array")));
+        return same_type(rt, elem, len);
     }
     let (result, view) = make_len(rt, c, len)?;
     same_content(rt, elem, view.elem.expect("element"))?;
     Ok((result, view))
+}
+
+fn same_type(rt: &mut Realm, elem: Element, len: usize) -> R<(Value, View)> {
+    let proto = rt.buffer_intrinsic(elem.name());
+    let o = rt.alloc_typed(proto, elem, len)?;
+    Ok((o.value(), View::of(o).expect("typed array")))
 }
 
 fn same_content(rt: &mut Realm, src: Element, dst: Element) -> R<()> {
@@ -619,7 +633,7 @@ fn fill(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     Ok(this)
 }
 
-fn search(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+fn search<const REVERSE: bool>(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let includes = native_param(rt) != 0;
     let (v, len) = validated(rt, this)?;
     let target = arg(args, 0);
@@ -627,10 +641,22 @@ fn search(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     if len == 0 {
         return Ok(miss);
     }
-    let start = relative(rt, arg(args, 1), len, 0)?;
+    let (start, end) = if REVERSE {
+        let from = match args.get(1) {
+            Some(&value) => absolute_index(rt, value, len)?,
+            None => (len - 1) as f64,
+        };
+        if from < 0.0 {
+            return Ok(miss);
+        }
+        (0, (from as usize).saturating_add(1).min(len).min(v.len().unwrap_or(0)))
+    } else {
+        (relative(rt, arg(args, 1), len, 0)?, len)
+    };
     let elem = v.elem.expect("element");
     let big = Realm::big_of(target);
-    for i in start..len {
+    for offset in start..end {
+        let i = if REVERSE { end - 1 - offset } else { offset };
         let n = v.read(rt, i);
         let found = if let Some(bits) = n {
             if elem.is_big() {
@@ -674,6 +700,25 @@ fn join(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
                 _ => Realm::num_to_string(f64::from_bits(bits)),
             };
             out.extend(text.encode_utf16());
+        }
+    }
+    Ok(rt.make_units(&out))
+}
+
+fn to_locale_string(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+    let (src, len) = validated(rt, this)?;
+    let args = [arg(args, 0), arg(args, 1)];
+    let mut out = Vec::new();
+    for i in 0..len {
+        if i != 0 {
+            out.push(b',' as u16);
+        }
+        let value = item(rt, src, i)?;
+        if !value.is_undefined() {
+            let method = rt.get_named(value, "toLocaleString")?;
+            let result = rt.call_function(method, value, &args)?;
+            let text = rt.to_str(result)?;
+            out.extend(rt.flat(text).chars().expect("flat string").units());
         }
     }
     Ok(rt.make_units(&out))
@@ -794,10 +839,14 @@ fn reduce<const REVERSE: bool>(rt: &mut Realm, this: Value, args: &[Value]) -> R
     Ok(acc)
 }
 
+fn absolute_index(rt: &mut Realm, value: Value, len: usize) -> R<f64> {
+    let i = integer(rt, value)?;
+    Ok(if i < 0.0 { i + len as f64 } else { i })
+}
+
 fn at(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let (v, len) = validated(rt, this)?;
-    let i = integer(rt, arg(args, 0))?;
-    let i = if i < 0.0 { i + len as f64 } else { i };
+    let i = absolute_index(rt, arg(args, 0), len)?;
     if 0.0 <= i && i < len as f64 {
         item(rt, v, i as usize)
     } else {
@@ -805,13 +854,61 @@ fn at(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     }
 }
 
-fn sort(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+fn with(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+    let (src, len) = validated(rt, this)?;
+    let elem = src.elem.expect("element");
+    let index = absolute_index(rt, arg(args, 0), len)?;
+    let replacement = elem.convert(rt, arg(args, 1))?;
+    let current = src.len().unwrap_or(0);
+    if index < 0.0 || index >= current as f64 {
+        return range(rt, "typed array index is out of bounds");
+    }
+    let (result, dst) = same_type(rt, elem, len)?;
+    let available = current.min(len);
+    copy(rt, src, 0, dst, 0, available)?;
+    if (index as usize) < len {
+        dst.write(rt, index as usize, replacement);
+    }
+    if available < len {
+        let missing = elem.convert(rt, Value::UNDEFINED)?;
+        for i in available..len {
+            dst.write(rt, i, missing);
+        }
+    }
+    Ok(result)
+}
+
+fn reverse<const COPY: bool>(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
+    let (src, len) = validated(rt, this)?;
+    let (result, dst) = if COPY {
+        let (result, dst) = same_type(rt, src.elem.expect("element"), len)?;
+        copy(rt, src, 0, dst, 0, len)?;
+        (result, dst)
+    } else {
+        (this, src)
+    };
+    if len > 1 {
+        let width = dst.width();
+        let bytes = rt.buffer_bytes_mut(dst.buffer).expect("buffer");
+        let bytes = &mut bytes[dst.offset..dst.offset + len * width];
+        for i in 0..len / 2 {
+            let low = i * width;
+            let high = (len - 1 - i) * width;
+            let (left, right) = bytes.split_at_mut(high);
+            left[low..low + width].swap_with_slice(&mut right[..width]);
+        }
+    }
+    Ok(result)
+}
+
+fn sort<const COPY: bool>(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let cb = arg(args, 0);
     if !cb.is_undefined() {
         callback(rt, cb)?;
     }
     let (v, len) = validated(rt, this)?;
     let elem = v.elem.expect("element");
+    let (result, dst) = if COPY { same_type(rt, elem, len)? } else { (this, v) };
     let mut values = Vec::new();
     if values.try_reserve_exact(len).is_err() {
         return range(rt, "out of memory");
@@ -862,9 +959,9 @@ fn sort(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
         }
     }
     for (i, n) in values.into_iter().enumerate() {
-        v.write(rt, i, n);
+        dst.write(rt, i, n);
     }
-    Ok(this)
+    Ok(result)
 }
 
 fn iterator(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
@@ -941,3 +1038,27 @@ mod every_some_tests;
 #[cfg(test)]
 #[path = "bi_typed_find_tests.rs"]
 mod find_tests;
+
+#[cfg(test)]
+#[path = "bi_typed_last_index_of_tests.rs"]
+mod last_index_of_tests;
+
+#[cfg(test)]
+#[path = "bi_typed_reverse_tests.rs"]
+mod reverse_tests;
+
+#[cfg(test)]
+#[path = "bi_typed_with_tests.rs"]
+mod with_tests;
+
+#[cfg(test)]
+#[path = "bi_typed_to_sorted_tests.rs"]
+mod to_sorted_tests;
+
+#[cfg(test)]
+#[path = "bi_typed_locale_tests.rs"]
+mod locale_tests;
+
+#[cfg(test)]
+#[path = "bi_typed_ctor_order_tests.rs"]
+mod ctor_order_tests;

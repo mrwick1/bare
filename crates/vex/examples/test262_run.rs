@@ -123,7 +123,7 @@ impl Ctx {
     }
 
     /// Why this test is not run, if it is not.
-    fn skipped(&self, m: &Meta, src: &str) -> Option<String> {
+    fn skipped(&self, path: &str, m: &Meta, src: &str) -> Option<String> {
         if m.flags.iter().any(|f| f == "module") {
             return Some("flag:module".into());
         }
@@ -141,7 +141,12 @@ impl Ctx {
                 return Some(rule.clone());
             }
         }
-        let allowed = |f: &String| self.skip.iter().any(|r| r.strip_prefix("allow:") == Some(f));
+        let allowed = |f: &String| self.skip.iter().filter_map(|r| r.strip_prefix("allow:")).any(|rule| {
+            match rule.split_once(' ') {
+                Some((feature, prefix)) => feature == f && path.starts_with(prefix),
+                None => rule == f,
+            }
+        });
         if self.skip.iter().any(|r| r.starts_with("allow:"))
             && let Some(f) = m.features.iter().find(|f| !allowed(f))
         {
@@ -224,7 +229,7 @@ fn main() {
                 writeln!(o, "START {path}").ok();
                 o.flush().ok();
                 drop(o);
-                let skipped = std::fs::read_to_string(format!("{}/{path}", ctx.root)).ok().and_then(|s| ctx.skipped(&meta(&s), &s));
+                let skipped = std::fs::read_to_string(format!("{}/{path}", ctx.root)).ok().and_then(|s| ctx.skipped(path, &meta(&s), &s));
                 let line = match skipped {
                     Some(why) => format!("SKIP {path}\t{why}"),
                     None => match catch_unwind(AssertUnwindSafe(|| ctx.run(path))) {
