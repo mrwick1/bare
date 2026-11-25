@@ -21,7 +21,7 @@
 //! the caller, which the root map of the call names. A nested call holds the collector too (`reenter.rs`). So a native may keep any
 //! cell in a Rust local, and may allocate and call. A native that allocates more than the slack of the heap limit (8 MiB) only makes
 //! the next gate collect.
-use crate::lazy::{Ent, data, m};
+use crate::lazy::{Ent, acc, data, m};
 use crate::cell::Layout;
 use crate::ast::StmtKind;
 use crate::facts::Facts;
@@ -29,7 +29,7 @@ use crate::compile::ScriptMode;
 use crate::parse::{Limits, parse_script_lazy};
 use crate::interp_rt::{ErrKind, Key, R, Realm};
 use crate::object::{F_ARGS, F_CALLABLE, F_CLASS, F_FNPROPS, F_NATIVE, Obj};
-use crate::shapes::{A_C, A_W};
+use crate::shapes::{A_C, A_E, A_W};
 use crate::string::Str;
 use crate::value::Value;
 
@@ -438,7 +438,18 @@ impl Realm {
         }
         let p = self.error_proto;
         self.method(p, "toString", 0, error_to_string);
-        self.install_aggregate_error(error_ctor_cell.expect("Error"));
+        // One `stack` accessor for all errors (`error_stack.rs`).
+        static ERROR_PROTO: &[Ent] = &[acc("stack", crate::error_stack::stack_get, crate::error_stack::stack_set)];
+        self.lazy_table(p, ERROR_PROTO);
+        let c = error_ctor_cell.expect("Error");
+        self.keep(c.value());
+        self.es.ctor = Some(c);
+        static ERROR_STATICS: &[Ent] = &[
+            m("captureStackTrace", 2, crate::error_stack::capture_stack_trace),
+            data("stackTraceLimit", |_| Value::int(10), A_C | A_E | A_W),
+        ];
+        self.lazy_table(c, ERROR_STATICS);
+        self.install_aggregate_error(c);
     }
 }
 
@@ -632,6 +643,7 @@ fn error_ctor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let m = arg(args, 0);
     let msg = if m.is_undefined() { None } else { Some(rt.to_str(m)?.value()) };
     let e = rt.make_error(proto, msg);
+    rt.capture_here(e, None, false, true);
     // `new Error(message, { cause })`: an own `cause` when the options have the property.
     if let Some(opts) = Realm::obj(arg(args, 1)) {
         let k = rt.intern("cause");
@@ -643,7 +655,7 @@ fn error_ctor(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     Ok(e)
 }
 
-fn error_to_string(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
+pub(crate) fn error_to_string(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
     if Realm::obj(this).is_none() {
         return rt.type_error("Error.prototype.toString called on a non-object");
     }

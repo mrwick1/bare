@@ -70,7 +70,7 @@ use std::sync::Arc;
 
 /// Words of a frame record.
 pub const REC: usize = 10;
-const ENTRY: i32 = -1;
+pub(crate) const ENTRY: i32 = -1;
 const CONSTRUCT: i32 = 1 << 24;
 /// A construct call made by `super()`: the return runs the fields of the class that made the call.
 /// The pc of a frame that has no root map: the constructor of a base class, below its fields function.
@@ -94,6 +94,10 @@ pub struct Program {
 /// loop, in any run, so it takes `&Codes`. The interpreter makes the feedback of the new codes.
 pub trait LazyCompile {
     fn compile(&mut self, codes: &Codes, ci: usize) -> Result<(), String>;
+    /// The source text that the code `ci` came from, for the line and column of a stack frame (`error_stack.rs`).
+    fn source_of(&self, _ci: usize) -> Option<&str> {
+        None
+    }
     /// Compile `src` as a script and add it at the end of `codes`. Gives the index of its top level code: a function with no
     /// parameters (`api.rs`, `Realm::run_text`).
     fn script_in(
@@ -274,9 +278,13 @@ fn walk_frames(m: &mut Marker, prog: &Codes, stack: &[Value], mut ci: usize, mut
 /// codegen-units 16, `loopfn` goes from +4.8% to -0.6% and `objects` from +3.0% to +0.4%. The cause in the allocator is a hypothesis.
 #[cold]
 #[inline(never)]
-fn unwind(prog: &Codes, stack: &mut [Value], ci: &mut usize, fp: &mut usize, pc: &mut usize, e: Value) -> Result<(), Value> {
+fn unwind(realm: &mut Realm, prog: &Codes, stack: &mut [Value], ci: &mut usize, fp: &mut usize, pc: &mut usize, e: Value) -> Result<(), Value> {
     // The budget ran out in a nested call (`Realm::call_function` gives `STOP`): no handler runs, every frame goes away.
     let stop = e == STOP;
+    // An error that has no frames yet (an internal one) gets those of the throw point (`error_stack.rs`).
+    if !stop {
+        realm.stack_for_throw(stack, prog, (*ci, *fp, *pc as u32), e);
+    }
     loop {
         if !stop && let Some(h) = prog[*ci].handler_at(*pc as u32) {
             let rec = *fp - REC;
@@ -581,12 +589,18 @@ impl Vm {
     }
 
     fn run(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, prog: &Codes, mut ci: usize, mut fp: usize, mut pc: usize) -> Result<Value, Exit> {
-        loop {
+        // The stack and the entry frame for the errors of natives that the loop did not publish for (`error_stack.rs`); the run above gets
+        // its own back when this one ends.
+        let saved = (realm.es.stk.replace(std::ptr::NonNull::from(&*stack)), realm.cur);
+        realm.cur = (ci, fp, pc as u32);
+        let r = loop {
             match Vm::exec::<Hot>(realm, stack, fbs, prog, ci, fp, pc) {
-                Flow::Done(r) => return r,
+                Flow::Done(r) => break r,
                 Flow::Go(c, f, p) => (ci, fp, pc) = (c, f, p),
             }
-        }
+        };
+        (realm.es.stk, realm.cur) = saved;
+        r
     }
 
     /// The call of the hot loop to the cold function. `#[cold]` makes LLVM treat the call as unlikely, so the spills around it stay out of
@@ -705,7 +719,7 @@ impl Vm {
             ($e:expr) => {{
                 let e: Value = $e;
                 std::hint::cold_path();
-                match unwind(prog, stack, &mut ci, &mut fp, &mut pc, e) {
+                match unwind(realm, prog, stack, &mut ci, &mut fp, &mut pc, e) {
                     Ok(()) => {
                         reload!();
                         continue;
@@ -739,6 +753,12 @@ impl Vm {
                     realm.collect(&mut fbs[..], |m| walk_frames(m, prog, st, cur.0, cur.1, cur.2));
                     fb = &mut fbs[ci];
                 }
+            };
+        }
+        // Before a native runs: the frame of the call, for the stack of an error that the native makes (`error_stack.rs`).
+        macro_rules! publish {
+            () => {
+                realm.cur = (ci, fp, pc as u32)
             };
         }
         // The canonical atom of this realm for `code.atoms[ai]`.
@@ -1047,6 +1067,7 @@ impl Vm {
                 gate!();
                 let (callee, this): (Value, Value) = ($callee, $this);
                 let (ab, argc) = ($ab as usize, $argc as usize);
+                publish!();
                 match tri!(realm.call_native(callee, this, &stack[ab..ab + argc])) {
                     Outcome::Val(v) => {
                         r!($dst) = v;
@@ -1710,6 +1731,7 @@ impl Vm {
                             let Some((ni, cctx)) = realm.function_new(callee) else {
                                 if realm.native_id(callee).is_some() {
                                     let (nf, len) = stage_array!(r!(b!() + 1));
+                                    publish!();
                                     r!(a!()) = tri!(realm.construct_native(callee, &stack[nf..nf + len], callee));
                                     pc = next;
                                     continue;
@@ -1951,6 +1973,7 @@ impl Vm {
                                 if realm.native_id(pv).is_some() {
                                     // A built-in superclass creates the receiver.
                                     let (ab, argc) = if opv == Op::CallSuper { (fp + b!(), c!()) } else { stage_array!(r!(b!())) };
+                                    publish!();
                                     let v = tri!(realm.construct_native(pv, &stack[ab..ab + argc], nt));
                                     r!(a!()) = v;
                                     pc = next;
@@ -2342,6 +2365,7 @@ impl Vm {
                         let Some((ni, cctx)) = realm.function_new(callee) else {
                             if realm.native_id(callee).is_some() {
                                 let (ab, argc) = (fp + b!() + 1, c!());
+                                publish!();
                                 r!(a!()) = tri!(realm.construct_native(callee, &stack[ab..ab + argc], callee));
                                 pc = next;
                                 continue;

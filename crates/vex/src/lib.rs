@@ -10,6 +10,8 @@ pub const NOT_READY: &str = "the new JavaScript engine (bare-vex) cannot run scr
 
 
 mod error_names;
+#[allow(unsafe_code)]
+mod error_stack;
 pub mod value;
 #[allow(unsafe_code)]
 pub mod cell;
@@ -112,3 +114,6 @@ mod builtins_function_ctor_tests;
 #[cfg(test)]
 #[path = "error_names_tests.rs"]
 mod error_names_tests;
+#[cfg(test)]
+#[path = "error_stack_tests.rs"]
+mod error_stack_tests;

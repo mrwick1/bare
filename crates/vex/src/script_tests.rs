@@ -398,7 +398,7 @@ fn errors_and_their_subclasses() {
         ("var r = Error.prototype.toString.call({name: 'N', message: 'M'}) + '|' + Error.prototype.toString.call({}) + '|' + Error.prototype.toString.call({name: '', message: 'only'});", "r", "N: M|Error|only"),
         ("var e = new Error('a'); e.message = 'b'; e.extra = 1; var r = e.message + Object.keys(e).join();", "r", "bextra"),
         ("var c = 0; for (var i = 0; i < 30; i++) { try { throw new Error('e' + i); } catch (e) { c += e.message.length; } } var r = c;", "r", "80"),
-        ("try { throw new Error('x'); } catch (e) { var r = typeof e.stack + (Object.getPrototypeOf(e) === Error.prototype); }", "r", "undefinedtrue"),
+        ("try { throw new Error('x'); } catch (e) { var r = typeof e.stack + (Object.getPrototypeOf(e) === Error.prototype); }", "r", "stringtrue"),
     ]);
 }
 
