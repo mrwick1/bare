@@ -50,6 +50,13 @@ struct Sheet<E: Eng> {
     stale: bool,
     // Constructed sheets can defer writing the source in list order.
     edits: SheetEdits,
+    // A `<style>` sheet that CSSOM edited: the text key of the element at the first edit. While the element text has this key, `source` is
+    // the text in use, as for a constructed sheet. The element text stays: in the spec an edit changes the rules only.
+    owned: Option<Vec<(NodeId, bare_html::dom::Span)>>,
+}
+// The text in use is `source`, and an edit can change it in place.
+fn in_place<E: Eng>(sh: &Sheet<E>) -> bool {
+    sh.ctor || sh.owned.is_some()
 }
 #[derive(Clone, Copy, Default)]
 struct SheetEdits {
@@ -511,6 +518,7 @@ fn sheet_of<E: Eng>(d: &Dom<E>, it: &mut E::Vm, n: NodeId) -> R<E, E::Obj> {
             ctor: false,
             stale: false,
             edits: SheetEdits::default(),
+            owned: None,
         },
     );
     state(d).borrow_mut().by_node.insert(n, o);
@@ -593,6 +601,18 @@ pub(crate) fn sheet_inputs<E: Eng>(d: &Dom<E>, doc: &bare_html::dom::Document, n
         })
         .collect();
     blocks.iter().any(Option::is_some).then_some(blocks)
+}
+
+/// The text in use of the `<style>` element `el` after a CSSOM edit (`Sheet::owned`), while the element text is the one of that edit.
+pub(crate) fn owned_text<E: Eng>(d: &Dom<E>, doc: &bare_html::dom::Document, el: NodeId) -> Option<String> {
+    let mut s = d.cssom.state.get()?.borrow_mut();
+    let State { by_node, sheets, lists, rules, .. } = &mut *s;
+    let sh = sheets.get_mut(by_node.get(&el)?)?;
+    if *sh.owned.as_ref()? != text_key(doc, el) {
+        return None;
+    }
+    flush_chunks(sh, lists.get_mut(&sh.list)?, rules);
+    Some(sh.source.clone())
 }
 
 fn source<E: Eng>(d: &Dom<E>, it: &mut E::Vm, o: E::Obj) -> R<E, String> {
@@ -811,6 +831,19 @@ fn refresh<E: Eng>(d: &Dom<E>, it: &mut E::Vm, o: E::Obj) -> R<E, ()> {
         st.lists.get_mut(&list).unwrap().items = rules;
         return Ok(());
     }
+    {
+        // An edited `<style>` sheet: its own text is in use while the element text is the same. A new element text gives a new sheet text.
+        let doc = d.doc.borrow();
+        let mut st = state(d).borrow_mut();
+        let sh = st.sheets.get_mut(&o).unwrap();
+        if let Some(key) = &sh.owned {
+            if *key == text_key(&doc, sh.node) {
+                return Ok(());
+            }
+            sh.owned = None;
+            sh.edits = SheetEdits::default();
+        }
+    }
     let text = source(d, it, o)?;
     let unchanged = {
         let doc = d.doc.borrow();
@@ -900,7 +933,7 @@ fn insert<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, t: Local<'s>, a: Args<'s>) 
     let (len, ctor) = {
         let st = state(d).borrow();
         let sh = &st.sheets[&o];
-        (st.lists[&sh.list].items.len(), sh.ctor)
+        (st.lists[&sh.list].items.len(), in_place(sh))
     };
     if i > len {
         return Err(d.dom_err_s(s, "IndexSizeError", "Rule index is out of range"));
@@ -921,23 +954,23 @@ fn insert<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, t: Local<'s>, a: Args<'s>) 
         return Err(d.dom_err_s(s, "SyntaxError", "Expected one CSS rule"));
     };
     s.charge(chunk.len() as u64)?;
+    // In place: each rule object keeps the span of its last text (`make_rule`, `publish_rules`), and an edit of a rule publishes the sheet again.
+    // So a new rule is one span, and no rule is serialized again. A CSS-in-JS library inserts rules one by one: n inserts cost O(n), not O(n²).
     if ctor {
         let mut st = state(d).borrow_mut();
         let sh = st.sheets.get_mut(&o).unwrap();
-        if sh.edits.objects == 0 {
-            let bytes = sh.edits.bytes + chunk.len() + 1;
-            if bytes > MAX_TEXT {
-                return Err(d.lim_s(s, "cssom-text"));
-            }
-            let start = sh.source.len() as u32;
-            sh.source.push_str(chunk);
-            let end = sh.source.len() as u32;
-            sh.edits.bytes = bytes;
-            let list = sh.list;
-            st.lists.get_mut(&list).unwrap().items.insert(i, Entry::Chunk(start, end));
-            chunks_changed(d, &mut st, o);
-            return Ok(s.number(i as f64));
+        let bytes = sh.edits.bytes + chunk.len() + 1;
+        if bytes > MAX_TEXT {
+            return Err(d.lim_s(s, "cssom-text"));
         }
+        let start = sh.source.len() as u32;
+        sh.source.push_str(chunk);
+        let end = sh.source.len() as u32;
+        sh.edits.bytes = bytes;
+        let list = sh.list;
+        st.lists.get_mut(&list).unwrap().items.insert(i, Entry::Chunk(start, end));
+        chunks_changed(d, &mut st, o);
+        return Ok(s.number(i as f64));
     }
     let mut next = published_items(d, o);
     let at = {
@@ -963,34 +996,27 @@ fn delete<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, t: Local<'s>, a: Args<'s>) 
     let (entry, ctor) = {
         let st = state(d).borrow();
         let sh = &st.sheets[&o];
-        (st.lists[&sh.list].items.get(i).copied(), sh.ctor)
+        (st.lists[&sh.list].items.get(i).copied(), in_place(sh))
     };
     let Some(entry) = entry else {
         return Err(d.dom_err_s(s, "IndexSizeError", "Rule index is out of range"));
     };
     if ctor {
         let mut st = state(d).borrow_mut();
-        let sh = &st.sheets[&o];
-        if sh.edits.objects == u32::from(matches!(entry, Entry::Obj(_))) {
-            let (a, b) = match entry {
-                Entry::Chunk(a, b) => (a, b),
-                Entry::Obj(r) => st.rules[&r].sheet_span,
-            };
-            let sh = st.sheets.get_mut(&o).unwrap();
-            let bytes = sh.edits.bytes - (b - a) as usize - 1;
-            if bytes > MAX_TEXT {
-                return Err(d.lim_s(s, "cssom-text"));
-            }
-            sh.edits.bytes = bytes;
-            sh.edits.objects = 0;
-            if b as usize == sh.source.len() {
-                sh.source.truncate(a as usize);
-            }
-            let list = sh.list;
-            st.lists.get_mut(&list).unwrap().items.remove(i);
-            chunks_changed(d, &mut st, o);
-            return Ok(s.undefined());
+        let (a, b) = match entry {
+            Entry::Chunk(a, b) => (a, b),
+            Entry::Obj(r) => st.rules[&r].sheet_span,
+        };
+        let sh = st.sheets.get_mut(&o).unwrap();
+        sh.edits.bytes -= (b - a) as usize + 1;
+        sh.edits.objects -= u32::from(matches!(entry, Entry::Obj(_)));
+        if b as usize == sh.source.len() {
+            sh.source.truncate(a as usize);
         }
+        let list = sh.list;
+        st.lists.get_mut(&list).unwrap().items.remove(i);
+        chunks_changed(d, &mut st, o);
+        return Ok(s.undefined());
     }
     let mut next = published_items(d, o);
     next.remove(i);
@@ -1039,6 +1065,10 @@ fn publish_rules<E: Eng>(d: &Dom<E>, it: &mut E::Vm, o: E::Obj, rules: Vec<Entry
         let sh = &s.sheets[&o];
         (sh.ctor, sh.node, sh.list)
     };
+    let tag = if ctor { String::new() } else { name_of(&d.doc.borrow(), node) };
+    if !ctor && tag != "style" {
+        return Err(Dom::gate("editing an external stylesheet through CSSOM"));
+    }
     let mut text = String::new();
     let mut next = Vec::with_capacity(rules.len());
     let mut spans = Vec::new();
@@ -1056,9 +1086,7 @@ fn publish_rules<E: Eng>(d: &Dom<E>, it: &mut E::Vm, o: E::Obj, rules: Vec<Entry
                     return Err(d.lim("cssom-text"));
                 }
                 text.push_str(&t);
-                if ctor {
-                    spans.push((r, (start as u32, text.len() as u32)));
-                }
+                spans.push((r, (start as u32, text.len() as u32)));
                 next.push(e);
             }
             Entry::Chunk(a, b) => {
@@ -1071,29 +1099,20 @@ fn publish_rules<E: Eng>(d: &Dom<E>, it: &mut E::Vm, o: E::Obj, rules: Vec<Entry
         }
         text.push('\n');
     }
-    let tag = if ctor { String::new() } else { name_of(&d.doc.borrow(), node) };
-    if ctor {
-        d.computed.sheet_gen.set(d.computed.sheet_gen.get() + 1);
-    } else if tag == "style" {
-        run::<E, _>(it, |s| {
-            let v = d.wrap_s(s, node)?;
-            let t = d.js_str_s(s, &text)?;
-            call_hs(d, s, crate::browser_dom::set_text_content_s, v, &[t]).map(|_| ())
-        })?;
-    } else {
-        return Err(Dom::gate("editing an external stylesheet through CSSOM"));
-    }
-    let key = if ctor { None } else { pending_key(d, &d.doc.borrow(), node, &next) };
+    // The sheet is the text in use (`owned`, `owned_text`): the cascade reads it at the next style read. The element text stays.
+    d.computed.sheet_gen.set(d.computed.sheet_gen.get() + 1);
+    let (key, owned) = {
+        let doc = d.doc.borrow();
+        if ctor { (None, None) } else { (pending_key(d, &doc, node, &next), Some(text_key(&doc, node))) }
+    };
     let mut s = state(d).borrow_mut();
-    if ctor {
-        s.sheets.get_mut(&o).unwrap().edits = SheetEdits {
-            bytes: text.len(),
-            objects: spans.len() as u32,
-            dirty: false,
-        };
-        for (r, span) in spans {
-            s.rules.get_mut(&r).unwrap().sheet_span = span;
-        }
+    let sh = s.sheets.get_mut(&o).unwrap();
+    if sh.owned.is_none() {
+        sh.owned = owned;
+    }
+    sh.edits = SheetEdits { bytes: text.len(), objects: spans.len() as u32, dirty: false };
+    for (r, span) in spans {
+        s.rules.get_mut(&r).unwrap().sheet_span = span;
     }
     let sheet = s.sheets.get_mut(&o).unwrap();
     sheet.source = text;
@@ -1408,7 +1427,7 @@ fn make_rule<E: Eng>(d: &Dom<E>, it: &mut E::Vm, list: E::Obj, i: usize) -> R<E,
     let o = rule_from_chunk(d, it, sheet, parent, &chunk, depth)?.ok_or_else(|| it.type_error_o("The text of a CSS rule changed"))?;
     let mut st = state(d).borrow_mut();
     st.lists.get_mut(&list).unwrap().items[i] = Entry::Obj(o);
-    if parent.is_none() && st.sheets[&sheet].ctor {
+    if parent.is_none() && in_place(&st.sheets[&sheet]) {
         st.sheets.get_mut(&sheet).unwrap().edits.objects += 1;
         st.rules.get_mut(&o).unwrap().sheet_span = span;
     }
@@ -1474,7 +1493,7 @@ fn sheet_ctor_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args
         Ok((o, new_list(d, it, Some(o))?))
     })?;
     let node = d.doc.borrow().root();
-    state(d).borrow_mut().sheets.insert(o, Sheet { node, list, source: String::new(), text_key: None, ctor: true, stale: false, edits: SheetEdits::default() });
+    state(d).borrow_mut().sheets.insert(o, Sheet { node, list, source: String::new(), text_key: None, ctor: true, stale: false, edits: SheetEdits::default(), owned: None });
     Ok(d.obj_local(s, o))
 }
 fn sheet_get_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
@@ -1716,7 +1735,7 @@ pub(crate) fn held<E: Eng>(d: &Dom<E>, out: &mut Vec<NodeId>) {
     let Some(cell) = d.cssom.state.get() else { return };
     let s = cell.borrow();
     out.extend(s.sheets.values().filter(|sh| !sh.ctor).map(|sh| sh.node));
-    out.extend(s.sheets.values().filter_map(|sh| sh.text_key.as_ref()).flatten().map(|&(n, _)| n));
+    out.extend(s.sheets.values().flat_map(|sh| sh.text_key.iter().chain(&sh.owned)).flatten().map(|&(n, _)| n));
     out.extend(s.by_node.keys().copied());
     out.extend(s.adopted.keys().copied());
 }
@@ -1725,7 +1744,8 @@ pub(crate) fn held<E: Eng>(d: &Dom<E>, out: &mut Vec<NodeId>) {
 pub(crate) fn pins<E: Eng>(d: &Dom<E>, f: &mut dyn FnMut(&mut bare_html::dom::Span)) {
     let Some(cell) = d.cssom.state.get() else { return };
     for sh in cell.borrow_mut().sheets.values_mut() {
-        for (_, sp) in sh.text_key.iter_mut().flatten() {
+        let Sheet { text_key, owned, .. } = sh;
+        for (_, sp) in text_key.iter_mut().chain(owned.iter_mut()).flatten() {
             f(sp);
         }
     }

@@ -403,6 +403,8 @@ impl<E: Eng> Dom<E> {
             let scope = if shadows { doc.tree_root(el) } else { root };
             match s {
                 Source::Inline(text) => {
+                    // A sheet that CSSOM edited is the text in use, not the element text.
+                    let text = crate::browser_cssom::owned_text(self, doc, el).unwrap_or(text);
                     if text.contains("@import") {
                         for imp in cascade::imports(doc, &text, vp) {
                             match ext.get(&imp.href) {

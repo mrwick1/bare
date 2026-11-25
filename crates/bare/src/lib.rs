@@ -358,6 +358,8 @@ mod browser_settle_tests;
 mod browser_cssom;
 #[cfg(test)]
 mod browser_cssom_tests;
+#[cfg(test)]
+mod browser_cssom_owned_tests;
 
 mod browser_frames;
 mod browser_child;
