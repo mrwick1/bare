@@ -89,6 +89,8 @@ mod browser_subtle;
 #[cfg(test)]
 mod browser_subtle_tests;
 #[cfg(test)]
+mod browser_subtle_hmac_hash_tests;
+#[cfg(test)]
 mod browser_subtle_ctr_hmac_tests;
 #[cfg(test)]
 mod browser_web_tests;
@@ -140,6 +142,8 @@ mod browser_cors_tests;
 mod browser_fetch_origin_tests;
 #[cfg(test)]
 mod browser_referer_tests;
+#[cfg(test)]
+mod browser_fetch_integrity_tests;
 pub mod browser_navigation;
 mod browser_navigation_params;
 mod browser_navigation_state;
@@ -237,6 +241,10 @@ mod browser_clone_host_tests;
 #[cfg(test)]
 mod browser_idb_tx_tests;
 #[cfg(test)]
+mod browser_idb_binary_key_tests;
+#[cfg(test)]
+mod browser_events_count_tests;
+#[cfg(test)]
 mod browser_idb_cursor_tests;
 #[cfg(test)]
 mod browser_idb_store_tests;
@@ -246,6 +254,8 @@ mod profile_record_tests;
 mod browser_idb_many_requests_tests;
 #[cfg(test)]
 mod browser_idb_reread_tests;
+#[cfg(test)]
+mod browser_idb_log_tests;
 pub mod resources;
 mod browser_loader;
 mod browser_shims;
@@ -414,6 +424,8 @@ mod browser_cssom_tests;
 mod browser_cssom_owned_tests;
 #[cfg(test)]
 mod browser_domparser_move_tests;
+#[cfg(test)]
+mod browser_domparser_xhtml_tests;
 
 mod browser_frames;
 mod browser_child;

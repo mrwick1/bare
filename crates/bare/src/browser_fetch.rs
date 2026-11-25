@@ -62,7 +62,7 @@
 //! the body methods read it to the end in `shims/drain.js`, at most `max_request_body` bytes. A request body stream is a `TypeError`.
 //!
 //! Gates (explicit `Unsupported`, nothing is faked): token methods and a lower-case `patch`; `clone()` of a stream body (tee);
-//! `Request.body`; non-empty `integrity`;
+//! `Request.body`;
 //! `cache: "only-if-cached"`; non-ASCII header values; compressed
 //! responses (a `Content-Encoding` that `bare_net` cannot undo is a network error; gzip, deflate and br are undone, and the headers stay); subclassing (`class X extends Response`).
 //! Headers iteration: `keys`, `values`, `entries` and `[Symbol.iterator]` (the same function as `entries`) make live iterators. Each
@@ -375,17 +375,19 @@ struct Cors {
     api: &'static str,
     /// The document URL, for the `Referer` header (`resources::referrer`). `None`: no header.
     page: Option<Url>,
+    /// The `integrity` metadata of a `fetch` (`sri_match`). `None`: no check.
+    integrity: Option<String>,
 }
 
 impl Clone for Cors {
     fn clone(&self) -> Cors {
-        Cors { mode: self.mode, include: self.include, omit: self.omit, doc: self.doc.as_ref().map(dup), blocked: self.blocked.clone(), api: self.api, page: self.page.as_ref().map(dup) }
+        Cors { mode: self.mode, include: self.include, omit: self.omit, doc: self.doc.as_ref().map(dup), blocked: self.blocked.clone(), api: self.api, page: self.page.as_ref().map(dup), integrity: self.integrity.clone() }
     }
 }
 
 impl Cors {
     fn same(api: &'static str) -> Cors {
-        Cors { mode: Mode::Cors, include: false, omit: false, doc: None, blocked: None, api, page: None }
+        Cors { mode: Mode::Cors, include: false, omit: false, doc: None, blocked: None, api, page: None, integrity: None }
     }
 }
 
@@ -401,6 +403,7 @@ struct ReqData<E: Eng> {
     redirect: Redirect,
     credentials: &'static str,
     mode: &'static str,
+    integrity: String,
     /// The signal that follows `init.signal`, made on the first read of `request.signal` or at construction.
     signal: Option<Traced<E::Raw>>,
 }
@@ -1212,6 +1215,7 @@ struct Core<E: Eng> {
     redirect: Redirect,
     credentials: &'static str,
     mode: &'static str,
+    integrity: String,
     /// The `AbortSignal` of `init.signal`, or the one of the `Request` input.
     signal: Option<E::Obj>,
 }
@@ -1222,8 +1226,8 @@ fn make_core<E: Eng>(d: &Dom<E>, it: &mut E::Vm, input: E::Raw, init: E::Raw) ->
     let mut transfer: Option<E::Obj> = None;
     let mut core = match E::kind(input) {
         Val::Object(o) if matches!(d.fetch.st.borrow().f_get(&o), Some(F::Request(_))) => {
-            let (method, url, redirect, credentials, mode, hdr, body, used, signal) = match d.fetch.st.borrow().f_get(&o) {
-                Some(F::Request(r)) => (r.method.clone(), dup(&r.url), r.redirect, r.credentials, r.mode, oid::<E>(&r.c.headers), r.c.body.bytes.clone(), r.c.body.used || r.c.body.locked, r.signal.as_ref().map(oid::<E>)),
+            let (method, url, redirect, credentials, mode, integrity, hdr, body, used, signal) = match d.fetch.st.borrow().f_get(&o) {
+                Some(F::Request(r)) => (r.method.clone(), dup(&r.url), r.redirect, r.credentials, r.mode, r.integrity.clone(), oid::<E>(&r.c.headers), r.c.body.bytes.clone(), r.c.body.used || r.c.body.locked, r.signal.as_ref().map(oid::<E>)),
                 _ => unreachable!(),
             };
             if used {
@@ -1232,12 +1236,12 @@ fn make_core<E: Eng>(d: &Dom<E>, it: &mut E::Vm, input: E::Raw, init: E::Raw) ->
             transfer = body.is_some().then_some(o);
             let mut headers = d.list_of(hdr);
             headers.guard = Guard::Request;
-            Core { method, url, headers, body, redirect, credentials, mode, signal }
+            Core { method, url, headers, body, redirect, credentials, mode, integrity, signal }
         }
         _ => {
             let s = d.string_arg(it, input)?;
             let url = d.resolve_url(it, &s)?;
-            Core { method: "GET".into(), url, headers: HeaderList::new(Guard::Request), body: None, redirect: Redirect::Follow, credentials: "same-origin", mode: "cors", signal: None }
+            Core { method: "GET".into(), url, headers: HeaderList::new(Guard::Request), body: None, redirect: Redirect::Follow, credentials: "same-origin", mode: "cors", integrity: String::new(), signal: None }
         }
     };
     if !matches!(E::kind(init), Val::Undefined | Val::Null) {
@@ -1281,8 +1285,8 @@ fn make_core<E: Eng>(d: &Dom<E>, it: &mut E::Vm, input: E::Raw, init: E::Raw) ->
             _ => return Err(it.type_error_o("Failed to construct 'Request': Failed to read the 'signal' property from 'RequestInit': Failed to convert value to 'AbortSignal'.")),
         }
         let integrity = d.prop(it, init, "integrity")?;
-        if !matches!(E::kind(integrity), Val::Undefined) && !d.string_arg(it, integrity)?.is_empty() {
-            return Err(Fault::Unsupported("fetch option integrity"));
+        if !matches!(E::kind(integrity), Val::Undefined) {
+            core.integrity = d.string_arg(it, integrity)?;
         }
         let h = d.prop(it, init, "headers")?;
         if !matches!(E::kind(h), Val::Undefined) {
@@ -1540,7 +1544,7 @@ fn new_request_obj<E: Eng>(d: &Dom<E>, it: &mut E::Vm, core: Core<E>, proto: E::
         Some(s) => Some(d.follow_signal(it, s)?),
         None => None,
     };
-    d.add_obj_in(it, proto, F::Request(ReqData { c: Common { headers: edge::<E>(it, h), body: Body::new(core.body) }, method: core.method, url: core.url, redirect: core.redirect, credentials: core.credentials, mode: core.mode, signal: signal.map(|s| edge::<E>(it, s)) }))
+    d.add_obj_in(it, proto, F::Request(ReqData { c: Common { headers: edge::<E>(it, h), body: Body::new(core.body) }, method: core.method, url: core.url, redirect: core.redirect, credentials: core.credentials, mode: core.mode, integrity: core.integrity, signal: signal.map(|s| edge::<E>(it, s)) }))
 }
 
 fn request_ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
@@ -1754,6 +1758,10 @@ fn req_credentials<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _
     let v = with_req_s(d, s, this, |r| r.credentials)?;
     d.js_str_s(s, v)
 }
+fn req_integrity<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let v = with_req_s(d, s, this, |r| r.integrity.clone())?;
+    d.js_str_s(s, &v)
+}
 fn req_mode<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let v = with_req_s(d, s, this, |r| r.mode)?;
     d.js_str_s(s, v)
@@ -1767,13 +1775,13 @@ fn req_clone<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args
     old_v::<E>(s, |it| req_clone_old(d, it, this))
 }
 fn req_clone_old<E: Eng>(d: &Dom<E>, it: &mut E::Vm, this: E::Raw) -> R<E, E::Raw> {
-    let (method, url, redirect, credentials, mode, hdr, body, used, signal) = with_req(d, it, this, |r| (r.method.clone(), dup(&r.url), r.redirect, r.credentials, r.mode, oid::<E>(&r.c.headers), r.c.body.bytes.clone(), r.c.body.used || r.c.body.locked, r.signal.as_ref().map(oid::<E>)))?;
+    let (method, url, redirect, credentials, mode, integrity, hdr, body, used, signal) = with_req(d, it, this, |r| (r.method.clone(), dup(&r.url), r.redirect, r.credentials, r.mode, r.integrity.clone(), oid::<E>(&r.c.headers), r.c.body.bytes.clone(), r.c.body.used || r.c.body.locked, r.signal.as_ref().map(oid::<E>)))?;
     if used {
         return Err(it.type_error_o("Failed to execute 'clone' on 'Request': Request body is already used"));
     }
     let mut headers = d.list_of(hdr);
     headers.guard = Guard::Request;
-    Ok(E::obj_raw(new_request_obj(d, it, Core { method, url, headers, body, redirect, credentials, mode, signal }, d.fproto(Pr::Request))?))
+    Ok(E::obj_raw(new_request_obj(d, it, Core { method, url, headers, body, redirect, credentials, mode, integrity, signal }, d.fproto(Pr::Request))?))
 }
 fn req_signal<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let this = s.engine().raw(this);
@@ -2188,6 +2196,7 @@ fn prepare<E: Eng>(d: &Dom<E>, it: &mut E::Vm, promise: E::Raw, a: &[E::Raw]) ->
     let mut cors = policy(d, &lim, &core.url, Mode::of(core.mode), "fetch")?;
     cors.include = core.credentials == "include";
     cors.omit = core.credentials == "omit";
+    cors.integrity = (!core.integrity.is_empty()).then(|| core.integrity.clone());
     let n = core.body.as_ref().map_or(0, |b| b.len());
     {
         let mut st = d.fetch.st.borrow_mut();
@@ -2538,6 +2547,11 @@ fn run_hops(client: &mut Client, lim: &FetchLimits, first: Parts<'_>, diag: &mut
             diag.push(format!("blocked: compressed response from {} (not supported)", origin(&url)));
             return Outcome::Failed("compressed response");
         }
+        // Subresource Integrity: an opaque reply cannot be checked, so it fails.
+        if let Some(m) = &cors.integrity && !(matches!(taint, Taint::Basic | Taint::Cors) && sri_match(m, &resp.body)) {
+            diag.push(format!("blocked: the integrity of {url} does not match"));
+            return Outcome::Failed("integrity");
+        }
         return match taint {
             Taint::Basic => Outcome::Done { status: resp.status, url, redirected, headers: resp.headers, body: resp.body, taint },
             Taint::Cors => Outcome::Done { status: resp.status, url, redirected, headers: expose(resp.headers, cors.include), body: resp.body, taint },
@@ -2545,6 +2559,29 @@ fn run_hops(client: &mut Client, lim: &FetchLimits, first: Parts<'_>, diag: &mut
         };
     }
     Outcome::Failed("too many redirects")
+}
+
+/// Subresource Integrity, "do bytes match metadataList": the metadata is a list of `sha256-`, `sha384-` or `sha512-` and a base64
+/// digest (options after `?` are ignored). Only the strongest algorithm in the list counts; one of its digests must match. A list with
+/// no known algorithm matches. The digest may be base64 or base64url, with or without padding.
+pub(crate) fn sri_match(metadata: &str, body: &[u8]) -> bool {
+    let algs = ["sha256", "sha384", "sha512"];
+    let items: Vec<(usize, &str)> = metadata.split_ascii_whitespace().filter_map(|t| {
+        let (alg, rest) = t.split_once('-')?;
+        Some((algs.iter().position(|a| alg.eq_ignore_ascii_case(a))?, rest.split('?').next().unwrap_or("")))
+    }).collect();
+    let Some(best) = items.iter().map(|i| i.0).max() else { return true };
+    let digest: Vec<u8> = match best {
+        0 => bare_tls::sha256::sha256(body).to_vec(),
+        1 => bare_tls::sha384::sha384(body).to_vec(),
+        _ => bare_tls::sha512::sha512(body).to_vec(),
+    };
+    let ours = crate::browser_encoding::base64(&digest);
+    let ours = ours.trim_end_matches('=');
+    items.iter().filter(|i| i.0 == best).any(|(_, v)| {
+        let v = v.trim_end_matches('=');
+        v.len() == ours.len() && v.bytes().zip(ours.bytes()).all(|(a, b)| a == b || (a, b) == (b'-', b'+') || (a, b) == (b'_', b'/'))
+    })
 }
 
 // ---------------------------------------------------------------------------------------------- CORS
@@ -3075,6 +3112,7 @@ table!(defs = [
     gs(Request, "redirect", req_redirect),
     gs(Request, "credentials", req_credentials),
     gs(Request, "mode", req_mode),
+    gs(Request, "integrity", req_integrity),
     gs(Request, "bodyUsed", req_body_used),
     gs(Request, "body", gate_request_body),
     gs(Request, "signal", req_signal),

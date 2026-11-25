@@ -25,6 +25,9 @@ mod parts_tests;
 #[cfg(test)]
 #[path = "bi_intl_plural_tests.rs"]
 mod plural_tests;
+#[cfg(test)]
+#[path = "bi_intl_supported_values_tests.rs"]
+mod supported_values_tests;
 
 pub(crate) static GLOBALS: &[Ent] = &[factory("Intl", namespace)];
 
@@ -95,8 +98,26 @@ fn namespace(rt: &mut Realm) -> Value {
         factory("RelativeTimeFormat", constructor::<RELATIVE>),
         factory("ListFormat", constructor::<LIST>),
         factory("PluralRules", constructor::<PLURAL>),
+        m("supportedValuesOf", 1, supported_values),
     ]);
     object.value()
+}
+
+/// `Intl.supportedValuesOf(key)`: the values that the constructors accept, sorted. The time zones include the IANA links, because
+/// the embedded data does not mark them.
+fn supported_values(rt: &mut Realm, _: Value, args: &[Value]) -> R<Value> {
+    let key = string(rt, arg(args, 0))?;
+    let names: Vec<&str> = match key.as_str() {
+        "calendar" => vec!["gregory"],
+        "collation" => Vec::new(),
+        "currency" => icu::currencies().collect(),
+        "numberingSystem" => vec!["latn"],
+        "timeZone" => (0..bare_tzdata::len()).map(|i| bare_tzdata::entry(i).0).collect(),
+        "unit" => icu::UNIT_NAMES.to_vec(),
+        _ => return Err(range(rt, &format!("Invalid key : {key}"))),
+    };
+    let values: Vec<_> = names.into_iter().map(|s| rt.string(s)).collect();
+    Ok(rt.new_array(&values))
 }
 
 #[cold]

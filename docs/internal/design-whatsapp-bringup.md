@@ -154,3 +154,34 @@ transaction in one microtask chain. The host frees events only in a collect, and
 queues thousands of requests, so the live event cap (16,384) filled.
 
 Fix: the shim yields to a task after each 64 requests (`MessageChannel`).
+
+## Link attempts 8 and 9 (2026-11-25)
+
+Attempt 8. Build: main with #1094. The link held. The page stopped again with `Limit(Host("dom-events"))` during the
+download. Cause: not yet known. Attempt 9 runs a build that prints the event types at the cap.
+
+Attempt 9. Build: main with #1097 and the event print. The link held. After 7 minutes the page still showed "Your messages
+are downloading", with little CPU use. The event cap was not hit. WhatsApp's error log (`ErrorPubSub`) showed:
+
+- First: `DataError: The parameter is not a valid key` on `get` in table `sync-keys`.
+- Then about 40 `TransactionInactiveError` from Dexie, on `bulkCreate` in `syncd-logs` and on reads of `contact`, `chat` and
+  `message`.
+
+Cause: the shim checked keys in JS and took only numbers, dates, strings and arrays. A binary key (`ArrayBuffer` or a view)
+gave `DataError`. The host coder takes binary keys. `sync-keys` uses binary key ids.
+
+Fix: the shim takes binary keys and compares them byte by byte. To check: whether the Dexie errors stop with this fix.
+
+## Link attempts 10 and 11 (2026-11-25)
+
+Attempt 10. Build: #1099 and #1097 with the event print. The page stopped with `Limit(Host("dom-events"))`. The print showed
+16,383 IndexedDB `success` events, all made in one task: the shim yields after 64 requests per transaction, and WhatsApp runs
+hundreds of transactions at once. The owner asked to remove caps that make pages fail. Fix: no count cap on events
+(branch `no-event-cap`).
+
+Attempt 11. Build: `no-event-cap`. A start with the `default` profile showed "Logging out": the profile held cookies and
+`localStorage` but no IndexedDB (step 3 of the profile design is not built). A fresh profile `wa` linked. No `DataError`
+and no Dexie error. The download ran for minutes. Then syncd failed 40 times with "HMAC takes SHA-256 only", and WhatsApp
+logged the device out.
+
+Fix: HMAC takes SHA-1, SHA-384 and SHA-512.

@@ -47,9 +47,6 @@ impl<E: Eng> Dom<E> {
     /// Like `new_event`, with the prototype given (a host event interface such as `MessageEvent`).
     pub(crate) fn new_event_proto(&self, it: &mut E::Vm, ty: &str, bubbles: bool, cancelable: bool, composed: bool, proto: E::Obj) -> R<E, E::Obj> {
         it.charge_o((ty.len() / 32) as u64)?;
-        if self.st.borrow().events.len() >= self.lim.max_events {
-            return Err(self.lim("dom-events"));
-        }
         let o = self.obj(it, proto)?;
         let e = EventState {
             err: false,

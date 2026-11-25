@@ -1,10 +1,10 @@
 # Remove the DOM count caps (2026-11-25)
 
-Owner order (2026-11-25): remove every cap that stops a real page. This PR adds the audit of all caps (`../caps-audit.md`) and removes the count caps of `BrowserLimits`.
+Owner order (2026-11-25): remove every cap that stops a real page. This PR adds the audit of all caps (`../caps-audit.md`) and removes the count caps of `BrowserLimits`. `max_events` went in #1102.
 
 ## What changed
 
-- `BrowserLimits` keeps `max_events`, `max_tree_depth`, `max_reports`, `max_task_aborts`, `max_child_pages` and `max_child_depth`.
+- `BrowserLimits` keeps `max_tree_depth`, `max_reports`, `max_task_aborts`, `max_child_pages` and `max_child_depth`.
 - Removed: `max_nodes`, `max_text_bytes`, `max_attr_slots`, `max_names`, `max_wrappers`, `max_listeners`, `max_results`, `max_selector_len` and `max_string_bytes`, with their checks at about 80 call sites.
 - Removed: the name-bytes cap of `NodeList` (`MAX_NAME_BYTES`).
 - Removed: the count fields of `FragmentLimits`. It keeps `max_depth`.

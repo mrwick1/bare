@@ -4,6 +4,9 @@
 //!   idb_load SCALE      SCALE: 1, 10, 100
 //!
 //! The script checks the walk and the count against the record count. Prints time, CPU, peak RSS and allocations.
+//!
+//! `BARE_IDB_LOAD_PROFILE=DIR`: save the store to a new profile in DIR (the directory is emptied first), as a page with a profile
+//! does: a flush at most once a second, and a flush with `fsync` at the end. Without it the store is memory only.
 use bare::browser::*;
 use bare::eng_new::Peek;
 use bare::js_limits::HeapLimits;
@@ -46,9 +49,12 @@ fn run(b: &mut Browser, src: &str) -> String {
 }
 
 /// Run the requests and the transaction ends (a task each) until `done` is true.
-fn settle(b: &mut Browser) {
+fn settle(b: &mut Browser, saver: &mut Option<bare::profile::Saver>) {
     for _ in 0..10_000 {
         b.drain().unwrap_or_else(|e| die(format!("drain: {e:?}")));
+        if let Some(s) = saver {
+            s.tick(Instant::now());
+        }
         if run(b, "done") == "true" {
             return;
         }
@@ -91,25 +97,34 @@ fn exec(scale: usize) {
     let mut b = Browser::new(tree::parse("<body></body>"), BrowserLimits::default(), eval, HeapLimits::default()).unwrap_or_else(|e| die(format!("browser: {e:?}")));
     b.use_virtual_clock_at(1000.0).unwrap_or_else(|e| die(format!("clock: {e:?}")));
     b.set_document_url("https://h.test:8443/start").unwrap_or_else(|e| die(e));
+    let mut saver = std::env::var_os("BARE_IDB_LOAD_PROFILE").map(|dir| {
+        let _ = std::fs::remove_dir_all(&dir);
+        let p = bare::profile::Profile::open(dir.as_ref()).unwrap_or_else(|e| die(format!("profile: {e}")));
+        let store = bare::browser_navigation::WebStorage::default();
+        let saver = bare::profile::Saver::new(p, store.clone());
+        b.attach_storage(store);
+        saver
+    });
     let (a0, t) = (ALLOCS.load(Relaxed), Instant::now());
     run(&mut b, SETUP);
-    settle(&mut b);
+    settle(&mut b, &mut saver);
     let n = 1000 * scale;
     for start in (0..n).step_by(100) {
         run(&mut b, &format!("puts({start})"));
-        settle(&mut b);
+        settle(&mut b, &mut saver);
     }
     for start in (0..n).step_by(100) {
         run(&mut b, &format!("gets({start})"));
-        settle(&mut b);
+        settle(&mut b, &mut saver);
     }
     run(&mut b, "walk()");
-    settle(&mut b);
+    settle(&mut b, &mut saver);
     let sum = n * (n - 1) / 2;
     let got = run(&mut b, "[got, walk.seen, walk.sum, walk.count].join()");
     if got != format!("{sum},{n},{sum},{n}") {
         die(format!("checksum: {got}"));
     }
+    drop(saver);
     let s = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
     let hwm = s.lines().find_map(|l| l.strip_prefix("VmHWM:")).unwrap_or("").trim().to_string();
     println!("idb x{scale:<3} checksum=ok run={:.1}ms peak_rss={hwm} allocs={}", t.elapsed().as_secs_f64() * 1e3, ALLOCS.load(Relaxed) - a0);

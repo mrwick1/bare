@@ -120,7 +120,7 @@ pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> 
 fn parse_from_string<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let text = d.arg_str_s(s, a, 0)?;
     let mime = d.arg_str_s(s, a, 1)?;
-    if !["text/html", "text/xml", "application/xml", "image/svg+xml"].contains(&mime.as_str()) {
+    if !["text/html", "text/xml", "application/xml", "application/xhtml+xml", "image/svg+xml"].contains(&mime.as_str()) {
         return Err(s.type_error("Invalid MIME type for DOMParser.parseFromString"));
     }
     s.charge(text.len() as u64 + 1)?;

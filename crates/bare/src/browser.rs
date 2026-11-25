@@ -276,8 +276,6 @@ impl<K: SlotKey, V> IdTab<K, V> {
 /// the process bound them, as in Chrome. What stays guards the native stack, a script budget, or a diagnostic list (`docs/internal/caps-audit.md`).
 #[derive(Clone, Copy, Debug)]
 pub struct BrowserLimits {
-    /// Live event objects.
-    pub max_events: usize,
     /// Depth of a tree that JS builds, and the longest event path.
     pub max_tree_depth: usize,
     /// Kept listener exception reports. The oldest is dropped (and counted) after this.
@@ -294,7 +292,6 @@ pub struct BrowserLimits {
 impl Default for BrowserLimits {
     fn default() -> Self {
         BrowserLimits {
-            max_events: 1 << 14,
             max_tree_depth: 512,
             max_reports: 256,
             max_task_aborts: 5,
@@ -303,6 +300,9 @@ impl Default for BrowserLimits {
         }
     }
 }
+
+/// Live events that make a collect due when few were live after the last one (`Browser::collect_due`).
+const EVENTS_COLLECT: usize = 1 << 13;
 
 /// Bytes of selector text that `Dom::selectors` keeps parsed. A parsed selector is up to about 50 times its text.
 pub(crate) const SEL_CACHE_BYTES: usize = 128 << 10;
@@ -674,6 +674,8 @@ pub(crate) struct State<E: Eng> {
     pub owners: Owners<E>,
     pub next_id: u64,
     pub events: IdMap<<E as Eng>::Obj, EventState<E>>,
+    /// Live events after the last collect. The next collect is due when the count doubles (`Browser::collect_due`).
+    pub events_after_collect: usize,
     pub inputs: IdMap<NodeId, Input>,
     /// Bytes of the dirty values in `inputs`.
     pub input_bytes: usize,
@@ -2189,9 +2191,10 @@ impl<E: Eng> Browser<E> {
     /// a page that replaces its lists makes dead nodes and little script heap, and only a collect and reclaim free them.
     pub fn collect_due(&self) -> bool {
         let live = self.it.external_live();
-        // Events are small in the heap, so their cap can fill before the heap asks: half the cap asks too.
+        // Events are small in the heap, and the host frees their state only in a collect: their count asks too, when it doubles.
+        let st = self.dom.st.borrow();
         self.it.gc_due()
-            || self.dom.st.borrow().events.len() > self.dom.lim.max_events / 2
+            || st.events.len() > (2 * st.events_after_collect).max(EVENTS_COLLECT)
             || self.dom.doc.try_borrow().is_ok_and(|d| d.arena_bytes() > live + (2usize << 20).max(live / 4))
     }
 
@@ -2207,6 +2210,9 @@ impl<E: Eng> Browser<E> {
         self.dom.reclaim(true);
         let native = self.dom.doc.try_borrow().map_or(0, |d| d.arena_bytes());
         self.it.set_external_live(native);
+        let mut st = self.dom.st.borrow_mut();
+        st.events_after_collect = st.events.len();
+        drop(st);
         self.observe_stats();
         Ok(c)
     }

@@ -1,6 +1,7 @@
 # Design: a persistent profile
 
-Status: approved (owner, 2026-11-25): build option A in steps 1-5, one PR each.
+Status: approved (owner, 2026-11-25): build option A in steps 1-5, one PR each. Step 3 (the IndexedDB log) is built: see section 8.2 and
+`progress/2026-11-25-profile-indexeddb-log.md`.
 
 ## 1. Problem
 
@@ -112,6 +113,20 @@ each one gets a tag and its fields:
 - An empty `BARE_DATA_DIR` turns profiles off (the default is then memory). `.cargo/config.toml` sets it for tests and `cargo run`.
   The benchmark and journey scripts set it too, so a run starts from an empty session.
 - A suite of bare-drive (`--suite`) and a tab that a page opens (`NAME~2` in bare-mcp) use no profile.
+
+### 8.2 As built in step 3 (2026-11-25)
+
+- File: `idb/<FNV-1a 64 of the origin>.log`. It starts with a magic number and the origin. A file of another origin (a hash
+  collision) is not read: that origin stays in memory.
+- A record holds the host ops of the transaction (`idb(op, ...)`), not the rows at the commit. There are no locks between
+  transactions yet, so at a commit the store can hold a write of another live transaction. Each write transaction collects its
+  ops in a buffer from the call of each op. The commit moves the buffer into the pending frames. An abort drops it.
+- Index ids are not written. A put names its indexes, and a replay gives new ids.
+- A snapshot needs at least 64 KiB of log, and no live write transaction: the store then holds only committed data.
+- The `Saver` of the page holds the lock. Its drop flushes the logs with `fsync`, then closes the disk part, so no log writes
+  after the lock is free.
+- A put of a `WebAssembly.Module` into a store of a profile fails with `DataCloneError` as a request error. The standard throws at
+  the call. The host checks the record after the call returns.
 
 ## 9. Steps, one PR each
 

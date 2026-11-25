@@ -779,10 +779,7 @@ fn window_listeners_and_a_kept_event_survive_collect() {
 #[test]
 fn caps_return_distinct_limit_errors() {
     big(|| {
-        let l = BrowserLimits { max_events: 4, max_tree_depth: 8, ..Default::default() };
-        let mut b = browser_with(PAGE, l);
-        // events
-        assert_eq!(js(&mut b, "var evs = []; for (var i = 0; i < 10; i++) evs.push(new Event('x'));"), lim("dom-events"));
+        let mut b = browser_with(PAGE, BrowserLimits { max_tree_depth: 8, ..Default::default() });
         // depth
         assert_eq!(js(&mut b, "var d = document.createElement('div'); var treeTop = d; for (var i = 0; i < 20; i++) { var c = document.createElement('div'); c.appendChild(treeTop); treeTop = c; } 0"), lim("dom-depth"));
     });

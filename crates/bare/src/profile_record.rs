@@ -9,8 +9,6 @@
 //! ```
 //!
 //! Numbers are little endian. A `WebAssembly.Module`, a transferred buffer or a port has no disk form: `encode` gives false.
-// The IndexedDB log (design step 3) is the first user.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use crate::browser_web::WebClone;
 use bare_js_api::clone::{Cloned, Moved};
@@ -51,6 +49,11 @@ pub(crate) fn encode(c: &Cloned, out: &mut Vec<u8>) -> bool {
         }
     }
     true
+}
+
+/// Whether `encode` can write `c`: each item is a `Blob`, a `File` or a `CryptoKey`. It reads no bytes.
+pub(crate) fn storable(c: &Cloned) -> bool {
+    c.moved().iter().all(|m| matches!(m, Moved::Data(d) if d.downcast_ref::<WebClone>().is_some_and(|w| matches!(w, WebClone::Blob { .. } | WebClone::Key(_)))))
 }
 
 /// The record that `encode` wrote at the start of `b`, and the bytes after it. `None` for damaged input.

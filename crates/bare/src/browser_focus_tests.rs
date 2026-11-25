@@ -253,16 +253,6 @@ fn driver_focus_uses_the_event_engine_and_checkpoints() {
 #[test]
 fn fatal_errors_stop_the_transition_and_the_cap_is_charged() {
     big(|| {
-        // max_events: the event that cannot be made ends the call; no later listener runs.
-        let mut b = browser_with(PAGE, BrowserLimits { max_events: 3, ..Default::default() });
-        assert_eq!(js(&mut b, SETUP), "0");
-        assert_eq!(js(&mut b, "$('a').focus(); ['focus', 'focusin', 'blur', 'focusout'].forEach(function (t) { $('b').addEventListener(t, rec('b')); $('a').addEventListener(t, rec('a')); }); log.length = 0; 0"), "0");
-        assert_eq!(js(&mut b, "$('b').focus()"), format!("limit:{:?}", LimitKind::Host("dom-events")));
-        assert_eq!(js(&mut b, "log.join()"), "a:blur:2:b");
-        let bb = b.query("#b").unwrap().unwrap();
-        assert!(matches!(b.focus(bb), Err(Error::Limit(_))));
-        assert_eq!(js(&mut b, "log.join()"), "a:blur:2:b");
-        assert_eq!(b.dom.st.borrow().focus.depth_for_test(), 0);
         // A step limit hit inside a listener ends the transition too.
         let mut b = Browser::new(tree::parse(PAGE), BrowserLimits::default(), EvalLimits { max_steps: 200_000, ..Default::default() }, HeapLimits::default()).unwrap();
         assert_eq!(js(&mut b, SETUP), "0");

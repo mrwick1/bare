@@ -15,7 +15,7 @@
   function later(f) { P.resolve().then(f); }
   // A new task. The standard runs each request in its own task; here a run of up to `BATCH` requests shares one microtask chain,
   // then the next one waits for a task. Between tasks the host can collect, so the events of a long transaction do not pile up
-  // (`BrowserLimits::max_events`). A `MessageChannel` message has no 4 ms clamp, unlike a nested `setTimeout`.
+  // (`Browser::collect_due`). A `MessageChannel` message has no 4 ms clamp, unlike a nested `setTimeout`.
   var BATCH = 64, mc = null, tasks = [];
   function task(f) {
     if (typeof MessageChannel !== 'function') { setTimeout(f, 0); return; }
@@ -46,10 +46,11 @@
   }
 
   // ---- keys
-  function rank(k) { return typeof k === 'number' ? 1 : k instanceof Date ? 2 : typeof k === 'string' ? 3 : Array.isArray(k) ? 5 : 0; }
+  function rank(k) { return typeof k === 'number' ? 1 : k instanceof Date ? 2 : typeof k === 'string' ? 3 : k instanceof ArrayBuffer || ArrayBuffer.isView(k) ? 4 : Array.isArray(k) ? 5 : 0; }
+  function bytes(k) { return k instanceof ArrayBuffer ? new Uint8Array(k) : new Uint8Array(k.buffer, k.byteOffset, k.byteLength); }
   function valid(k) {
     var r = rank(k);
-    return r === 5 ? k.every(valid) : r === 1 ? k === k : r === 2 ? +k === +k : r === 3;
+    return r === 5 ? k.every(valid) : r === 1 ? k === k : r === 2 ? +k === +k : r === 3 || r === 4;
   }
   function key(k) {
     if (!valid(k)) throw err('The parameter is not a valid key.', 'DataError');
@@ -64,6 +65,11 @@
         if (c) return c;
       }
       return a.length < b.length ? -1 : a.length > b.length ? 1 : 0;
+    }
+    if (x === 4) {
+      var p = bytes(a), q = bytes(b);
+      for (var j = 0, m = Math.min(p.length, q.length); j < m; j++) if (p[j] !== q[j]) return p[j] < q[j] ? -1 : 1;
+      return p.length < q.length ? -1 : p.length > q.length ? 1 : 0;
     }
     if (x === 2) { a = +a; b = +b; }
     return a < b ? -1 : a > b ? 1 : 0;

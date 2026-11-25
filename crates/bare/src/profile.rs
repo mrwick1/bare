@@ -1,10 +1,11 @@
 //! A persistent profile (`docs/internal/design-persistent-profile.md`, step 2): a directory that keeps the cookies and the
-//! `localStorage` of a session, so that a new process opens with the same login. IndexedDB comes in step 3.
+//! `localStorage` of a session, so that a new process opens with the same login. IndexedDB has a log per origin (step 3).
 //!
 //! ```text
 //! <profile>/profile.lock   the process id of the holder; the holder keeps an OS lock on the file
 //! <profile>/cookies.bin    all cookies, session cookies too (as Chrome keeps them for a session restore)
 //! <profile>/local.bin      the `localStorage` items of all origins
+//! <profile>/idb/*.log      the IndexedDB log of each origin (`browser_idb_log.rs`)
 //!
 //! file    = 8 bytes magic, payload, u32 CRC-32 of the bytes before it
 //! cookies = u32 count, (str name, str value, str domain, str path, u8 flags, u8 same site, f64 expires ms or NaN)*
@@ -21,7 +22,8 @@
 //! `profile.lock` file is taken over. A second holder in the same process is refused too.
 //!
 //! A `Saver` (one per page) writes a file when its revision moved (`WebStorage::revisions`), at most once per second
-//! (`Page::tick`), and at drop. sessionStorage is not saved, as in all browsers.
+//! (`Page::tick`), and at drop. The IndexedDB logs follow the same timing; at drop and at `flush` they get an `fsync` too.
+//! sessionStorage is not saved, as in all browsers.
 
 use crate::browser_navigation_storage::{OriginItems, StorageState, WebStorage};
 use bare_net::cookie::{Cookie, SameSite};
@@ -166,11 +168,12 @@ impl Profile {
 }
 
 /// Saves the storage of one page to its profile.
-pub(crate) struct Saver {
+pub struct Saver {
     profile: Profile,
     store: WebStorage,
-    /// The revisions that are on disk.
-    saved: (u64, u64),
+    /// The revisions that are on disk: the cookies, `localStorage` and the IndexedDB commits.
+    saved: (u64, u64, u64),
+    idb: Arc<crate::browser_idb::log::Disk>,
     last: Option<Instant>,
     /// A write failed: the first failure goes to stderr, the next ones are quiet.
     failed: bool,
@@ -180,13 +183,21 @@ pub(crate) struct Saver {
 
 impl Saver {
     /// A saver for `store`, which holds what the profile holds now.
-    pub(crate) fn new(profile: Profile, store: WebStorage) -> Saver {
-        Saver { saved: store.revisions(), profile, store, last: None, failed: false, writes: 0 }
+    pub fn new(profile: Profile, store: WebStorage) -> Saver {
+        let idb = crate::browser_idb::log::Disk::new(&profile);
+        store.use_idb_disk(idb.clone());
+        let (c, l) = store.revisions();
+        Saver { saved: (c, l, 0), profile, store, idb, last: None, failed: false, writes: 0 }
+    }
+
+    fn revisions(&self) -> (u64, u64, u64) {
+        let (c, l) = self.store.revisions();
+        (c, l, self.idb.rev.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     /// Write what changed, unless the last write was less than a second ago. Gives when to call again: a change waits for that time.
-    pub(crate) fn tick(&mut self, now: Instant) -> Option<Instant> {
-        let rev = self.store.revisions();
+    pub fn tick(&mut self, now: Instant) -> Option<Instant> {
+        let rev = self.revisions();
         if rev == self.saved {
             return None;
         }
@@ -198,15 +209,16 @@ impl Saver {
         None
     }
 
-    /// Write what changed now.
+    /// Write what changed now, and `fsync` the IndexedDB logs.
     pub(crate) fn flush(&mut self) {
-        let rev = self.store.revisions();
+        let rev = self.revisions();
         if rev != self.saved {
             self.write(rev);
         }
+        self.store.flush_idb(true);
     }
 
-    fn write(&mut self, rev: (u64, u64)) {
+    fn write(&mut self, rev: (u64, u64, u64)) {
         let mut done = Ok(());
         if rev.0 != self.saved.0 {
             done = self.profile.write(COOKIES, encode_cookies(&self.store.export_cookies()));
@@ -215,6 +227,10 @@ impl Saver {
         if rev.1 != self.saved.1 && done.is_ok() {
             done = self.profile.write(LOCAL, encode_local(&self.store.export_area(false)));
             self.writes += 1;
+        }
+        if rev.2 != self.saved.2 {
+            // A log reports its own write failure.
+            self.store.flush_idb(false);
         }
         match done {
             Ok(()) => self.saved = rev,
@@ -230,6 +246,8 @@ impl Saver {
 impl Drop for Saver {
     fn drop(&mut self) {
         self.flush();
+        // The lock ends with this saver: the IndexedDB logs write nothing more.
+        self.idb.closed.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
