@@ -38,7 +38,7 @@ Machine archMachine, load average about 12 (other sessions). Base: release build
 | `web_apis_load clone 1` | 145017627 | 145067804 | +0.0346% | 149623472 | 149665774 | +0.0283% |
 | `web_apis_load clone 10` | 1409440533 | 1410125656 | +0.0486% | 1421635730 | 1422326555 | +0.0486% |
 
-No row is over +0.5%. Hypothesis: the clone rows grow by under 0.05% because of code layout. The success path runs the same code.
+No row is over +0.5%. Main then moved to 80a8073c. That change touches no Vex, js-api or clone code, so the rows did not run again. Hypothesis: the clone rows grow by under 0.05% because of code layout. The success path runs the same code.
 
 test262 (`tools/js/test262_js2.sh -j 8`, pinned subset e4fbf577) on both trees: 31409 passed, 429 failed, 8028 skipped. The per-test results are equal.
 
