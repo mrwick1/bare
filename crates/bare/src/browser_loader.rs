@@ -640,9 +640,6 @@ fn handler_set<'s, const ERR: bool, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this:
             d.scripts.handlers.borrow_mut().remove(&(n, ERR));
         }
         (None, Some(cb)) => {
-            if st.n_listeners >= d.lim.max_listeners {
-                return Err(d.lim_s(s, "dom-listeners"));
-            }
             let list = st.listeners.entry(t).or_default();
             st.next_id += 1;
             let id = st.next_id;
@@ -2076,9 +2073,6 @@ fn write<'s, const NEWLINE: bool, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: L
     let mut text = String::new();
     for v in a.iter() {
         text.push_str(&d.string_arg_s(s, v)?);
-        if text.len() > d.lim.max_string_bytes {
-            return Err(d.lim_s(s, "dom-string"));
-        }
     }
     if NEWLINE {
         text.push('\n');

@@ -5,8 +5,7 @@
 //! code the staging login needs only reads `length` and indexes the result at once (`webpack-runtime.js`).
 //!
 //! - The walk is iterative over the native tree, charges one step for each node (class lookups also charge for the
-//!   length of the `class` attribute and the number of names) and checks `max_results` before each result is added
-//!   (`Limit(Host("dom-results"))`). No document borrow is held while wrappers are made.
+//!   length of the `class` attribute and the number of names). A result list has no cap. No document borrow is held while wrappers are made.
 //! - `getElementsByTagName(name)`: `*` matches every element. Any other name is lowercased (ASCII) and compared with the
 //!   element name for an HTML element. An SVG or MathML element is compared with its qualified name as given (case-sensitive), as the DOM
 //!   Standard says for an HTML document. A name that is not in the document name table cannot match an HTML element, and a page with no
@@ -50,9 +49,6 @@ fn collect<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, root: bare_html::dom::Node
         let (yes, cost) = keep(&doc, c);
         s.charge(1 + cost)?;
         if yes {
-            if out.len() >= d.lim.max_results {
-                return Err(d.lim_s(s, "dom-results"));
-            }
             out.push(c);
         }
     }

@@ -36,16 +36,9 @@ use super::{Builder, Mode, Tm, Token};
 use crate::dom::{Document, NodeId, Ns};
 use crate::tokenizer::{Mark, Tokens};
 
-/// The caps of one fragment parse. The counts are for the fragment only (not for the top node and the root `html` of the temporary document).
+/// The bound of one fragment parse. The parse does not count nodes, text, attributes or names: the host and the process bound them.
 #[derive(Debug, Clone, Copy)]
 pub struct FragmentLimits {
-    /// Bytes of the input.
-    pub max_source: usize,
-    pub max_nodes: usize,
-    /// Bytes in the text buffer of the temporary document (it counts the bytes of texts that grew, too).
-    pub max_text_bytes: usize,
-    pub max_attr_slots: usize,
-    pub max_names: usize,
     /// How many elements may be open at once, and so the depth of the fragment.
     pub max_depth: usize,
 }
@@ -55,7 +48,7 @@ pub struct FragmentLimits {
 pub enum FragmentError {
     /// The context or the markup needs something that this parser does not have. The text names it.
     Unsupported(&'static str),
-    /// A cap was passed. The text is the name of the cap: `dom-string`, `dom-nodes`, `dom-text`, `dom-attrs`, `dom-names` or `dom-depth`.
+    /// A cap was passed. The text is the name of the cap: `dom-depth`.
     Limit(&'static str),
     /// The host's `tick` said stop (its budget is over).
     Stopped,
@@ -97,9 +90,6 @@ pub fn parse_fragment(
     let html = ns == Ns::Html;
     if html && let Some(why) = context_gate(context) {
         return Err(FragmentError::Unsupported(why));
-    }
-    if input.len() > lim.max_source {
-        return Err(FragmentError::Limit("dom-string"));
     }
     let mut b = Builder::new();
     let root = b.insert_element("html", &[], true);
@@ -157,21 +147,8 @@ pub fn parse_fragment(
             return Err(FragmentError::Stopped);
         }
         // The root `html` is on the stack.
-        let over = if len > lim.max_nodes + base {
-            Some("dom-nodes")
-        } else if b.doc.text_bytes() > lim.max_text_bytes {
-            Some("dom-text")
-        } else if b.doc.attr_slots() > lim.max_attr_slots {
-            Some("dom-attrs")
-        } else if b.doc.name_count() > lim.max_names {
-            Some("dom-names")
-        } else if b.open.len() > lim.max_depth + 1 {
-            Some("dom-depth")
-        } else {
-            None
-        };
-        if let Some(cap) = over {
-            return Err(FragmentError::Limit(cap));
+        if b.open.len() > lim.max_depth + 1 {
+            return Err(FragmentError::Limit("dom-depth"));
         }
     }
     b.finish();
@@ -184,7 +161,7 @@ mod tests {
     use super::*;
     use crate::dom::NodeData;
 
-    const BIG: FragmentLimits = FragmentLimits { max_source: 1 << 20, max_nodes: 1 << 16, max_text_bytes: 1 << 20, max_attr_slots: 1 << 16, max_names: 1 << 12, max_depth: 64 };
+    const BIG: FragmentLimits = FragmentLimits { max_depth: 64 };
 
     fn parse(input: &str, context: &str) -> Result<Fragment, FragmentError> {
         parse_fragment(input, context, Ns::Html, false, true, &BIG, &mut |_| true)
@@ -334,14 +311,10 @@ mod tests {
             l
         };
         let run = |input: &str, l: &FragmentLimits| parse_fragment(input, "div", Ns::Html, false, true, l, &mut |_| true).err();
-        assert_eq!(run(&"<i></i>".repeat(50), &lim(|l| l.max_nodes = 40)), Some(FragmentError::Limit("dom-nodes")));
-        assert_eq!(run(&"<i></i>".repeat(20), &lim(|l| l.max_nodes = 20)), None);
-        assert_eq!(run(&"x".repeat(500), &lim(|l| l.max_text_bytes = 100)), Some(FragmentError::Limit("dom-text")));
-        assert_eq!(run("<i a=1 b=2 c=3>", &lim(|l| l.max_attr_slots = 2)), Some(FragmentError::Limit("dom-attrs")));
-        assert_eq!(run("<i a=1 b=2 c=3>", &lim(|l| l.max_names = 3)), Some(FragmentError::Limit("dom-names")));
+        // Nodes, text, attributes and names have no cap: 2^17 elements with three attributes each parse.
+        assert_eq!(run(&"<i a=1 b=2 c=3>x</i>".repeat(1 << 17), &BIG), None);
         assert_eq!(run(&"<div>".repeat(10), &lim(|l| l.max_depth = 9)), Some(FragmentError::Limit("dom-depth")));
         assert_eq!(run(&"<div>".repeat(9), &lim(|l| l.max_depth = 9)), None);
-        assert_eq!(run("abcdef", &lim(|l| l.max_source = 5)), Some(FragmentError::Limit("dom-string")));
         let mut budget = 10u64;
         let stopped = parse_fragment(&"<i>".repeat(100), "div", Ns::Html, false, true, &BIG, &mut |n| {
             budget = budget.saturating_sub(n);

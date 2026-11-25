@@ -34,7 +34,7 @@ impl<E: Eng> Dom<E> {
     let d = self;
     let n = {
         let mut doc = d.doc.borrow_mut();
-        d.room_s(s, &doc, 5, title.as_ref().map_or(0, |t| t.len()))?;
+        d.room_s(s, &doc, title.as_ref().map_or(0, |t| t.len()))?;
         let none: &[(&str, &str)] = &[];
         let n = doc.create_document();
         let html = doc.insert_element(n, None, "html", none);
@@ -123,14 +123,11 @@ fn parse_from_string<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a:
     if !["text/html", "text/xml", "application/xml", "image/svg+xml"].contains(&mime.as_str()) {
         return Err(s.type_error("Invalid MIME type for DOMParser.parseFromString"));
     }
-    if text.len() > d.lim.max_string_bytes { return Err(d.lim_s(s, "dom-string")); }
     s.charge(text.len() as u64 + 1)?;
     let parsed = bare_html::tree::parse(&text);
     {
         let doc = d.doc.borrow();
-        d.room_s(s, &doc, parsed.len(), parsed.text_bytes())?;
-        if parsed.attr_slots() > d.lim.max_attr_slots.saturating_sub(doc.live_attr_slots()) { return Err(d.lim_s(s, "dom-attrs")); }
-        if doc.name_count() + parsed.new_names_in(&doc) > d.lim.max_names { return Err(d.lim_s(s, "dom-names")); }
+        d.room_s(s, &doc, parsed.text_bytes())?;
     }
     s.charge(parsed.len() as u64)?;
     // The nodes of the copy stay in the arena until a reclaim frees them: they count towards the next collect (`Interp::gc_due`).
@@ -169,7 +166,7 @@ fn serialize_to_string<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, 
     let n = d.nd_s(s, v)?;
     let doc = d.doc.borrow();
     let whole = !matches!(doc.data(n), bare_html::dom::NodeData::Document);
-    let text = crate::browser_fragment::serialize(d, s, &doc, n, whole)?;
+    let text = crate::browser_fragment::serialize::<E>(s, &doc, n, whole)?;
     d.js_str_s(s, &text)
 }
 

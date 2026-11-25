@@ -239,20 +239,6 @@ fn a_map_is_not_plain_data() {
 }
 
 #[test]
-fn caps_are_host_limits_not_catchable_errors() {
-    big(|| {
-        let lim = BrowserLimits { max_attr_slots: 40, ..Default::default() };
-        let mut b = browser_with("<!doctype html><body><p id=p></p></body>", lim, 5_000_000);
-        let r = b.run_script("var ds = document.getElementById('p').dataset; try { for (var i = 0; i < 100; i++) ds['k' + i] = 'v'; 'done' } catch (e) { 'caught' }");
-        assert!(matches!(r, Err(Error::Limit(_))), "{:?}", show(&mut b, r));
-        let lim = BrowserLimits { max_wrappers: 8, ..Default::default() };
-        let mut b = browser_with("<!doctype html><body><p id=p></p></body>", lim, 5_000_000);
-        let r = b.run_script("var all = []; for (var i = 0; i < 50; i++) { var x = document.createElement('i'); all.push(x.dataset); } 1");
-        assert!(matches!(r, Err(Error::Limit(_))), "{:?}", show(&mut b, r));
-    });
-}
-
-#[test]
 #[ignore = "vex: '2000000'"]
 fn step_budget_bounds_key_listing() {
     big(|| {

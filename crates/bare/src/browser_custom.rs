@@ -1246,9 +1246,6 @@ fn strings<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>) -> Res<'s, V
             },
             None => break,
         }
-        if out.len() > d.lim.max_names {
-            return Err(d.lim_s(s, "custom-observed-attributes"));
-        }
     }
     Ok(out)
 }

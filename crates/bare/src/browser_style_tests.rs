@@ -413,13 +413,10 @@ fn caps_are_uncatchable_and_checked_before_growth() {
     js(&mut b, A);
     js(&mut b, &format!("a.setAttribute('style', 'color:red;{}')", " ".repeat(200_000)));
     assert_eq!(js(&mut b, "s.length"), "limit:Steps");
-    // The native text cap stays: writes add text to the arena, which never shrinks.
-    let doc = tree::parse(PAGE);
-    let cap = doc.text_bytes() + 300;
-    let mut b = Browser::new(doc, BrowserLimits { max_text_bytes: cap, ..Default::default() }, EvalLimits::default(), HeapLimits::default()).unwrap();
+    // Many writes in one task have no text cap.
+    let mut b = at(PAGE);
     js(&mut b, A);
-    assert_eq!(js(&mut b, "try { for (var i = 0; i < 100; i++) s.setProperty('--v', 'value number ' + i); 'ok' } catch (e) { 'caught' }"), lim("dom-text"));
-    assert!(b.stats().text_bytes <= 2 * cap, "dead text waits for a rebuild: the list holds at most twice the cap");
+    assert_eq!(js(&mut b, "try { for (var i = 0; i < 100; i++) s.setProperty('--v', 'value number ' + i); 'ok' } catch (e) { 'caught' }"), "ok");
 }
 
 #[test]

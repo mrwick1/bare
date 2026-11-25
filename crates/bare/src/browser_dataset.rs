@@ -24,8 +24,7 @@
 //! - SVG elements have `dataset` too (`SVGElement.prototype`). `setAttribute` keeps the case on an SVG element, so `data-Up` has an
 //!   ASCII upper alpha and is not in the map.
 //!
-//! Caps: map objects count against `max_wrappers` (`dom-wrappers`, checked before one is made). A value or name that grows the document
-//! uses the shared checks of `attr_set` (`dom-text`, `dom-attrs`, `dom-names`). Reads never scan a long attribute list for free: an
+//! Caps: map objects (`dataset` objects) have no count cap. A value that grows the document uses the text check of `attr_set`. Reads never scan a long attribute list for free: an
 //! element with more than `SCAN_FREE` attributes makes the heap ask the evaluator first (`HeapError::NeedsHost`, `fill`), which charges
 //! the step budget (1 step for 8 attributes, as `getAttributeNames` does), then the read repeats.
 //!
@@ -346,9 +345,6 @@ fn dataset_of<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, svg: b
     }
     if let Some(&o) = d.dataset.s.borrow().by_el.get(&el) {
         return Ok(d.obj_local(s, o));
-    }
-    if d.dataset.s.borrow().objs.len() >= d.lim.max_wrappers {
-        return Err(d.lim_s(s, "dom-wrappers"));
     }
     let proto = *d.dataset.proto.get().expect("installed");
     let o = d.new_source_s(s, crate::browser_sources::Source::Dataset, Some(proto))?;

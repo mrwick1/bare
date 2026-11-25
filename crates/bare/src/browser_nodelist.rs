@@ -15,16 +15,13 @@
 //!   a namespace). A change made by script, parser, import or a native host call therefore invalidates the cache the same way.
 //! - The heap callbacks have no `Interp` and cannot charge, so they never scan. When the revision is not the cached one
 //!   they answer `HeapError::NeedsHost`. The evaluator then calls `Host::fill_indexed` (`fill`), which runs `prepare`: it
-//!   charges the steps for each node it walks (before the node is looked at), checks the result cap before each push
-//!   (`dom-results`) and the cap of all cached ids (`dom-nodelist-nodes`) before the vector grows, and then stores the new
-//!   ids with the revision. The same routine runs for the `length` getter and `item`. A failed rebuild changes nothing.
+//!   charges the steps for each node it walks (before the node is looked at), and then stores the new ids with the revision. The same routine runs for the `length` getter and `item`. A failed rebuild changes nothing.
 //! - A wrapper of a member node is made the first time it is read (`fill`), and read back from the wrapper table each time,
 //!   so a collected wrapper is never a stale handle. The list traces the document wrapper (its root).
 //! - Cost: after a change the next read walks the document once (steps are charged for it). A loop that changes the tree
 //!   and reads `length` each time is quadratic in steps, and the step budget bounds it.
 //!
-//! Caps: list objects count with `max_wrappers` (with wrappers, `Attr`s and maps). The names that lists hold are capped in
-//! all (`dom-nodelist-names`). Every list costs a table entry until the collector prunes it.
+//! Caps: none. Every list costs a table entry until the collector prunes it.
 //!
 //! `Src::Labels` is the list behind `control.labels` (`browser_controls.rs`): the `label` elements of the tree of the control that name it.
 //! `Src::Of` is a collection of one element (`table.rows`, `tr.cells`, `form.elements`, see `browser_table.rs`); `of` keeps one list for each.
@@ -47,8 +44,6 @@ use std::rc::Rc;
 
 type V<E: Eng> = R<E, E::Raw>;
 
-/// Bytes of list names that are alive at one time.
-const MAX_NAME_BYTES: usize = 1 << 20;
 
 /// What a list holds: the elements with a `name` (`getElementsByName`), the options of a select (`browser_select.rs`), or the labels of
 /// a control (`browser_controls.rs`).
@@ -201,12 +196,6 @@ fn prepare<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, owner: E::Obj) -> Res<'s, 
                 m if m >= 3 + CHILD_NODES => d.kids_s(s, owner_node, m == 3 + CHILDREN)?,
                 m => crate::browser_table::ids(d, s, owner_node, m - 3)?,
             };
-            if ids.len() > d.lim.max_results {
-                return Err(d.lim_s(s, "dom-results"));
-            }
-            if base + ids.len() > d.lim.max_results.saturating_mul(4) {
-                return Err(d.lim_s(s, "dom-nodelist-nodes"));
-            }
             let rev = d.doc.borrow().revision();
             let mut t = d.nl.s.borrow_mut();
             let t = &mut *t;
@@ -239,12 +228,6 @@ fn prepare<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, owner: E::Obj) -> Res<'s, 
                 let value = if doc.element_ns(c) == Ns::Html { doc.attr(c, atom) } else { None };
                 if let Some(value) = value { s.charge(value.len().min(name.len()) as u64 / 32 + 1)?; }
                 if value == Some(&*name) {
-                    if out.len() >= d.lim.max_results {
-                        return Err(d.lim_s(s, "dom-results"));
-                    }
-                    if base + out.len() >= d.lim.max_results.saturating_mul(4) {
-                        return Err(d.lim_s(s, "dom-nodelist-nodes"));
-                    }
                     out.push(c);
                 }
             }
@@ -317,15 +300,6 @@ pub(crate) fn get_elements_by_name<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, th
 /// A new live list over `src`, with the prototype `proto`. It counts with the wrappers.
 pub(crate) fn make_list<E: Eng>(d: &Dom<E>, it: &mut E::Vm, proto: E::Obj, src: Src) -> V<E> {
     let n = if let Src::Name(n) = &src { n.len() } else { 0 };
-    {
-        let (t, at) = (d.nl.s.borrow(), d.attr.s.borrow());
-        if d.st.borrow().by_obj.len() + at.attrs.len() + at.maps.len() + t.lists.len() >= d.lim.max_wrappers {
-            return Err(d.lim("dom-wrappers"));
-        }
-        if t.name_bytes + n > MAX_NAME_BYTES {
-            return Err(d.lim("dom-nodelist-names"));
-        }
-    }
     let o = d.new_source(it, crate::browser_sources::Source::NodeList, Some(proto))?;
     let mut t = d.nl.s.borrow_mut();
     t.name_bytes += n;
@@ -402,11 +376,6 @@ pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> 
 }
 
 impl<E: Eng> Dom<E> {
-    /// How many `NodeList` objects are alive in the table (they count with `max_wrappers`).
-    pub(crate) fn nl_count(&self) -> usize {
-        self.nl.s.borrow().lists.len()
-    }
-
     /// Is `o` a `NodeList` of this module (so not plain data for structured clone)?
     pub(crate) fn is_nodelist_object(&self, o: E::Obj) -> bool {
         self.nl.s.borrow().lists.contains_key(&o)

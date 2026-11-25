@@ -181,9 +181,6 @@ impl<E: Eng> Dom<E> {
         let mut out = Vec::new();
         for c in found {
             if self.form_owner(it, c)? == Some(form) {
-                if out.len() >= self.lim.max_results {
-                    return Err(self.lim("dom-results"));
-                }
                 out.push(c);
             }
         }

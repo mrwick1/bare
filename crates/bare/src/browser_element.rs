@@ -435,9 +435,6 @@ fn inner_text<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Arg
     };
     while let Some((c, exit)) = stack.pop() {
         s.charge(1)?;
-        if out.s.len() > d.lim.max_string_bytes {
-            return Err(d.lim_s(s, "dom-string"));
-        }
         match *doc.data(c) {
             NodeData::Text(sp) => {
                 let Some(p) = doc.parent(c).and_then(|p| styles.style(p)) else { continue };
@@ -533,7 +530,7 @@ fn set_inner_text<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a:
     let lines: Vec<&str> = if st.is_empty() { Vec::new() } else { st.split('\n').collect() };
     d.mo_group(Some(n), || {
         let mut doc = d.doc.borrow_mut();
-        d.room_s(s, &doc, lines.iter().filter(|l| !l.is_empty()).count() + lines.len().saturating_sub(1), st.len())?;
+        d.room_s(s, &doc, st.len())?;
         while let Some(c) = doc.children(n).next() {
             s.charge(1)?;
             doc.detach(c);

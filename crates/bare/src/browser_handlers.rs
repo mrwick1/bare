@@ -36,7 +36,6 @@
 //! - Dispatch (`browser_events.rs`, `call_handler`): `this` is the current target, `false` cancels a cancelable event, a throw is reported,
 //!   a Limit/Unsupported/heap fault ends the dispatch. The `error` handler of the window gets `(message, filename, lineno, colno, error)`
 //!   for an `ErrorEvent`, and `true` cancels (`false` does not).
-//! - Caps: a new slot counts against `max_listeners` before anything changes.
 //! - Not done: the special return value of `beforeunload` (no page leaves here), line and column of an `ErrorEvent` (0).
 
 use crate::eng::{Eng, Fault, Ops, Val};
@@ -301,9 +300,6 @@ pub(crate) fn handler_set<E: Eng>(d: &Dom<E>, it: &mut E::Vm, t: Target<E>, ty: 
             st.n_listeners -= 1;
         }
         (None, Some(cb)) => {
-            if st.n_listeners >= d.lim.max_listeners {
-                return Err(d.lim("dom-listeners"));
-            }
             st.next_id += 1;
             let id = st.next_id;
             let cb = it.trace_value(E::obj_raw(cb));
@@ -435,10 +431,6 @@ fn activate<E: Eng>(d: &Dom<E>, st: &mut State<E>, t: Target<E>, ty: &Rc<str>, s
         // The global is a placeholder until the compile. It is always live, so it needs no write barrier and no owner.
         l.cb.set_raw(E::obj_raw(g));
         st.hd.raw.insert(l.id, src);
-        return;
-    }
-    // At a cap the attribute is not made a handler (the property setter reports the cap; a markup attribute has no caller to tell).
-    if st.n_listeners >= d.lim.max_listeners {
         return;
     }
     st.next_id += 1;

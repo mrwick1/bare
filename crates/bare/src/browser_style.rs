@@ -473,10 +473,6 @@ impl<E: Eng> Dom<E> {
     pub(crate) fn rule_declaration_s<'s>(&self, s: &mut Sc<'s, E>, text: &str) -> Res<'s, E::Obj> {
         let el = {
             let mut doc = self.doc.borrow_mut();
-            self.room(&doc, 1, 0).map_err(|e| lift_err::<E>(s, e))?;
-            if doc.find_atom("span").is_none() && doc.name_count() + 1 > self.lim.max_names {
-                return Err(self.lim_s(s, "dom-names"));
-            }
             doc.create_element("span")
         };
         let o = style_object(self, s, el)?;

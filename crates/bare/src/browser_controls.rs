@@ -877,9 +877,6 @@ pub(crate) fn label_ids<E: Eng>(d: &Dom<E>, it: &mut E::Vm, control: NodeId) -> 
     let mut out = Vec::new();
     for l in all {
         if d.label_control(it, l)? == Some(control) {
-            if out.len() >= d.lim.max_results {
-                return Err(d.lim("dom-results"));
-            }
             out.push(l);
         }
     }

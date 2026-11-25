@@ -6,7 +6,7 @@ use crate::eng_new::Peek;
 use crate::browser::*;
 use bare_html::tree;
 use crate::eng_new::NewFault as Error;
-use crate::js_limits::{EvalLimits, LimitKind};
+use crate::js_limits::EvalLimits;
 use crate::js_limits::HeapLimits;
 use bare_vex::value::Value;
 
@@ -401,51 +401,6 @@ fn wrappers_and_listeners_cross_scripts() {
         assert_eq!(js(&mut b, &format!("var t = document.body.lastChild; [t === s, t.namespaceURI === '{SVG}', t instanceof SVGElement].join()")), "true,true,true");
         js(&mut b, "t.dispatchEvent(new Event('t'));");
         assert_eq!(js(&mut b, "seen.join()"), format!("{SVG}:svg:true"));
-    });
-}
-
-#[test]
-fn native_caps_apply_to_namespaced_names_and_attributes() {
-    big(|| {
-        // names: the table holds the local name and the prefix; a refusal creates no node and no name
-        let base = browser().document().borrow().name_count();
-        let mut small = browser_with(PAGE, BrowserLimits { max_names: base + 2, ..Default::default() });
-        let lim_names = format!("limit:{:?}", LimitKind::Host("dom-names"));
-        assert_eq!(js(&mut small, &format!("document.createElementNS('{SVG}', 'p1:a1') && 1")), "1");
-        let (nodes, names) = (small.stats().nodes, small.document().borrow().name_count());
-        assert_eq!(js(&mut small, &format!("document.createElementNS('{SVG}', 'p2:a2')")), lim_names);
-        assert_eq!(js(&mut small, &format!("document.createElementNS('{SVG}', 'a3')")), lim_names);
-        assert_eq!((small.stats().nodes, small.document().borrow().name_count()), (nodes, names));
-        // an existing name needs no room
-        assert_eq!(js(&mut small, &format!("document.createElementNS('{SVG}', 'p1:a1') && 1")), "1");
-        // a namespaced attribute needs a name of its own
-        let base = browser().document().borrow().name_count();
-        let mut small = browser_with(PAGE, BrowserLimits { max_names: base, ..Default::default() });
-        assert_eq!(js(&mut small, &format!("document.body.setAttributeNS('{XLINK}', 'xlink:href', 'v')")), lim_names);
-        assert_eq!(small.document().borrow().name_count(), base);
-        // nodes
-        let mut tiny = browser_with(PAGE, BrowserLimits { max_nodes: 8, ..Default::default() });
-        let n = tiny.stats().nodes;
-        assert_eq!(js(&mut tiny, &format!("var r = 0; for (var i = 0; i < 20; i++) {{ document.createElementNS('{SVG}', 'g'); r++ }} r")), format!("limit:{:?}", LimitKind::Host("dom-nodes")));
-        assert_eq!(tiny.stats().nodes, 8);
-        assert!(n <= 8);
-        // attribute slots and text
-        let slots = browser().stats().attr_slots;
-        let mut few = browser_with(PAGE, BrowserLimits { max_attr_slots: slots + 4, ..Default::default() });
-        assert_eq!(js(&mut few, &format!("var s = document.createElementNS('{SVG}', 'svg'); s.setAttributeNS('{XLINK}', 'xlink:href', 'a'); s.setAttributeNS('{XLINK}', 'xlink:href', 'b'); 1")), "1");
-        let before = few.stats().attr_slots;
-        let r = js(&mut few, "s.setAttributeNS(null, 'x', '1'); s.setAttributeNS(null, 'y', '2'); s.setAttributeNS(null, 'z', '3')");
-        assert_eq!(r, format!("limit:{:?}", LimitKind::Host("dom-attrs")));
-        assert!(few.stats().attr_slots <= before + 1);
-        let mut text = browser_with(PAGE, BrowserLimits { max_text_bytes: 2000, ..Default::default() });
-        assert_eq!(js(&mut text, &format!("var big = 'x'; for (var i = 0; i < 13; i++) big += big; document.body.setAttributeNS('{XLINK}', 'xlink:href', big)")), format!("limit:{:?}", LimitKind::Host("dom-text")));
-        // a deep clone is counted before it is made (nodes)
-        let mut clone = browser_with(PAGE, BrowserLimits { max_nodes: 30, ..Default::default() });
-        js(&mut clone, &format!("var r = document.createElementNS('{SVG}', 'svg'); for (var i = 0; i < 10; i++) r.appendChild(document.createElementNS('{SVG}', 'g'));"));
-        let n = clone.stats().nodes;
-        assert_eq!(js(&mut clone, "var a = r.cloneNode(true); var b2 = r.cloneNode(true); 1"), format!("limit:{:?}", LimitKind::Host("dom-nodes")));
-        assert!(clone.stats().nodes <= 30);
-        assert!(clone.stats().nodes >= n + 11);
     });
 }
 

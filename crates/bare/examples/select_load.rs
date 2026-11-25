@@ -50,8 +50,7 @@ fn exec(name: &str, n: usize) {
     let opts: String = (0..n).map(|i| format!("<option value=v{i}>Option {i}</option>")).collect();
     let doc = tree::parse(&format!("<body><select id=s>{opts}</select><select id=m multiple>{opts}</select></body>"));
     let eval = EvalLimits { max_steps: u64::MAX / 2, ..Default::default() };
-    let limits = BrowserLimits { max_results: 1 << 20, max_nodes: 1 << 22, ..Default::default() };
-    let mut b = Browser::new(doc, limits, eval, HeapLimits::default()).unwrap_or_else(|e| die(format!("browser: {e:?}")));
+    let mut b = Browser::new(doc, BrowserLimits::default(), eval, HeapLimits::default()).unwrap_or_else(|e| die(format!("browser: {e:?}")));
     let (cpu0, t) = (cpu_ms(), Instant::now());
     let (mut gc_ms, mut freed) = (0.0, 0);
     match name {

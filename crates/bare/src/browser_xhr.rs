@@ -229,8 +229,8 @@ impl<E: Eng> Dom<E> {
     }
 
     fn event_object(&self, it: &mut E::Vm, proto: E::Obj) -> R<E, E::Obj> {
-        if self.st.borrow().by_obj.len() >= self.lim.max_wrappers || self.xhr.s.borrow().objs.len() >= MAX_OBJECTS {
-            return Err(self.lim("dom-wrappers"));
+        if self.xhr.s.borrow().objs.len() >= MAX_OBJECTS {
+            return Err(self.lim("xhr-objects"));
         }
         let o = self.obj(it, proto)?;
         self.st.borrow_mut().by_obj.insert(o, Target::Obj(o));

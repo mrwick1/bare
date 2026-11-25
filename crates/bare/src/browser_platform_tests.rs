@@ -176,9 +176,6 @@ fn match_media_caps() {
         b.collect(&[]).unwrap();
         assert_eq!(b.platform_stats().rooted_media_lists, 3);
         assert_eq!(js(&mut b, "matchMedia('all')"), lim("media-lists"));
-        // A string argument over the byte cap of the realm string is refused before any copy.
-        let mut small = Browser::new(tree::parse(PAGE), BrowserLimits { max_string_bytes: 100, ..Default::default() }, EvalLimits::default(), HeapLimits::default()).unwrap();
-        assert_eq!(js(&mut small, &format!("matchMedia('{}')", "a".repeat(200))), lim("dom-string"));
     });
 }
 
@@ -547,13 +544,11 @@ fn class_list_caps() {
         assert_eq!(js(&mut b, "a.value"), "x y");
         js(&mut b, "var i1=a.values()");
         assert_eq!(js(&mut b, "a.keys()"), lim("token-iterators"));
-        // The native text buffer caps repeated rewrites.
-        let mut small = Browser::new(tree::parse(PAGE), BrowserLimits { max_text_bytes: 400, ..Default::default() }, EvalLimits::default(), HeapLimits::default()).unwrap();
-        let r = js(&mut small, "var c=document.getElementById('a').classList; for (var i=0;i<1000;i++){ c.add('t'); c.remove('t'); } 'done'");
-        assert_eq!(r, lim("dom-text"));
         // Writing the same text again does not grow the buffer.
-        let mut s2 = Browser::new(tree::parse(PAGE), BrowserLimits { max_text_bytes: 400, ..Default::default() }, EvalLimits::default(), HeapLimits::default()).unwrap();
+        let mut s2 = mk(PAGE, 100_000_000);
+        let before = s2.stats().text_bytes;
         assert_eq!(js(&mut s2, "var c=document.getElementById('a').classList; for (var i=0;i<2000;i++){ c.add('x'); c.toggle('y', true); c.contains('x') } c.value"), "x y");
+        assert!(s2.stats().text_bytes < before + 400, "{} bytes", s2.stats().text_bytes);
         // A long attribute costs steps, so a loop over it stops under a small budget.
         let mut tiny = mk(PAGE, 300_000);
         let r = js(&mut tiny, "var e=document.getElementById('a'); e.className = new Array(5000).join('tok '); var c=e.classList; for (var i=0;i<100000;i++) c.item(4000); 'done'");
@@ -606,11 +601,6 @@ fn get_elements_by_class_name() {
         js(&mut b, "document.getElementById('p1').classList.add('zz')");
         assert_eq!(js(&mut b, &format!("r=document.getElementsByClassName('zz a'); {ids}")), "p1", "sees the class list change");
         assert_eq!(js(&mut b, "document.getElementsByClassName()"), "throw:TypeError:Failed to execute 'getElementsByClassName': 1 argument required, but only 0 present.");
-        // The collection cap is a Limit before the array grows.
-        let mut small = Browser::new(tree::parse(TREE), BrowserLimits { max_results: 2, ..Default::default() }, EvalLimits::default(), HeapLimits::default()).unwrap();
-        assert_eq!(js(&mut small, "document.getElementsByClassName('a').length"), lim("dom-results"));
-        assert_eq!(js(&mut small, "document.getElementsByTagName('*').length"), lim("dom-results"));
-        assert_eq!(js(&mut small, "document.getElementsByClassName('c').length"), "1");
         // The name cap.
         b.set_platform_limits(PlatformLimits { max_class_tokens: 2, ..Default::default() });
         assert_eq!(js(&mut b, "document.getElementsByClassName('a b c')"), lim("class-tokens"));
@@ -628,9 +618,6 @@ fn get_elements_by_work_is_charged_and_bounded() {
         assert_eq!(js(&mut tiny, "document.getElementsByTagName('i').length"), "limit:Steps");
         let mut tiny = mk(&page, 2_000);
         assert_eq!(js(&mut tiny, "document.getElementsByClassName('k').length"), "limit:Steps");
-        // Wrappers are bounded too (the result needs a wrapper for each node).
-        let mut few = Browser::new(tree::parse(&page), BrowserLimits { max_wrappers: 50, ..Default::default() }, EvalLimits { max_steps: 5_000_000, ..Default::default() }, HeapLimits::default()).unwrap();
-        assert_eq!(js(&mut few, "document.getElementsByTagName('i').length"), lim("dom-wrappers"));
     });
 }
 

@@ -142,40 +142,24 @@ pub(crate) fn valid_name(s: &str) -> bool {
 }
 
 impl<E: Eng> Dom<E> {
-    /// Room for `nodes` more nodes and `text` more bytes of text in the native arena.
-    pub(crate) fn room(&self, doc: &Document, nodes: usize, text: usize) -> R<E, ()> {
-        if doc.live_len() + nodes > self.lim.max_nodes {
-            return Err(self.lim("dom-nodes"));
-        }
-        // The list holds the live text and the dead text, so a list under the cap is one test.
+    /// Room for `text` more bytes of text in the native arena. Nodes, names and attributes have no cap: the heap and the process bound them.
+    /// Replaced text stays in the list as dead text until a rebuild between two tasks. A list past `TEXT_COMPACT` asks for a rebuild.
+    pub(crate) fn room(&self, doc: &Document, text: usize) -> R<E, ()> {
         let all = doc.text_bytes().saturating_add(text);
-        if all > self.lim.max_text_bytes {
-            return self.text_room(doc, text, all);
+        if all > crate::browser_reclaim::TEXT_COMPACT {
+            return self.text_room(all);
         }
         Ok(())
     }
 
-    /// The text list is over the cap. Replaced text stays in the list as dead text until a rebuild between two tasks: the list may hold as much
-    /// dead text as the cap, and asks for a rebuild.
+    /// A `Span` keeps a `u32` offset, so a list past 4 GiB cannot grow before the rebuild: `dom-text`.
     #[cold]
     #[inline(never)]
-    fn text_room(&self, doc: &Document, text: usize, all: usize) -> R<E, ()> {
-        if doc.live_text_bytes().saturating_add(text) > self.lim.max_text_bytes || all > self.lim.max_text_bytes.saturating_mul(2) {
+    fn text_room(&self, all: usize) -> R<E, ()> {
+        if u32::try_from(all).is_err() {
             return Err(self.lim("dom-text"));
         }
         self.compact_wanted(all);
-        Ok(())
-    }
-
-    /// Room for a new attribute (name, slot, value).
-    pub(crate) fn attr_room(&self, doc: &Document, el: NodeId, name: &str, value: &str) -> R<E, ()> {
-        self.room(doc, 0, value.len())?;
-        if doc.live_attr_slots() + doc.attr_count(el) + 1 > self.lim.max_attr_slots {
-            return Err(self.lim("dom-attrs"));
-        }
-        if doc.find_atom(name).is_none() && doc.name_count() + 1 > self.lim.max_names {
-            return Err(self.lim("dom-names"));
-        }
         Ok(())
     }
 
@@ -210,9 +194,6 @@ impl<E: Eng> Dom<E> {
             s.charge(1)?;
             if only_elements && !matches!(doc.data(c), NodeData::Element { .. }) {
                 continue;
-            }
-            if v.len() >= self.lim.max_results {
-                return Err(self.lim_s(s, "dom-results"));
             }
             v.push(c);
         }
@@ -279,9 +260,6 @@ impl<E: Eng> Dom<E> {
                 }
             }
             if hit {
-                if out.len() >= self.lim.max_results {
-                    return Err(self.lim_s(s, "dom-results"));
-                }
                 out.push(c);
                 if !all {
                     break;
@@ -300,9 +278,6 @@ impl<E: Eng> Dom<E> {
             s.charge(1)?;
             if doc.attr(node, Atom::ID) == Some(id) {
                 s.charge(1)?;
-                if out.len() >= self.lim.max_results {
-                    return Err(self.lim_s(s, "dom-results"));
-                }
                 out.push(node);
                 if !all {
                     break;
@@ -605,7 +580,7 @@ impl<E: Eng> Dom<E> {
             } else {
                 let text = self.string_arg_s(s, v)?;
                 let mut doc = self.doc.borrow_mut();
-                self.room_s(s, &doc, 1, text.len())?;
+                self.room_s(s, &doc, text.len())?;
                 out.push(doc.create_text(&text));
             }
         }
@@ -634,18 +609,9 @@ impl<E: Eng> Dom<E> {
         Some(f(&crate::browser_controls::sanitize(kind, multiple, attr)))
     }
 
-    /// The bytes that all dirty values hold stay under `max_text_bytes` when the value of `n` has `len` bytes.
-    pub(crate) fn value_room(&self, n: NodeId, len: usize) -> R<E, ()> {
-        let old = self.st.borrow().inputs.get(&n).and_then(|i| i.value.as_ref()).map_or(0, String::len);
-        if self.st.borrow().input_bytes - old + len > self.lim.max_text_bytes {
-            return Err(self.lim("dom-input-bytes"));
-        }
-        Ok(())
-    }
 
     /// Store the dirty value of a text control. `reset_caret`: a changed value puts the caret at the end (HTML: setting `value`).
     pub(crate) fn write_value(&self, n: NodeId, v: String, reset_caret: bool) -> R<E, ()> {
-        self.value_room(n, v.len())?;
         let mut st = self.st.borrow_mut();
         let old = st.inputs.get(&n).and_then(|i| i.value.as_ref()).map_or(0, String::len);
         st.input_bytes = st.input_bytes - old + v.len();
@@ -683,9 +649,6 @@ impl<E: Eng> Dom<E> {
         if let Some(t) = text {
             if is_check || matches!(kind, "file" | "button" | "submit" | "reset" | "image") {
                 return Err(Fault::Unsupported("test driver: type_text needs a text-like <input>"));
-            }
-            if t.len() > self.lim.max_string_bytes {
-                return Err(self.lim("dom-string"));
             }
             self.put_input_value(None, n, t.to_string())?;
         }
@@ -775,7 +738,7 @@ pub(crate) fn set_node_value_text<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, thi
     let v = arg_s::<E>(s, a, 0);
     let text = if s.type_of(v) == Type::Null { String::new() } else { d.string_arg_s(s, v)? };
     let mut doc = d.doc.borrow_mut();
-    d.room_s(s, &doc, 0, text.len())?;
+    d.room_s(s, &doc, text.len())?;
     d.range_set_data(&doc, n, &text);
     doc.set_text(n, &text);
     Ok(s.undefined())
@@ -971,9 +934,6 @@ pub(crate) fn text_content_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Lo
                     (cur, depth) = (c, cd);
                     if let NodeData::Text(sp) = *doc.data(c) {
                         let text = doc.text(sp);
-                        if text.len() > d.lim.max_string_bytes.saturating_sub(out.len()) {
-                            return Err(d.lim_s(s, "dom-string"));
-                        }
                         out.push_str(text);
                     }
                 }
@@ -992,7 +952,7 @@ pub(crate) fn set_text_content_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this
         NodeData::Element { .. } | NodeData::ShadowRoot => {
             let r = d.mo_group(Some(n), || {
                 let mut doc = d.doc.borrow_mut();
-                d.room_s(s, &doc, !text.is_empty() as usize, text.len())?;
+                d.room_s(s, &doc, text.len())?;
                 // Charge before the tree changes: a step limit then leaves the old children, never half of them.
                 s.charge(doc.children(n).count() as u64)?;
                 d.iter_told_all(&doc, n);
@@ -1010,7 +970,7 @@ pub(crate) fn set_text_content_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this
         }
         NodeData::Text(_) | NodeData::Comment(_) => {
             let mut doc = d.doc.borrow_mut();
-            d.room_s(s, &doc, 0, text.len())?;
+            d.room_s(s, &doc, text.len())?;
             d.range_set_data(&doc, n, &text);
             doc.set_text(n, &text);
         }
@@ -1229,7 +1189,7 @@ pub(crate) fn insert_adjacent_text<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, th
     let Some((parent, before)) = adjacent_place(d, me, pos) else { return Ok(s.undefined()) };
     let t = {
         let mut doc = d.doc.borrow_mut();
-        d.room_s(s, &doc, 1, text.len())?;
+        d.room_s(s, &doc, text.len())?;
         doc.create_text(&text)
     };
     d.insert_checked_s(s, parent, t, before, Op(NAME, "Element"))?;
@@ -1254,7 +1214,6 @@ pub(crate) fn new_fragment_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, proto: O
     tag_fragments_s(d, s)?;
     let n = {
         let mut doc = d.doc.borrow_mut();
-        d.room_s(s, &doc, 1, 0)?;
         doc.create_fragment()
     };
     let w = d.wrap_s(s, n)?;
@@ -1284,18 +1243,15 @@ pub(crate) fn clone_node<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<
 /// The clone of `n` (and of what it holds, when `deep`): a new tree, not linked. The Document and a shadow root are the caller's to refuse.
 /// `import`: the clone belongs to the document even when `n` is in the inert tree of a template (`importNode`).
 pub(crate) fn clone_tree_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, n: NodeId, deep: bool, import: bool) -> Res<'s, NodeId> {
-    // Count first, so a clone that does not fit makes no node at all.
-    let (mut count, mut bytes, mut attrs, mut input_bytes) = (1usize, 0usize, 0usize, 0usize);
+    // Measure the text first, so a clone that does not fit makes no node at all.
+    let mut bytes = 0usize;
     {
         let doc = d.doc.borrow();
-        let st = d.st.borrow();
         let mut account = |c: NodeId| {
             bytes += match *doc.data(c) {
                 NodeData::Text(sp) | NodeData::Comment(sp) | NodeData::Doctype(sp) => doc.text(sp).len(),
                 _ => 0,
             };
-            attrs += doc.attr_count(c);
-            input_bytes += st.inputs.get(&c).and_then(|i| i.value.as_ref()).map_or(0, String::len);
         };
         account(n);
         // The contents of the templates in the subtree are cloned with it.
@@ -1305,29 +1261,20 @@ pub(crate) fn clone_tree_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, n: NodeId,
             while let Some((c, cd)) = next_in(&doc, n, cur, depth) {
                 s.charge(1)?;
                 (cur, depth) = (c, cd);
-                count += 1;
                 account(c);
                 contents.extend(doc.template_content(c));
             }
             while let Some(f) = contents.pop() {
-                count += 1;
                 let (mut cur, mut depth) = (f, 0);
                 while let Some((c, cd)) = next_in(&doc, f, cur, depth) {
                     s.charge(1)?;
                     (cur, depth) = (c, cd);
-                    count += 1;
                     account(c);
                     contents.extend(doc.template_content(c));
                 }
             }
         }
-        d.room_s(s, &doc, count, bytes)?;
-        if attrs > d.lim.max_attr_slots.saturating_sub(doc.live_attr_slots()) {
-            return Err(d.lim_s(s, "dom-attrs"));
-        }
-        if input_bytes > d.lim.max_text_bytes.saturating_sub(st.input_bytes) {
-            return Err(d.lim_s(s, "dom-input-bytes"));
-        }
+        d.room_s(s, &doc, bytes)?;
     }
     let root_clone = {
         let mut doc = d.doc.borrow_mut();
@@ -1411,7 +1358,7 @@ pub(crate) fn local_name<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<
 
 pub(crate) fn attr_set_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, n: NodeId, name: &str, value: &str) -> Res<'s, ()> {
     let mut doc = d.doc.borrow_mut();
-    d.attr_room_s(s, &doc, n, name, value)?;
+    d.room_s(s, &doc, value.len())?;
     s.charge(doc.attr_count(n) as u64 + 1)?;
     doc.set_attr(n, name, value);
     Ok(())
@@ -1634,10 +1581,6 @@ fn new_name<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>) -> Res<'s, 
 pub(crate) fn make_element_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, name: &str) -> Res<'s, Local<'s>> {
     let n = {
         let mut doc = d.doc.borrow_mut();
-        d.room_s(s, &doc, 1, 0)?;
-        if doc.find_atom(name).is_none() && doc.name_count() + 1 > d.lim.max_names {
-            return Err(d.lim_s(s, "dom-names"));
-        }
         doc.create_element(name)
     };
     d.wrap_s(s, n)
@@ -1662,7 +1605,7 @@ pub(crate) fn create_text_node<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: 
     let text = d.arg_str_s(s, a, 0)?;
     let n = {
         let mut doc = d.doc.borrow_mut();
-        d.room_s(s, &doc, 1, text.len())?;
+        d.room_s(s, &doc, text.len())?;
         doc.create_text(&text)
     };
     let v = d.wrap_s(s, n)?;
@@ -1675,7 +1618,7 @@ pub(crate) fn create_comment<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Lo
     let text = d.arg_str_s(s, a, 0)?;
     let n = {
         let mut doc = d.doc.borrow_mut();
-        d.room_s(s, &doc, 1, text.len())?;
+        d.room_s(s, &doc, text.len())?;
         doc.create_comment(&text)
     };
     let v = d.wrap_s(s, n)?;
@@ -1779,7 +1722,7 @@ pub(crate) fn set_document_title<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this
             let head = doc.children(root).find(|&c| matches!(doc.data(c), NodeData::Element { .. })).and_then(|html| doc.children(html).find(|&c| is_named(&doc, c, &["head"])));
             match head {
                 Some(h) => {
-                    d.room_s(s, &doc, 2, text.len())?;
+                    d.room_s(s, &doc, text.len())?;
                     let none: &[(&str, &str)] = &[];
                     Some(doc.insert_element(h, None, "title", none))
                 }
@@ -1790,7 +1733,7 @@ pub(crate) fn set_document_title<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this
     if let Some(t) = target {
         let r = d.mo_group(Some(t), || {
             let mut doc = d.doc.borrow_mut();
-            d.room_s(s, &doc, !text.is_empty() as usize, text.len())?;
+            d.room_s(s, &doc, text.len())?;
             d.iter_told_all(&doc, t);
             while let Some(c) = doc.children(t).next() {
                 doc.detach(c);

@@ -289,7 +289,6 @@ fn content<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'
         match doc.template_content(n) {
             Some(c) => c,
             None => {
-                d.room_s(s, &doc, 1, 0)?;
                 doc.make_template_content(n)
             }
         }

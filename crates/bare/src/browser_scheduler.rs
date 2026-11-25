@@ -1139,9 +1139,6 @@ impl<E: Eng> Dom<E> {
         if self.sched.borrow().ports.len() + keys.len() > self.sched.borrow().limits.max_ports {
             return Err(self.lim_s(s, "message-ports"));
         }
-        if self.st.borrow().by_obj.len() + keys.len() > self.lim.max_wrappers {
-            return Err(self.lim_s(s, "dom-wrappers"));
-        }
         let proto = self.sched.borrow().protos.expect("installed").port;
         let mut news = Vec::with_capacity(keys.len());
         for _ in keys {
@@ -1284,9 +1281,6 @@ fn message_channel_ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>,
     if d.sched.borrow().ports.len() + 2 > d.sched.borrow().limits.max_ports {
         return Err(d.lim_s(s, "message-ports"));
     }
-    if d.st.borrow().by_obj.len() + 2 > d.lim.max_wrappers {
-        return Err(d.lim_s(s, "dom-wrappers"));
-    }
     let protos = d.sched.borrow().protos.expect("installed");
     let p1 = d.obj_s(s, protos.port)?;
     let l1 = d.obj_local(s, p1);
@@ -1398,9 +1392,6 @@ impl<E: Eng> Dom<E> {
         if self.sched.borrow().ports.len() + ends.len() > self.sched.borrow().limits.max_ports {
             return Err(self.lim_s(s, "message-ports"));
         }
-        if self.st.borrow().by_obj.len() + ends.len() > self.lim.max_wrappers {
-            return Err(self.lim_s(s, "dom-wrappers"));
-        }
         let proto = self.sched.borrow().protos.expect("installed").port;
         let mut news = Vec::with_capacity(ends.len());
         for _ in ends {
@@ -1479,9 +1470,6 @@ impl<E: Eng> Dom<E> {
     pub(crate) fn new_port(&self, it: &mut E::Vm) -> R<E, E::Obj> {
         if self.sched.borrow().ports.len() + 1 > self.sched.borrow().limits.max_ports {
             return Err(self.lim("message-ports"));
-        }
-        if self.st.borrow().by_obj.len() + 1 > self.lim.max_wrappers {
-            return Err(self.lim("dom-wrappers"));
         }
         let protos = self.sched.borrow().protos.expect("installed");
         let p = self.obj(it, protos.port)?;
@@ -1625,9 +1613,6 @@ fn set_port_onmessage<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>
             d.sched.borrow_mut().ports.get_mut(&port).expect("checked").handler = None;
         }
         (None, Some(cb)) => {
-            if st.n_listeners >= d.lim.max_listeners {
-                return Err(d.lim_s(s, "dom-listeners"));
-            }
             let list = st.listeners.entry(t).or_default();
             st.next_id += 1;
             let id = st.next_id;

@@ -44,7 +44,6 @@ fn js(b: &mut Browser, src: &str) -> String {
     show(b, r)
 }
 
-
 fn by_id(doc: &bare_html::dom::Document, id: &str) -> bare_html::dom::NodeId {
     let mut cur = doc.root();
     let mut stack = vec![cur];
@@ -351,50 +350,6 @@ fn an_element_with_a_held_attr_keeps_identity_across_collections() {
         ok(&mut b, "el.getAttributeNode('class').mark = 1; 1", "1");
         b.collect(&[]).expect("collect");
         ok(&mut b, "el.getAttributeNode('class').mark", "1");
-    });
-}
-
-#[test]
-fn caps_fail_before_any_change() {
-    big(|| {
-        // Wrappers: the cap counts nodes, Attrs and maps together.
-        let lim = BrowserLimits { max_wrappers: 40, ..Default::default() };
-        let mut b = browser_with(PAGE, lim);
-        ok(&mut b, "var el = document.createElement('div'); for (var i = 0; i < 30; i++) el.setAttribute('a' + i, 'v'); var m = el.attributes; var got = 0; var err = ''; try { for (var i = 0; i < 30; i++) { m[i]; got++; } } catch (e) { err = String(e); } got", "30");
-        // 30 attributes + the map are under the cap... one more element's worth is not.
-        let r = js(&mut b, "var f = document.createElement('div'); for (var i = 0; i < 10; i++) f.setAttribute('b' + i, 'v'); var m2 = f.attributes; for (var i = 0; i < 10; i++) m2[i]; 1");
-        assert_eq!(r, "limit:Host(\"dom-wrappers\")", "{r}");
-        // The state is whole after the refusal: native attributes, the map length and the earlier Attrs are intact.
-        ok(&mut b, "[f.attributes.length, m.length, m[0].name, m[29].name, m[0] === el.getAttributeNode('a0')].join()", "10,30,a0,a29,true");
-        // A removal after the refusal still detaches the Attr that exists.
-        ok(&mut b, "var h = m[5]; el.removeAttribute('a5'); [h.ownerElement, h.value, m.length, m[5].name].join()", ",v,29,a6");
-
-        // The text cap: a detached value that does not fit is refused and leaves the old value.
-        let lim = BrowserLimits { max_text_bytes: 4096, ..Default::default() };
-        let mut b = browser_with(PAGE, lim);
-        ok(&mut b, "var at = document.createAttribute('t'); at.value = 'small'; var big = new Array(8000).join('x'); 1", "1");
-        let r = js(&mut b, "at.value = big");
-        assert_eq!(r, "limit:Host(\"dom-text\")", "{r}");
-        ok(&mut b, "at.value", "small");
-
-        // The name cap: createAttribute with a new name is refused when the table is full.
-        let n_names = tree::parse(PAGE).name_count();
-        let lim = BrowserLimits { max_names: n_names + 1, ..Default::default() };
-        let mut b = browser_with(PAGE, lim);
-        ok(&mut b, "document.createAttribute('one').name", "one");
-        let r = js(&mut b, "document.createAttribute('two')");
-        assert_eq!(r, "limit:Host(\"dom-names\")", "{r}");
-        ok(&mut b, "document.createAttribute('one').name", "one");
-
-        // The attribute-slot cap on the path of `setAttributeNode`.
-        let doc = tree::parse(PAGE);
-        let slots = doc.attr_slots();
-        let lim = BrowserLimits { max_attr_slots: slots + 2, ..Default::default() };
-        let mut b = browser_with(PAGE, lim);
-        let r = js(&mut b, "var e = document.createElement('div'); var x1 = document.createAttribute('x1'), x2 = document.createAttribute('x2'), x3 = document.createAttribute('x3'); e.setAttributeNode(x1); e.setAttributeNode(x2); e.setAttributeNode(x3)");
-        assert_eq!(r, "limit:Host(\"dom-attrs\")", "{r}");
-        // (the native check counts the element's own attributes twice, so the second one is refused already)
-        ok(&mut b, "[e.attributes.length, x2.ownerElement, x1.ownerElement === e, e.hasAttribute('x2')].join()", "1,,true,false");
     });
 }
 

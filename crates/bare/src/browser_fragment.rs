@@ -20,7 +20,7 @@
 //! commit as `innerHTML`; the new nodes take the place of the element, which is detached (never freed). As in Chrome (the standard is silent), a
 //! text node before or after the result joins its neighbour.
 //!
-//! Getter: the fragment serialization algorithm for the children of the element, iterative (no recursion, any depth), capped by `max_string_bytes`.
+//! Getter: the fragment serialization algorithm for the children of the element, iterative (no recursion, any depth). The output has no cap.
 //! Text is escaped (`&`, no-break space, `<`, `>`) except in `style`, `script`, `xmp`, `iframe`, `noembed`, `noframes`, `plaintext` and `noscript`
 //! (scripting is on, so its text is raw; in the contents of a `template`, an inert document, it is escaped). An attribute
 //! value is escaped (`&`, no-break space, `"`, `<`, `>`; the last two follow the current standard and are to verify against a browser). The void
@@ -57,36 +57,23 @@ const RAW_PARENTS: &[&str] = &["style", "script", "xmp", "iframe", "noembed", "n
 /// Elements that have no end tag and no children when written.
 const VOID: &[&str] = &["area", "base", "basefont", "bgsound", "br", "col", "embed", "frame", "hr", "img", "input", "keygen", "link", "meta", "param", "source", "track", "wbr"];
 
-/// Append `piece` to `out`, if the result stays under `cap`.
-fn put<E: Eng>(d: &Dom<E>, out: &mut String, piece: &str) -> R<E, ()> {
-    if piece.len() > d.lim.max_string_bytes.saturating_sub(out.len()) {
-        return Err(d.lim("dom-string"));
-    }
-    out.push_str(piece);
-    Ok(())
-}
-
 /// Append `text` with `&`, no-break space, `<` and `>` escaped, and `"` too for an attribute value.
-fn escape<E: Eng>(d: &Dom<E>, out: &mut String, text: &str, attr: bool) -> R<E, ()> {
+fn escape(out: &mut String, text: &str, attr: bool) {
     let special = |c: char| matches!(c, '&' | '\u{a0}' | '<' | '>') || (attr && c == '"');
     let mut rest = text;
     while let Some(i) = rest.find(special) {
-        put(d, out, &rest[..i])?;
+        out.push_str(&rest[..i]);
         let c = rest[i..].chars().next().expect("a char");
-        put(
-            d,
-            out,
-            match c {
-                '&' => "&amp;",
-                '\u{a0}' => "&nbsp;",
-                '<' => "&lt;",
-                '>' => "&gt;",
-                _ => "&quot;",
-            },
-        )?;
+        out.push_str(match c {
+            '&' => "&amp;",
+            '\u{a0}' => "&nbsp;",
+            '<' => "&lt;",
+            '>' => "&gt;",
+            _ => "&quot;",
+        });
         rest = &rest[i + c.len_utf8()..];
     }
-    put(d, out, rest)
+    out.push_str(rest);
 }
 
 /// The name of an attribute as the serialization algorithm writes it.
@@ -103,7 +90,7 @@ fn attr_name(doc: &Document, name: bare_html::dom::Atom) -> String {
 }
 
 /// The children of `n` as HTML text, or `n` itself when `outer`. Walks with the parent links, so the depth is not a limit.
-pub(crate) fn serialize<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, doc: &Document, n: NodeId, outer: bool) -> Res<'s, String> {
+pub(crate) fn serialize<'s, E: Eng>(s: &mut Sc<'s, E>, doc: &Document, n: NodeId, outer: bool) -> Res<'s, String> {
     let mut out = String::new();
     // The children of a `template` are its contents. `tpls` holds the templates that are open, to close them on the way up.
     let mut tpls = Vec::new();
@@ -118,29 +105,29 @@ pub(crate) fn serialize<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, doc: &Documen
             NodeData::Text(sp) => {
                 s.charge(doc.text(sp).len() as u64 / 16 + 1)?;
                 let raw = doc.parent(node).is_some_and(|p| !doc.is_foreign(p) && RAW_PARENTS.contains(&doc.element_name(p)) && (doc.element_name(p) != "noscript" || !inert(&tpls)));
-                if raw { lift::<E, _>(s, put(d, &mut out, doc.text(sp)))? } else { lift::<E, _>(s, escape(d, &mut out, doc.text(sp), false))? }
+                if raw { out.push_str(doc.text(sp)) } else { escape(&mut out, doc.text(sp), false) }
             }
             NodeData::Comment(sp) => {
                 s.charge(doc.text(sp).len() as u64 / 16 + 1)?;
-                lift::<E, _>(s, put(d, &mut out, "<!--"))?;
-                lift::<E, _>(s, put(d, &mut out, doc.text(sp)))?;
-                lift::<E, _>(s, put(d, &mut out, "-->"))?;
+                out.push_str("<!--");
+                out.push_str(doc.text(sp));
+                out.push_str("-->");
             }
             NodeData::Doctype(_) | NodeData::Document | NodeData::ShadowRoot => {}
             NodeData::Element { name, attrs } => {
                 let tag = doc.atom_str(name);
                 let html = !doc.is_foreign(node);
-                lift::<E, _>(s, put(d, &mut out, "<"))?;
-                lift::<E, _>(s, put(d, &mut out, tag))?;
+                out.push_str("<");
+                out.push_str(tag);
                 for a in doc.attrs(attrs) {
                     s.charge(1 + doc.text(a.value).len() as u64 / 16)?;
-                    lift::<E, _>(s, put(d, &mut out, " "))?;
-                    lift::<E, _>(s, put(d, &mut out, &attr_name(doc, a.name)))?;
-                    lift::<E, _>(s, put(d, &mut out, "=\""))?;
-                    lift::<E, _>(s, escape(d, &mut out, doc.text(a.value), true))?;
-                    lift::<E, _>(s, put(d, &mut out, "\""))?;
+                    out.push_str(" ");
+                    out.push_str(&attr_name(doc, a.name));
+                    out.push_str("=\"");
+                    escape(&mut out, doc.text(a.value), true);
+                    out.push_str("\"");
                 }
-                lift::<E, _>(s, put(d, &mut out, ">"))?;
+                out.push_str(">");
                 if !(html && VOID.contains(&tag)) {
                     let tpl = html && tag == "template";
                     let holder = if tpl { doc.template_content(node) } else { Some(node) };
@@ -151,9 +138,9 @@ pub(crate) fn serialize<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, doc: &Documen
                         node = first;
                         open = true;
                     } else {
-                        lift::<E, _>(s, put(d, &mut out, "</"))?;
-                        lift::<E, _>(s, put(d, &mut out, tag))?;
-                        lift::<E, _>(s, put(d, &mut out, ">"))?;
+                        out.push_str("</");
+                        out.push_str(tag);
+                        out.push_str(">");
                     }
                 }
             }
@@ -178,9 +165,9 @@ pub(crate) fn serialize<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, doc: &Documen
             if matches!(doc.data(p), NodeData::ShadowRoot) {
                 p = tpls.pop().expect("an open template");
             }
-            lift::<E, _>(s, put(d, &mut out, "</"))?;
-            lift::<E, _>(s, put(d, &mut out, doc.element_name(p)))?;
-            lift::<E, _>(s, put(d, &mut out, ">"))?;
+            out.push_str("</");
+            out.push_str(doc.element_name(p));
+            out.push_str(">");
             node = p;
         }
     }
@@ -199,13 +186,13 @@ fn inner_target<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> R
 
 pub(crate) fn inner_html<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let (n, _) = inner_target(d, s, this)?;
-    let st = serialize(d, s, &d.doc.borrow(), n, false)?;
+    let st = serialize::<E>(s, &d.doc.borrow(), n, false)?;
     d.js_str_s(s, &st)
 }
 
 pub(crate) fn outer_html<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.el_s(s, this)?;
-    let st = serialize(d, s, &d.doc.borrow(), n, true)?;
+    let st = serialize::<E>(s, &d.doc.borrow(), n, true)?;
     d.js_str_s(s, &st)
 }
 
@@ -260,8 +247,8 @@ pub(crate) fn insert_adjacent_html<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, th
 /// The size of the contents of the templates in the tree under `root`, nested ones too: (nodes, bytes, attributes, height). A template's contents hang
 /// one level below it. The tree of `root` itself is measured by the caller.
 #[cold]
-fn measure_templates<E: Eng>(it: &mut E::Vm, doc: &Document, root: NodeId) -> R<E, (usize, usize, usize, usize)> {
-    let (mut count, mut bytes, mut attrs, mut height) = (0usize, 0usize, 0usize, 0usize);
+fn measure_templates<E: Eng>(it: &mut E::Vm, doc: &Document, root: NodeId) -> R<E, (usize, usize, usize)> {
+    let (mut count, mut bytes, mut height) = (0usize, 0usize, 0usize);
     let mut jobs = vec![(root, 0usize)];
     while let Some((top, below)) = jobs.pop() {
         let (mut cur, mut depth) = (top, 0usize);
@@ -278,7 +265,6 @@ fn measure_templates<E: Eng>(it: &mut E::Vm, doc: &Document, root: NodeId) -> R<
                 NodeData::Element { attrs: list, .. } => {
                     if own {
                         let list = doc.attrs(list);
-                        attrs += list.len();
                         bytes += list.iter().map(|x| doc.text(x.value).len()).sum::<usize>();
                     }
                     if let Some(f) = doc.template_content(c) {
@@ -290,7 +276,7 @@ fn measure_templates<E: Eng>(it: &mut E::Vm, doc: &Document, root: NodeId) -> R<
             }
         }
     }
-    Ok((count, bytes, attrs, height))
+    Ok((count, bytes, height))
 }
 
 /// Parse `html` in the context of `n` (`body` when `in_frag`: `n` is a DocumentFragment). `put`: where the nodes go. `ctx` (`createContextualFragment`): the
@@ -318,17 +304,7 @@ fn replace<E: Eng>(d: &Dom<E>, it: &mut E::Vm, html: &str, n: NodeId, in_frag: b
     let scripting = !(tpl_ctx || d.doc.borrow().in_template_content(c0));
     // The contents of a template hang one level below it.
     let base = d.depth_of(it, n)? + (all && tpl_ctx) as usize;
-    let lim = {
-        let doc = d.doc.borrow();
-        FragmentLimits {
-            max_source: d.lim.max_string_bytes,
-            max_nodes: d.lim.max_nodes.saturating_sub(doc.live_len()),
-            max_text_bytes: d.lim.max_text_bytes.saturating_sub(doc.live_text_bytes()),
-            max_attr_slots: d.lim.max_attr_slots.saturating_sub(doc.live_attr_slots()),
-            max_names: d.lim.max_names,
-            max_depth: d.lim.max_tree_depth.saturating_sub(base),
-        }
-    };
+    let lim = FragmentLimits { max_depth: d.lim.max_tree_depth.saturating_sub(base) };
     // The parse is native code that cannot be stopped from outside: the input is charged first, and each token's nodes as they are made.
     it.charge_o(html.len() as u64 / 16 + 1)?;
     let mut stop = None;
@@ -347,8 +323,8 @@ fn replace<E: Eng>(d: &Dom<E>, it: &mut E::Vm, html: &str, n: NodeId, in_frag: b
     };
 
     let tpl = frag.doc.has_template_content();
-    // Measure the result and check it against this browser's caps, before anything changes.
-    let (mut count, mut bytes, mut attrs, mut height) = (0usize, 0usize, 0usize, 0usize);
+    // Measure the result and check its depth and text, before anything changes.
+    let (mut count, mut bytes, mut height) = (0usize, 0usize, 0usize);
     {
         let (mut cur, mut depth) = (frag.root, 0usize);
         while let Some((c, cd)) = next_in(&frag.doc, frag.root, cur, depth) {
@@ -360,7 +336,6 @@ fn replace<E: Eng>(d: &Dom<E>, it: &mut E::Vm, html: &str, n: NodeId, in_frag: b
                 NodeData::Text(sp) | NodeData::Comment(sp) => bytes += frag.doc.text(sp).len(),
                 NodeData::Element { attrs: list, .. } => {
                     let list = frag.doc.attrs(list);
-                    attrs += list.len();
                     bytes += list.iter().map(|x| frag.doc.text(x.value).len()).sum::<usize>();
                 }
                 _ => {}
@@ -369,7 +344,7 @@ fn replace<E: Eng>(d: &Dom<E>, it: &mut E::Vm, html: &str, n: NodeId, in_frag: b
     }
     if tpl {
         let m = measure_templates(it, &frag.doc, frag.root)?;
-        (count, bytes, attrs, height) = (count + m.0, bytes + m.1, attrs + m.2, height.max(m.3));
+        (count, bytes, height) = (count + m.0, bytes + m.1, height.max(m.2));
     }
     let old = {
         let doc = d.doc.borrow();
@@ -382,13 +357,7 @@ fn replace<E: Eng>(d: &Dom<E>, it: &mut E::Vm, html: &str, n: NodeId, in_frag: b
         old += u64::from(this.is_some());
         // Text next to the result joins it (below): that copies the two texts.
         let seam: usize = this.iter().flat_map(|&t| [doc.prev_sibling(t), doc.next_sibling(t)]).flatten().map(|x| if let NodeData::Text(sp) = *doc.data(x) { doc.text(sp).len() } else { 0 }).sum();
-        d.room(&doc, count, bytes + seam)?;
-        if attrs > d.lim.max_attr_slots.saturating_sub(doc.live_attr_slots()) {
-            return Err(d.lim("dom-attrs"));
-        }
-        if doc.name_count() + frag.doc.new_names_in(&doc) > d.lim.max_names {
-            return Err(d.lim("dom-names"));
-        }
+        d.room(&doc, bytes + seam)?;
         old
     };
     if count > 0 && base + height > d.lim.max_tree_depth {

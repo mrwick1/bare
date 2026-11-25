@@ -49,7 +49,7 @@
 //! - Cost: the value is never copied. `effective` charges `bytes / 256` steps of the JS caller, then scans the
 //!   borrowed value once for its UTF-16 length. Each operation measures a value once (a value change that differs
 //!   measures the old and the new). The no-JS driver (`Browser::input_selection`, `type_text`) has no budget; its scan
-//!   is bounded by `max_text_bytes`.
+//!   is as long as the value.
 //! - Namespace seam: `text_control` is the only HTML-input test of this file's logic.
 //!
 //! Gaps (none is faked)
@@ -162,7 +162,7 @@ impl<E: Eng> Dom<E> {
     /// The selection as JS reads it and the value length in UTF-16 units. `None` when it does not apply.
     /// The value is borrowed, never copied. A JS caller (`it`) pays `bytes / 256` steps before the one scan, so a
     /// huge value under a small budget fails first. The no-JS driver (`it` is `None`) has no budget to charge: its
-    /// scan is bounded by `max_text_bytes`, which caps both a dirty value and an attribute.
+    /// scan is as long as the value.
     pub(crate) fn effective(&self, it: Option<&mut E::Vm>, n: NodeId) -> R<E, Option<(Sel, u32)>> {
         if self.applies(&self.doc.borrow(), n).is_none() {
             return Ok(None);

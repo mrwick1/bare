@@ -56,9 +56,9 @@ fn domexception_enumeration_descriptors_and_host_errors() {
 }
 
 #[test]
-fn domexception_respects_host_string_limit() {
+fn domexception_message_has_no_host_string_cap() {
     big(|| {
-        let mut b = crate::browser::Browser::new(bare_html::tree::parse("<body>"), crate::browser::BrowserLimits { max_string_bytes: 128, ..Default::default() }, Default::default(), Default::default()).unwrap();
-        assert!(js(&mut b, "new DOMException('x'.repeat(129))").starts_with("limit:"));
+        let mut b = crate::browser::Browser::new(bare_html::tree::parse("<body>"), Default::default(), Default::default(), Default::default()).unwrap();
+        assert_eq!(js(&mut b, "new DOMException('x'.repeat((16 << 20) + 1)).message.length"), "16777217");
     });
 }

@@ -66,8 +66,7 @@
 //! (sheets, and bytes of `<style>` text, `href` and supplied parts that one read uses), `computed-rules` (selectors after the build:
 //! the build is bounded by the bytes), `computed-work` (for the cascade of the whole document: nodes times rules, or if that is over `STYLED_FROM` the styled elements times rules: a loose upper
 //! bound, the real work is far smaller because rules are indexed; see `styled_work`. For a chain read of one element: the length of its path times rules), `computed-external` and `computed-external-bytes` (stored external sheets). Steps are charged before the
-//! build. A full compute charges one step per node before the work, then its tested candidates (`RuleSet::tested_candidates`). A restyle charges `STEPS_PER_RESTYLED_ELEMENT` for each element that it styles (`RuleSet::styled_elements`), and its tested candidates; a read that finds the last styles right charges 1. Names that the sheets add to the document table are bounded by the sheet bytes and checked against
-//! `max_names` after the build.
+//! build. A full compute charges one step per node before the work, then its tested candidates (`RuleSet::tested_candidates`). A restyle charges `STEPS_PER_RESTYLED_ELEMENT` for each element that it styles (`RuleSet::styled_elements`), and its tested candidates; a read that finds the last styles right charges 1. Names that the sheets add to the document table are bounded by the sheet bytes.
 //!
 //! Pseudo-elements (`getComputedStyle(el, '::before')`): `::before` and `::after` (and the old one-colon forms) read the style that their
 //! rules give, with `content` (`RuleSet::style_pseudo`), also when they make no box. A pseudo-element with no rule, and the other ones,
@@ -640,7 +639,7 @@ impl<E: Eng> Dom<E> {
                         }
                         let rules = Rc::new(rules);
                         // The check of the limits is below: a set that is over one is not kept for the next document.
-                        if let Some(k) = key.filter(|_| rules.len() <= l.max_rules && doc.name_count() <= self.lim.max_names) {
+                        if let Some(k) = key.filter(|_| rules.len() <= l.max_rules) {
                             rule_cache::insert_key(k, &parts, &rules);
                         }
                         rules
@@ -649,9 +648,6 @@ impl<E: Eng> Dom<E> {
                 self.computed.builds.set(self.computed.builds.get() + 1);
                 if rules.len() > l.max_rules {
                     return Err(self.lim("computed-rules"));
-                }
-                if doc.name_count() > self.lim.max_names {
-                    return Err(self.lim("dom-names"));
                 }
                 *cache = Some(Built { vp, key: plan.parts, inputs: plan.inputs, rules, shared: share, last: [None, None], chain: None, motion: Cell::new(None), read: None, odd: OnceCell::new(), stamp });
                 if share {

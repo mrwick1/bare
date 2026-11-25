@@ -25,8 +25,7 @@
 //!   SVG are not HTML resources: the loader does not run or fetch them.
 //!
 //! Costs: a foreign element has one entry in a hash map of the document, and an attribute with a namespace has a name of its own in
-//! the name table. Both stay in the document arena like every native node and name (it never frees). The caps are `max_names`
-//! (the local name and the prefix are two names), `max_nodes`, `max_attr_slots` and `max_text_bytes`, checked before any write.
+//! the name table. Both stay in the document arena like every native node and name. A name is never freed. There is no count cap.
 
 use crate::eng::{Eng, Ops};
 use crate::browser::*;
@@ -136,14 +135,6 @@ pub(crate) fn create_element_ns<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this:
         Some(Some(ns @ (Ns::Svg | Ns::MathMl))) => {
             let node = {
                 let mut doc = d.doc.borrow_mut();
-                d.room_s(s, &doc, 1, 0)?;
-                let mut new = [Some(local), prefix].into_iter().flatten().filter(|n| doc.find_atom(n).is_none()).count();
-                if prefix == Some(local) && new == 2 {
-                    new = 1;
-                }
-                if doc.name_count() + new > d.lim.max_names {
-                    return Err(d.lim_s(s, "dom-names"));
-                }
                 doc.create_element_ns(ns, prefix, local)
             };
             d.wrap_s(s, node)
@@ -155,16 +146,10 @@ pub(crate) fn create_element_ns<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this:
 /// Write an attribute: by its atom if it exists, else by a new name in `ns`. Every cap is checked before the write.
 pub(crate) fn put<E: Eng>(d: &Dom<E>, it: &mut E::Vm, n: NodeId, existing: Option<Atom>, ns: Option<Ns>, qname: &str, value: &str) -> R<E, ()> {
     let mut doc = d.doc.borrow_mut();
-    d.room(&doc, 0, value.len())?;
-    if doc.live_attr_slots() + doc.attr_count(n) + 1 > d.lim.max_attr_slots {
-        return Err(d.lim("dom-attrs"));
-    }
+    d.room(&doc, value.len())?;
     let atom = match existing {
         Some(a) => a,
         None => {
-            if doc.find_ns_atom(ns, qname).is_none() && doc.name_count() + 1 > d.lim.max_names {
-                return Err(d.lim("dom-names"));
-            }
             doc.intern_ns(ns, qname)
         }
     };

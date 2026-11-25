@@ -86,7 +86,6 @@ fn range<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, what: &str, on: &str, i: i32
 fn add<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, parent: NodeId, name: &str, before: Option<NodeId>) -> Res<'s, NodeId> {
     let n = {
         let mut doc = d.doc.borrow_mut();
-        d.room_s(s, &doc, 1, 0)?;
         doc.create_element(name)
     };
     d.insert_checked_s(s, parent, n, before, crate::browser_dom::NO_OP)?;

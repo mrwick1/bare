@@ -112,9 +112,6 @@ fn ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) ->
         return Err(s.type_error("Failed to construct 'BroadcastChannel': 1 argument required, but only 0 present."));
     };
     let name: Rc<str> = d.string_arg_s(s, a0)?.into();
-    if d.st.borrow().by_obj.len() >= d.lim.max_wrappers {
-        return Err(d.lim_s(s, "dom-wrappers"));
-    }
     let origin = d.cur_rec().ok().map_or_else(|| "null".to_string(), |c| c.origin());
     old_v::<E>(s, |it| {
         let o = d.obj(it, proto)?;

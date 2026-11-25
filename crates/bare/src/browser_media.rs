@@ -916,10 +916,6 @@ fn audio_ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'
     let src = if s.type_of(a0) == Type::Undefined { None } else { Some(d.string_arg_s(s, a0)?) };
     let n = {
         let mut doc = d.doc.borrow_mut();
-        d.room_s(s, &doc, 1, 0)?;
-        if doc.find_atom("audio").is_none() && doc.name_count() + 1 > d.lim.max_names {
-            return Err(d.lim_s(s, "dom-names"));
-        }
         doc.create_element("audio")
     };
     let w = d.wrap_s(s, n)?;
@@ -1073,7 +1069,6 @@ fn caption_track<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: 
 fn caption_object<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, n: NodeId) -> Res<'s, Local<'s>> {
     let made = d.media.tracks.borrow().get(&n).map(|t| t.object);
     if let Some(o) = made { return Ok(d.obj_local(s, o)); }
-    if d.media.tracks.borrow().len() >= d.lim.max_wrappers { return Err(d.lim_s(s, "dom-wrappers")); }
     let o = s.new_object()?;
     let id = obj_id::<E>(s, o).expect("an object");
     old::<E, _>(s, |it| crate::browser_lazy::tag(d, it, id, "TextTrack"))?;
@@ -1126,7 +1121,6 @@ fn text_tracks<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Ar
     s.charge(d.media.lists.borrow().len() as u64 + 1)?;
     let found = d.media.lists.borrow().iter().find(|(_, l)| l.node == n).map(|(&o, _)| o);
     if let Some(o) = found { return Ok(d.obj_local(s, o)); }
-    if d.media.lists.borrow().len() >= d.lim.max_wrappers { return Err(d.lim_s(s, "dom-wrappers")); }
     let p = s.new_object()?;
     let pid = obj_id::<E>(s, p).expect("an object");
     old::<E, _>(s, |it| crate::browser_lazy::tag(d, it, pid, "TextTrackList"))?;
@@ -1146,7 +1140,6 @@ fn caption_prepare<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, owner: E::Obj) -> 
         for c in doc.children(node) {
             s.charge(1)?;
             if doc.is_html(c, "track") {
-                if ids.len() >= d.lim.max_results { return Err(d.lim_s(s, "dom-results")); }
                 ids.push(c);
             }
         }
@@ -1222,13 +1215,11 @@ fn caption_start<E: Eng>(d: &Dom<E>, n: NodeId) -> R<E, ()> {
 fn caption_load<E: Eng>(d: &Dom<E>, it: &mut E::Vm, n: NodeId, epoch: u32) -> R<E, ()> {
     if d.media.tracks.borrow().get(&n).is_none_or(|t| t.epoch != epoch || t.ready != 1) { return Ok(()); }
     let src = attr_of(d, n, "src").unwrap_or_default();
-    if src.len() > d.lim.max_string_bytes { return Err(d.lim("dom-string")); }
     it.charge_o(src.len() as u64 + 1)?;
     // Only in-memory WebVTT is supported. Other resources fail rather than claim loaded captions.
     let payload = crate::images::data_url(&src);
     let parsed = payload.as_deref().and_then(|b| std::str::from_utf8(b).ok()).and_then(parse_captions);
     let ty = if let Some(cues) = parsed {
-        if cues.len() + d.media.tracks.borrow().values().map(|t| t.entries.len()).sum::<usize>() > d.lim.max_results { return Err(d.lim("dom-results")); }
         let list = d.obj(it, it.object_prototype())?;
         let mut entries = Vec::new();
         for (i, (start, end, text)) in cues.into_iter().enumerate() {

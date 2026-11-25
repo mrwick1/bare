@@ -62,7 +62,7 @@ pub(crate) fn replace<E: Eng>(d: &Dom<E>, it: &mut E::Vm, who: &str, (n, text): 
     let new = String::from_utf16_lossy(&[&u[..off as usize], &data16, &u[(off + count) as usize..]].concat());
     {
         let mut doc = d.doc.borrow_mut();
-        d.room(&doc, 0, new.len())?;
+        d.room(&doc, new.len())?;
         d.range_data(n, off, count, data16.len() as u32);
         doc.set_text(n, &new);
     }
@@ -128,7 +128,7 @@ pub(crate) fn split_at<E: Eng>(d: &Dom<E>, n: bare_html::dom::NodeId, text: &str
     let u: Vec<u16> = text.encode_utf16().collect();
     let (head, tail) = (String::from_utf16_lossy(&u[..off as usize]), String::from_utf16_lossy(&u[off as usize..]));
     let mut doc = d.doc.borrow_mut();
-    d.room(&doc, 1, text.len() + 3)?;
+    d.room(&doc, text.len() + 3)?;
     let new = doc.create_text(&tail);
     doc.set_text(n, &head);
     if let Some(p) = doc.parent(n) {
@@ -181,7 +181,7 @@ pub(crate) fn normalize<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'
             continue;
         }
         let mut joined = doc.text(sp).to_string();
-        d.room_s(s, &doc, 0, joined.len() + run.iter().map(|&(_, st)| doc.text(st).len()).sum::<usize>())?;
+        d.room_s(s, &doc, joined.len() + run.iter().map(|&(_, st)| doc.text(st).len()).sum::<usize>())?;
         for &(c, st) in &run {
             // As in Chrome, an empty text only leaves (the standard also moves the points that sit on it).
             if doc.text(st).is_empty() {
