@@ -398,6 +398,8 @@ pub struct Realm {
     /// Machines (a JS stack and a feedback vector) that no nested call uses now, and the nesting of nested calls: `reenter.rs`.
     pub(crate) pool: Vec<Machine>,
     pub(crate) nest: u32,
+    /// Bytes of Rust stack in the segments that nested calls grew (`Realm::grow`); the budget of `reenter.rs` bounds it.
+    pub(crate) grown: usize,
     /// The state of the interface to the host (`api.rs`).
     pub(crate) api: crate::api::ApiState,
     /// The compiler of the stubs of the program, if it has any (`Op::Lazy`, in any run: `Realm::compile_stub`).
@@ -575,6 +577,7 @@ impl Realm {
             fuel: u64::MAX,
             pool: Vec::new(),
             nest: 0,
+            grown: 0,
             api: Default::default(),
             lazy: None,
             epoch,

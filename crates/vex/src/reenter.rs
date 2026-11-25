@@ -38,10 +38,16 @@ pub(crate) struct Machine {
     pub(crate) fbs: Vec<Feedback>,
 }
 
-/// The most nested calls. Each one is a frame of `Vm::run` and of the native above it on the Rust stack.
-const MAX_NEST: u32 = 100;
+/// The nested calls are bounded by Rust stack space, as in V8, and not by a count. Each one is a frame of `Vm::run` and of the native
+/// above it. The stack grows in segments of `GROW_BY` on the heap, and `STACK_BUDGET` is the most bytes of segments that may be live
+/// together. A call that would need a segment over the budget throws a `RangeError`. About 4.8 KB per level: the budget is about
+/// 13 000 levels and at most `STACK_BUDGET` of memory (pages are touched only when used).
 const RED_ZONE: usize = 512 << 10;
 const GROW_BY: usize = 4 << 20;
+/// A debug build has frames of about 150 KB per level (release: 5 to 7 KB), so its budget is bigger to keep the same depth.
+const STACK_BUDGET: usize = if cfg!(debug_assertions) { 384 << 20 } else { 64 << 20 };
+/// The first levels run on the stack of the thread, as before.
+const FREE_LEVELS: u32 = 4;
 
 impl Realm {
     /// Call `f` (a script function or a built-in) with `this` and `args`. A thrown value is `Err(value)`.
@@ -49,7 +55,7 @@ impl Realm {
     /// The result is a Rust local like any other: no collection runs until the outermost nested call is over, so it stays valid
     /// while the native goes on. Call it only from code that the loop called (a native, or an operator that the loop runs).
     pub fn call_function(&mut self, f: Value, this: Value, args: &[Value]) -> R<Value> {
-        if self.nest >= MAX_NEST {
+        if self.stack_full() {
             return Err(self.error(ErrKind::Range, "maximum call stack size exceeded"));
         }
         let saved = (self.callee, self.nt, self.tail.take(), std::mem::take(&mut self.tail_args));
@@ -69,18 +75,26 @@ impl Realm {
         STOP
     }
 
-    /// The nested calls reached `MAX_NEST`.
-    pub(crate) fn nested_too_deep(&self) -> bool {
-        self.nest >= MAX_NEST
+    /// The next nested call would need a stack segment over `STACK_BUDGET`.
+    pub(crate) fn stack_full(&self) -> bool {
+        self.grown + GROW_BY > STACK_BUDGET && self.grow_needed()
     }
 
-    /// Run `f` with room on the Rust stack for one more nested call: each level of `MAX_NEST` is a frame of `Vm::run`, which is big, and the
-    /// thread may be small. Below the first few levels, the stack grows on the heap when less than `RED_ZONE` is left.
-    fn grow<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
-        if self.nest < 4 {
+    /// Past the free levels, and less than `RED_ZONE` left on the segment (or the size is unknown): `stacker::maybe_grow` would grow.
+    fn grow_needed(&self) -> bool {
+        self.nest + self.proxy_depth >= FREE_LEVELS && !matches!(stacker::remaining_stack(), Some(r) if r >= RED_ZONE)
+    }
+
+    /// Run `f` with room on the Rust stack for one more nested call: each level is a frame of `Vm::run`, which is big, and the thread may be
+    /// small. Below the first few levels, the stack grows on the heap when less than `RED_ZONE` is left.
+    pub(crate) fn grow<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        if !self.grow_needed() {
             return f(self);
         }
-        stacker::maybe_grow(RED_ZONE, GROW_BY, || f(self))
+        self.grown += GROW_BY;
+        let r = stacker::grow(GROW_BY, || f(self));
+        self.grown -= GROW_BY;
+        r
     }
 
     pub(crate) fn call_held(&mut self, f: Value, this: Value, args: &[Value]) -> R<Value> {
@@ -102,7 +116,7 @@ impl Realm {
     /// Send `v` to the generator `g` from an op of the loop (`for-of`): the request of [`Realm::gen_request`], and the run of the body on a pooled
     /// machine when the generator has to run. Gives the value and whether the generator is done. Called like [`Realm::call_function`].
     pub(crate) fn gen_nested(&mut self, g: Value, mode: i32, v: Value) -> R<(Value, bool)> {
-        if self.nest >= MAX_NEST {
+        if self.stack_full() {
             return Err(self.error(ErrKind::Range, "maximum call stack size exceeded"));
         }
         match self.gen_request(g, mode, v)? {
@@ -111,7 +125,7 @@ impl Realm {
                 let saved = (self.callee, self.nt, self.tail.take(), std::mem::take(&mut self.tail_args));
                 self.nest += 1;
                 let held = self.heap.hold_task();
-                let r = self.resume_raw(g);
+                let r = self.grow(|s| s.resume_raw(g));
                 self.heap.release_task(held);
                 self.nest -= 1;
                 (self.callee, self.nt, self.tail, self.tail_args) = saved;
@@ -193,13 +207,13 @@ impl Realm {
         if self.prog[ci].noctor {
             return self.type_error("not a constructor");
         }
-        if self.nest >= MAX_NEST {
+        if self.stack_full() {
             return Err(self.error(ErrKind::Range, "maximum call stack size exceeded"));
         }
         let saved = (self.callee, self.nt, self.tail.take(), std::mem::take(&mut self.tail_args));
         self.nest += 1;
         let held = self.heap.hold_task();
-        let r = self.construct_held(f, args, nt);
+        let r = self.grow(|s| s.construct_held(f, args, nt));
         self.heap.release_task(held);
         self.nest -= 1;
         (self.callee, self.nt, self.tail, self.tail_args) = saved;
