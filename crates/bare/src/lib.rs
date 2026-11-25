@@ -236,6 +236,8 @@ mod browser_canvas_tests;
 #[cfg(test)]
 mod browser_canvas_size_tests;
 #[cfg(test)]
+mod browser_canvas_raster_tests;
+#[cfg(test)]
 mod browser_platform_tests;
 mod browser_style;
 mod browser_style_block;

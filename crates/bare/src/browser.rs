@@ -835,6 +835,8 @@ pub struct Dom<E: Eng = New> {
     pub(crate) html_on: std::cell::Cell<bool>,
     /// The `returnValue` and the modal flag of each `<dialog>` that has one (`browser_html_members.rs`).
     pub(crate) dialogs: RefCell<std::collections::HashMap<NodeId, (String, bool)>>,
+    /// The bitmaps of the canvases that a script drew on (`browser_canvas.rs`).
+    pub(crate) canvases: RefCell<std::collections::HashMap<NodeId, crate::browser_canvas::Raster>>,
     /// The first `<link>` wrapper gave `HTMLLinkElement.prototype` its reflected members (`browser_dom::link_proto`).
     pub(crate) link_done: std::cell::Cell<bool>,
     /// Scroll offsets, page bars and `scroll` events (`browser_scroll.rs`).
@@ -2112,6 +2114,7 @@ impl<E: Eng> Browser<E> {
             html_ifaces: Default::default(),
             html_on: Default::default(),
             dialogs: Default::default(),
+            canvases: Default::default(),
             link_done: Default::default(),
             scrolling: Default::default(),
             resize: Default::default(),
