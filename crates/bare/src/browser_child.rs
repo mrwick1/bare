@@ -232,8 +232,8 @@ fn live<E: Eng>(doc: &Document, s: &Slot<E>) -> bool {
 }
 
 /// The document of a worker page: one script element that loads the worker script, so the rules of a script load apply (MIME type,
-/// size cap). A `data:` worker gets an empty document and its decoded text, which runs when the page is made (a script element
-/// does not take a `data:` URL in bare). The document URL is the script URL, or for a `data:` or `blob:` worker the URL of the page
+/// size cap). A `data:` worker gets an empty document and its decoded text, which runs when the page is made (a parsed `data:`
+/// script is classic only, and a worker can be a module). The document URL is the script URL, or for a `data:` or `blob:` worker the URL of the page
 /// that made it.
 fn worker_doc(url: &str, module: bool, from: &str) -> Result<(String, String, Option<String>), String> {
     const EMPTY: &str = "<!doctype html><html><head></head><body></body></html>";

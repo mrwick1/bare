@@ -1,0 +1,4 @@
+timeout 90000
+open https://web.whatsapp.com/
+expect css="canvas[aria-label]" visible
+shot whatsapp-qr

@@ -11,6 +11,8 @@
 //!   module script: `browser_loader` runs it. Any other type (`application/json`, `importmap`, a template)
 //!   is data, not code: it is listed as skipped. A classic script with `nomodule` is skipped: `bare` is a browser
 //!   that knows modules, and a browser like that does not run it.
+//! - A classic script with a `data:` `src` is `Source::Data`, with the timing of an external script. A `data:` module or style
+//!   sheet is skipped (`BadUrl`).
 //! - Timing: a classic external script is `Async` with `async`, else `Defer` with `defer`, else `Blocking`. A classic
 //!   inline script is always `Blocking` (`async` and `defer` do nothing there). A module is `Async` with `async`, else
 //!   `Defer`.
@@ -90,6 +92,8 @@ pub enum Source {
     Inline,
     /// An index into `Discovery::targets`.
     External(usize),
+    /// A classic script whose `src` is a `data:` URL: the loader decodes the attribute when the script runs. Nothing is fetched.
+    Data,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -320,6 +324,10 @@ pub fn discover(doc: &Document, page: &Url, limits: &Limits) -> Result<Discovery
         let raw = raw.trim_matches(WS);
         if raw.is_empty() {
             items.push(Item { node, kind: Kind::Skipped(Skip::EmptyUrl) });
+            continue;
+        }
+        if is_script && !module && raw.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("data:")) {
+            items.push(Item { node, kind: Kind::Script { module, timing: timing(true), source: Source::Data } });
             continue;
         }
         // The same text always resolves to the same URL (one base), so a repeat skips the resolve and the key text.
@@ -636,6 +644,7 @@ pub fn report(doc: &Document, page: &Url) -> (String, bool) {
                 match source {
                     Source::Inline => writeln!(out, "{n} script {what} {timing:?} inline {} bytes", inline_source(doc, item.node).len()),
                     Source::External(i) => writeln!(out, "{n} script {what} {timing:?} {} {}", label(*i), result(*i)),
+                    Source::Data => writeln!(out, "{n} script {what} {timing:?} data: URL"),
                 }
             }
             Kind::Stylesheet { target } => writeln!(out, "{n} stylesheet {} {}", label(*target), result(*target)),
@@ -782,7 +791,7 @@ mod tests {
             r#"<script type="application/json">{}</script><script type="importmap">{}</script><script type="text/template" src=t.js></script>
                <script type="text/javascript; charset=utf-8" src=p.js></script>
                <script nomodule src=n.js></script><script type=module nomodule src=m.js></script>
-               <script src=""></script><script src="  "></script><script src="data:text/javascript,1"></script><script src="ftp://h/x.js"></script>
+               <script src=""></script><script src="  "></script><script src="data:text/javascript,1"></script><script type=module src="data:text/javascript,1"></script><script src="ftp://h/x.js"></script>
                <link rel="stylesheet alternate" href=alt.css><link rel=preload href=p.css><link rel=icon href=i.png><link rel=stylesheet><link rel=STYLESHEET href=ok.css>
                <template><script src=in-template.js></script></template>"#,
             &p,
@@ -792,9 +801,10 @@ mod tests {
         assert_eq!(kinds[4], Kind::Skipped(Skip::NoModule));
         assert!(matches!(kinds[5], Kind::Script { module: true, .. }));
         assert!(kinds[6..8].iter().all(|k| *k == Kind::Skipped(Skip::EmptyUrl)));
-        assert!(kinds[8..10].iter().all(|k| *k == Kind::Skipped(Skip::BadUrl)));
-        assert_eq!(kinds[10], Kind::Skipped(Skip::EmptyUrl)); // link with no href
-        assert_eq!(kinds.len(), 12);
+        assert_eq!(kinds[8], Kind::Script { module: false, timing: Timing::Blocking, source: Source::Data });
+        assert!(kinds[9..11].iter().all(|k| *k == Kind::Skipped(Skip::BadUrl)));
+        assert_eq!(kinds[11], Kind::Skipped(Skip::EmptyUrl)); // link with no href
+        assert_eq!(kinds.len(), 13);
         assert_eq!(paths(&d), ["/dir/m.js", "/dir/ok.css"]);
     }
 
