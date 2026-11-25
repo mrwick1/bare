@@ -46,8 +46,7 @@
 //! - A script that throws is reported (`Browser::take_reports`, event type `error`) and loading goes on. `window.onerror` and
 //!   `ErrorEvent` are absent. Diagnostics hold only the error name.
 //! - A script budget (`Limit` of steps, call depth, nesting depth, statement frames, jobs of one checkpoint) ends only the task that
-//!   hit it (`Browser::survive`): one console error, the DOM as it is, the run goes on. After `BrowserLimits::max_task_aborts` the
-//!   run stops with `Fatal::Aborted`.
+//!   hit it (`Browser::survive`): one console error, the DOM as it is, the run goes on. Aborts have no limit.
 //! - Fatal: any `Unsupported`, any other `Limit` (host caps, heap, memory) or heap fault. The run stops at once
 //!   and no JS runs and no I/O starts after that (a second `run_page` returns the same stop).
 //!
@@ -229,8 +228,6 @@ pub enum Fatal {
     Poisoned,
     /// The URL or the page could not be set up.
     Setup(String),
-    /// Too many tasks were aborted by a script budget (`Browser::survive`). The text names the count and the last budget.
-    Aborted(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1293,18 +1290,14 @@ impl<E: Eng> Run<'_, E> {
         Ok(())
     }
 
-    /// A task of `what` ended with `e`. A script budget aborts only that task (it is logged to the console and the run goes on) up to
-    /// the page budget; any other error is fatal.
+    /// A task of `what` ended with `e`. A script budget aborts only that task (it is logged to the console and the run goes on). Any
+    /// other error is fatal.
     fn abort(&mut self, e: Fault<E>, what: &str) -> Flow {
         match self.b.survive(e, what) {
             Survive::Aborted => {
                 self.res.aborted += 1;
                 self.diag(format!("aborted {what}: {e:?}"));
                 Ok(())
-            }
-            Survive::Exhausted(why) => {
-                self.diag(format!("fatal in {what}: {why}"));
-                Err(Stop::Fatal(Fatal::Aborted(why)))
             }
             Survive::Fatal => Err(self.fatal(e, what)),
         }

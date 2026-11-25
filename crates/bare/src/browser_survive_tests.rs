@@ -1,5 +1,5 @@
 //! A script that hits the step budget (or another JS execution budget) ends only its own task, as Chrome ends a runaway script:
-//! the DOM stays, one console error says what happened, and later tasks and input still run. A page budget bounds the aborts.
+//! the DOM stays, one console error says what happened, and later tasks and input still run. Aborts have no limit.
 //! Each test runs on a big stack. The fixtures are loopback pages; the probe is `localStorage`.
 
 use crate::eng_new::Peek;
@@ -96,21 +96,15 @@ fn a_runaway_timer_event_handler_and_microtask_each_end_only_their_task() {
 }
 
 #[test]
-fn an_endless_chain_of_runaway_tasks_stops_the_page_with_a_reason() {
+fn an_endless_chain_of_runaway_tasks_ends_at_the_session_task_budget() {
     big(|| {
-        let srv = page("<input id=q><script>
-            localStorage.setItem('n', '0');
-            document.getElementById('q').addEventListener('input', function () { localStorage.setItem('typed', '1') });
-            (function again() { setTimeout(again, 0); while (true) {} })();
-          </script>");
-        let mut s = Session::new(cfg(&srv));
+        let srv = page("<script>(function again() { setTimeout(again, 0); while (true) {} })();</script>");
+        let mut c = cfg(&srv);
+        c.limits.max_tasks = 20;
+        let mut s = Session::new(c);
         let r = s.run();
-        let SessionStop::Page(Stop::Fatal(Fatal::Aborted(why))) = &r.stop else { panic!("{r:?}") };
-        assert!(why.contains("Steps") && why.contains("aborted"), "{why}");
-        // the stop is sticky and input does nothing
-        let again = s.resume(&[Input::Type("#q", "x")]);
-        assert_eq!(again.stop, r.stop);
-        assert_eq!(get(&s, &srv, "typed"), None);
+        assert!(matches!(r.stop, SessionStop::TaskBudget | SessionStop::Page(Stop::TaskBudget)), "{r:?}");
+        assert!(r.pages[0].aborted >= 10, "{r:?}");
     });
 }
 

@@ -4,7 +4,7 @@ Owner order (2026-11-25): remove every cap that stops a real page. This PR adds 
 
 ## What changed
 
-- `BrowserLimits` keeps `max_tree_depth`, `max_reports`, `max_task_aborts`, `max_child_pages` and `max_child_depth`.
+- `BrowserLimits` keeps `max_tree_depth`, `max_reports`, `max_child_pages` and `max_child_depth`.
 - Removed: `max_nodes`, `max_text_bytes`, `max_attr_slots`, `max_names`, `max_wrappers`, `max_listeners`, `max_results`, `max_selector_len` and `max_string_bytes`, with their checks at about 80 call sites.
 - Removed: the name-bytes cap of `NodeList` (`MAX_NAME_BYTES`).
 - Removed: the count fields of `FragmentLimits`. It keeps `max_depth`.
@@ -33,6 +33,7 @@ Owner order (2026-11-25): remove every cap that stops a real page. This PR adds 
 ## Merge of origin/main
 
 - Main added two uses of removed caps. `Notification` checked `max_wrappers`: the check is removed. `DOMImplementation.createDocument` passed a node count to `room_s`: the count is removed.
+- Main removed `max_task_aborts` (#1116). The merge keeps that removal and `max_child_pages` 1000.
 
 ## Cost rows
 
@@ -51,7 +52,7 @@ Owner order (2026-11-25): remove every cap that stops a real page. This PR adds 
 ## Not removed
 
 - `max_tree_depth`, `max_child_depth`, the recursion `MAX_DEPTH` constants and `MAX_CUT_DEPTH`: they guard the native stack.
-- `max_reports`, `max_task_aborts`, `EvalLimits`, `HeapLimits`, `PageLimits`, `SessionLimits` and `PromiseLimits`: they are budgets or diagnostics. The owner decides.
+- `max_reports`, `EvalLimits`, `HeapLimits`, `PageLimits`, `SessionLimits` and `PromiseLimits`: they are budgets or diagnostics. The owner decides.
 - `dom-selector-complexity`: it protects a backtracking matcher (follow-up F1).
 - The count caps of the other modules (timers, observers, fetch, streams, WebSocket, workers, geometry, computed style, Vex source size): these are follow-ups F2 to F6 in `../caps-audit.md`.
 

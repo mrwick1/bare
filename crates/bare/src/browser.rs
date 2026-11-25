@@ -280,8 +280,6 @@ pub struct BrowserLimits {
     pub max_tree_depth: usize,
     /// Kept listener exception reports. The oldest is dropped (and counted) after this.
     pub max_reports: usize,
-    /// Tasks that a script budget may abort (`Browser::survive`). The next one is fatal.
-    pub max_task_aborts: usize,
     /// Child pages that are live in one top page, at all depths (`browser_child.rs`). An iframe over it stays empty. It stops a page that
     /// makes frames without end.
     pub max_child_pages: usize,
@@ -294,7 +292,6 @@ impl Default for BrowserLimits {
         BrowserLimits {
             max_tree_depth: 512,
             max_reports: 256,
-            max_task_aborts: 5,
             max_child_pages: 1000,
             max_child_depth: 8,
         }
@@ -620,8 +617,6 @@ pub enum Survive {
     Aborted,
     /// Not a script budget: the error stays fatal.
     Fatal,
-    /// A script budget, but the page used up its aborts. The text says why. Fatal.
-    Exhausted(String),
 }
 
 /// A listener exception that did not stop dispatch.
@@ -780,8 +775,6 @@ pub struct Dom<E: Eng = New> {
     pub(crate) streams: crate::browser_streams::Streams<E>,
     /// `console` and its bounded record sink (`browser_console.rs`).
     pub(crate) console: crate::browser_console::Console<E>,
-    /// Tasks that a script budget aborted so far (`Browser::survive`).
-    pub(crate) aborted: std::cell::Cell<usize>,
     /// Navigation, history and storage state (`browser_navigation.rs`).
     pub(crate) nav: crate::browser_navigation::Nav<E>,
     pub(crate) scripts: crate::browser_loader::Scripts<E>,
@@ -2060,7 +2053,6 @@ impl<E: Eng> Browser<E> {
             xhr: Default::default(),
             streams: Default::default(),
             console: Default::default(),
-            aborted: Default::default(),
             nav: Default::default(),
             scripts: Default::default(),
             plat: Default::default(),
@@ -2133,7 +2125,7 @@ impl<E: Eng> Browser<E> {
 
     /// A task ended with `e`. A script budget (steps, call depth, nesting depth, statement frames, jobs of one checkpoint) aborts
     /// only that task, as Chrome does for a runaway script: the console gets one error, the sticky stop states of the queues are
-    /// cleared, and the page goes on with its DOM as it is. Every other error, and the abort after `max_task_aborts`, is fatal.
+    /// cleared, and the page goes on with its DOM as it is. Every other error is fatal. Aborts have no limit.
     /// The DOM stays consistent because each native DOM operation completes before a budget is checked, and a budget is only
     /// charged before the work that it bounds. Host caps (`Limit(Host(..))`), heap and memory caps stay fatal: they can come from
     /// garbage that stays, or from a refusal that a retry would repeat.
@@ -2142,11 +2134,6 @@ impl<E: Eng> Browser<E> {
         if !is_budget(&e) {
             return Survive::Fatal;
         }
-        let n = self.dom.aborted.get() + 1;
-        if n > self.dom.lim.max_task_aborts {
-            return Survive::Exhausted(format!("{} tasks were aborted by script budgets, the next one ({k:?} in {what}) is too many", n - 1));
-        }
-        self.dom.aborted.set(n);
         self.it.clear_failed_job();
         self.dom.clear_budget_halt_sched();
         self.dom.clear_budget_halt_nav();
@@ -2154,7 +2141,7 @@ impl<E: Eng> Browser<E> {
         self.dom.clear_budget_halt_fetch();
         // A new budget window: the steps of the aborted task must not make the next host call fail.
         let _ = self.it.host_scope_o(|_| Ok(()));
-        crate::browser_console::push_text(&self.dom, &mut self.it, crate::browser_console::ConsoleLevel::Error, &format!("Script aborted: the {k:?} budget ended the {what}. The page goes on ({n} of {} aborts used)", self.dom.lim.max_task_aborts));
+        crate::browser_console::push_text(&self.dom, &mut self.it, crate::browser_console::ConsoleLevel::Error, &format!("Script aborted: the {k:?} budget ended the {what}. The page goes on"));
         Survive::Aborted
     }
 
