@@ -191,6 +191,8 @@ mod browser_query_item_tests;
 #[cfg(test)]
 mod browser_style_media_tests;
 #[cfg(test)]
+mod browser_owner_document_tests;
+#[cfg(test)]
 mod browser_caches_tests;
 #[cfg(test)]
 mod browser_sw_tests;
