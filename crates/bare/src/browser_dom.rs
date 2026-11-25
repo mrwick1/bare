@@ -883,8 +883,7 @@ pub(crate) fn get_root_node<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Loc
 
 pub(crate) fn child_nodes<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.nd_s(s, this)?;
-    let kids = d.kids_s(s, n, false)?;
-    wrap_coll_s(d, s, &kids)
+    old_v::<E>(s, |it| crate::browser_nodelist::of(d, it, n, crate::browser_nodelist::CHILD_NODES))
 }
 
 pub(crate) fn wrap_all_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, ids: &[NodeId]) -> Res<'s, Local<'s>> {
@@ -897,8 +896,7 @@ pub(crate) fn wrap_all_s<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, ids: &[NodeI
 
 pub(crate) fn children<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let n = d.nd_s(s, this)?;
-    let kids = d.kids_s(s, n, true)?;
-    wrap_coll_s(d, s, &kids)
+    old_v::<E>(s, |it| crate::browser_nodelist::of(d, it, n, crate::browser_nodelist::CHILDREN))
 }
 
 pub(crate) fn first_element_child<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {

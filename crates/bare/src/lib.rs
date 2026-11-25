@@ -362,6 +362,8 @@ mod browser_cssom;
 mod browser_cssom_tests;
 #[cfg(test)]
 mod browser_cssom_owned_tests;
+#[cfg(test)]
+mod browser_domparser_move_tests;
 
 mod browser_frames;
 mod browser_child;

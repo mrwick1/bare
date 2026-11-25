@@ -69,7 +69,8 @@ impl<E: Eng> Dom<E> {
     /// open: a property of the chain wins over a name). An object that is an owner gets its key slot here, and it is registered
     /// with the engine.
     pub(crate) fn new_source(&self, it: &mut E::Vm, k: Source, proto: Option<E::Obj>) -> R<E, E::Obj> {
-        if k.owns() {
+        // A node wrapper traces no `NodeList` (`trace_node_edges`), so a list does not make every wrapper trace its edges.
+        if k.owns() && !matches!(k, Source::NodeList) {
             self.wrapper_edges.set(true);
         }
         let key = if k.owns() { self.st.borrow_mut().owners.key(Owner::Reserved) | k as u32 } else { k as u32 };
