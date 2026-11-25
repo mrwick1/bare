@@ -1,7 +1,7 @@
 //! `Error.prototype.stack`, `Error.captureStackTrace` and `Error.stackTraceLimit`, in the style of V8.
 //!
-//! **The loop does no work for it.** A native call stores the frame of the caller in `Realm::cur` (code index, `fp`, `pc`), and `Vm::run`
-//! stores the address of its stack in `ErrStack::stk`. That is all the loop does. `error_ctor` and `captureStackTrace` walk the frames from
+//! **The loop does little for it.** A native call stores `regs` and `pc` of the caller in `ErrStack` (`publish!`), and `Vm::run` stores the
+//! address of its stack and puts the old values back when it ends. That is all the loop does. `error_ctor` and `captureStackTrace` walk the frames from
 //! that point. An error that an op or a native raises goes through `unwind`, which walks the frames of the throw point when the error has no
 //! stack yet (`Realm::stack_for_throw`).
 //!
@@ -25,13 +25,17 @@ use crate::object::{F_NOEXT, Obj};
 use crate::shapes::ShapeId;
 use crate::string::{Chars, Str};
 use crate::value::Value;
-use std::ptr::NonNull;
 
 /// The state of the stacks of one realm.
 #[derive(Default)]
 pub(crate) struct ErrStack {
-    /// The JS stack of the run that executes now (`Vm::run` sets it and puts back the old one).
-    pub stk: Option<NonNull<Vec<Value>>>,
+    /// Register 0 of the frame of the native call that runs now (the `regs` of the loop, `publish!`), null when there is none. A run puts
+    /// back the old value when it ends, and a reallocation of the stack clears it.
+    pub top: Top,
+    /// The `pc` of that call.
+    pub pc: u32,
+    /// The address of the first word of the stack of the run that executes now, to turn `top` into an index.
+    pub base: usize,
     /// The `Error` constructor, for `stackTraceLimit`.
     pub ctor: Option<Obj>,
     /// The shape of the `Error` constructor and the slot of `stackTraceLimit` in it, as the last read found them.
@@ -42,6 +46,16 @@ pub(crate) struct ErrStack {
     acc: Option<(Value, Value)>,
     /// The frames of the capture in progress.
     buf: Vec<u16>,
+}
+
+/// A raw pointer that has a default (null).
+#[derive(Clone, Copy)]
+pub(crate) struct Top(pub *const Value);
+
+impl Default for Top {
+    fn default() -> Top {
+        Top(std::ptr::null())
+    }
 }
 
 /// `Error.stackTraceLimit` when the script did not change it.
@@ -147,11 +161,19 @@ impl Realm {
 
     /// The frames of the call that runs now, for the error `e` that a native just made (`error_ctor`). Nothing when no run published a stack.
     pub(crate) fn capture_here(&mut self, e: Value, upto: Option<Value>, own: bool, fresh: bool) {
-        let (Some(p), Some(o)) = (self.es.stk, Realm::obj(e)) else { return };
+        let (top, Some(o)) = (self.es.top.0, Realm::obj(e)) else { return };
+        let off = (top as usize).wrapping_sub(self.es.base);
+        let fp = off / std::mem::size_of::<Value>();
+        if top.is_null() || off % std::mem::size_of::<Value>() != 0 || fp < REC {
+            return;
+        }
+        // SAFETY: `top` is `regs` of the loop that runs the call (`publish!`), so it is in the live stack that starts at `base`: the loop
+        // clears it when the stack is reallocated, and a run puts back the one of the run above when it ends. The words below `fp` are
+        // initialized (`Vm::start` and `ensure!` fill the stack). The slice is a read of memory that `regs` can reach.
+        let stack: &[Value] = unsafe { std::slice::from_raw_parts(top.sub(fp), fp) };
+        let Some(ci) = self.function_new(stack[fp - REC]).map(|f| f.0) else { return };
         let prog = self.prog.clone();
-        // SAFETY: `Vm::run` set it to the stack of the run that is on the Rust stack, and puts the old value back when it ends.
-        let stack: &[Value] = unsafe { p.as_ref() };
-        self.capture_at(stack, &prog, self.cur, o, upto, (own, fresh));
+        self.capture_at(stack, &prog, (ci, fp, self.es.pc), o, upto, (own, fresh));
     }
 
     /// `unwind` calls it for the thrown value `e` at the frame `at`: an error that has no frames yet (an internal one) gets them now.

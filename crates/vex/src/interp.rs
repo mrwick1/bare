@@ -337,6 +337,7 @@ impl Realm {
         let need = fp + ncode.nregs as usize + 8;
         if need > stack.len() {
             stack.resize(need.max(2 * stack.len()).min(MAX_STACK + 8).max(need), Value::UNDEFINED);
+            (self.es.top, self.es.base) = (Default::default(), stack.as_ptr() as usize);
         }
         if kept {
             // The stub had the parameter registers of the code: the frame has the arguments already.
@@ -591,15 +592,15 @@ impl Vm {
     fn run(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, prog: &Codes, mut ci: usize, mut fp: usize, mut pc: usize) -> Result<Value, Exit> {
         // The stack and the entry frame for the errors of natives that the loop did not publish for (`error_stack.rs`); the run above gets
         // its own back when this one ends.
-        let saved = (realm.es.stk.replace(std::ptr::NonNull::from(&*stack)), realm.cur);
-        realm.cur = (ci, fp, pc as u32);
+        let saved = (realm.es.top, realm.es.pc, realm.es.base);
+        (realm.es.top, realm.es.base) = (Default::default(), stack.as_ptr() as usize);
         let r = loop {
             match Vm::exec::<Hot>(realm, stack, fbs, prog, ci, fp, pc) {
                 Flow::Done(r) => break r,
                 Flow::Go(c, f, p) => (ci, fp, pc) = (c, f, p),
             }
         };
-        (realm.es.stk, realm.cur) = saved;
+        (realm.es.top, realm.es.pc, realm.es.base) = saved;
         r
     }
 
@@ -758,7 +759,7 @@ impl Vm {
         // Before a native runs: the frame of the call, for the stack of an error that the native makes (`error_stack.rs`).
         macro_rules! publish {
             () => {
-                realm.cur = (ci, fp, pc as u32)
+                (realm.es.top.0, realm.es.pc) = (regs as *const Value, pc as u32)
             };
         }
         // The canonical atom of this realm for `code.atoms[ai]`.
@@ -990,6 +991,7 @@ impl Vm {
                     }
                     let grown = need.max(2 * stack.len()).min(MAX_STACK + 8);
                     stack.resize(grown, undef);
+                    (realm.es.top, realm.es.base) = (Default::default(), stack.as_ptr() as usize);
                     // SAFETY: the stack was reallocated; the frame `fp` is inside it.
                     regs = unsafe { stack.as_mut_ptr().add(fp) };
                 }
