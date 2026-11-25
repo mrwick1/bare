@@ -30,7 +30,8 @@
 //! `Src::Of` is a collection of one element (`table.rows`, `tr.cells`, `form.elements`, see `browser_table.rs`); `of` keeps one list for each.
 //!
 //! Gates: the lookup is on `Document` only (no `Element.getElementsByName` exists). `getElementsByTagName` and
-//! `getElementsByClassName` are still snapshot arrays. `NodeList` is not returned by `childNodes` or `querySelectorAll`.
+//! `getElementsByClassName` are still snapshot arrays. `childNodes` and `children` are the one live list of their node (`Src::Of`).
+//! `querySelectorAll` gives a snapshot array.
 
 use crate::eng::{Eng, Val};
 use crate::browser_sources::Roots;
@@ -197,6 +198,7 @@ fn prepare<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, owner: E::Obj) -> Res<'s, 
             let ids = match mode {
                 0 | 1 => old::<E, _>(s, |it| crate::browser_select::list_ids(d, it, owner_node, mode == 1))?,
                 2 => old::<E, _>(s, |it| crate::browser_controls::label_ids(d, it, owner_node))?,
+                m if m >= 3 + CHILD_NODES => d.kids_s(s, owner_node, m == 3 + CHILDREN)?,
                 m => crate::browser_table::ids(d, s, owner_node, m - 3)?,
             };
             if ids.len() > d.lim.max_results {
@@ -331,12 +333,16 @@ pub(crate) fn make_list<E: Eng>(d: &Dom<E>, it: &mut E::Vm, proto: E::Obj, src: 
     Ok(E::obj_raw(o))
 }
 
-/// The one live `HTMLCollection` of `n` and `kind` (`Src::Of`), made on the first call.
+/// The `Src::Of` kind of `childNodes` (a `NodeList`) and of `children` (an `HTMLCollection`). The table kinds are below them.
+pub(crate) const CHILD_NODES: u8 = 250;
+pub(crate) const CHILDREN: u8 = 251;
+
+/// The one live `HTMLCollection` of `n` and `kind` (`Src::Of`), made on the first call. `childNodes` is a `NodeList`.
 pub(crate) fn of<E: Eng>(d: &Dom<E>, it: &mut E::Vm, n: NodeId, kind: u8) -> V<E> {
     if let Some(&o) = d.nl.s.borrow().of.get(&(n, kind)) {
         return Ok(E::obj_raw(o));
     }
-    let proto = crate::browser_select::collection_proto(d, it)?;
+    let proto = if kind == CHILD_NODES { list_proto(d) } else { crate::browser_select::collection_proto(d, it)? };
     let v = make_list(d, it, proto, Src::Of(n, kind))?;
     if let Val::Object(o) = E::kind(v) {
         d.nl.s.borrow_mut().of.insert((n, kind), o);

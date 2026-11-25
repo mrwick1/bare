@@ -795,7 +795,7 @@ fn caps_return_distinct_limit_errors() {
         // results: a flat list longer than the cap
         let mut b2 = browser_with(&format!("<body>{}</body>", "<i></i>".repeat(10)), BrowserLimits { max_results: 6, ..Default::default() });
         assert_eq!(js(&mut b2, "document.querySelectorAll('i')"), lim("dom-results"));
-        assert_eq!(js(&mut b2, "document.body.childNodes"), lim("dom-results"));
+        assert_eq!(js(&mut b2, "document.body.childNodes.length"), lim("dom-results"));
         assert_eq!(js(&mut b2, "document.querySelector('i').tagName"), "I"); // first match needs no list
         // nodes and text
         let mut b3 = browser_with(PAGE, BrowserLimits { max_nodes: 20, max_text_bytes: 400, ..Default::default() });
