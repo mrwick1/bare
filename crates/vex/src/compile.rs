@@ -952,6 +952,10 @@ impl<'a> Fc<'a> {
         let mut code = Code::new(nregs, nparams as u16);
         code.eval_scopes = self.eval_scopes.into_boxed_slice();
         code.fn_len = self.fn_len;
+        if let Some(id) = self.fn_id {
+            let f = self.facts.get(id);
+            code.span = (f.start, f.end);
+        }
         code.strict = self.strict;
         code.noctor = self.noctor;
         code.gen_kind = self.gen_kind;

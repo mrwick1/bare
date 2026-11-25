@@ -46,6 +46,7 @@ fn stub(atoms: &SharedAtoms, f: &FnFacts, name: Option<&str>) -> Result<Code, St
     c.words = vec![w[!kept as usize]];
     c.flags = if kept { 0 } else { CF_ARGS };
     c.fn_len = f.length.min(u16::MAX as u32) as u16;
+    c.span = (f.start, f.end);
     c.noctor = matches!(f.kind, crate::ast::FuncKind::Arrow | crate::ast::FuncKind::Method | crate::ast::FuncKind::Getter | crate::ast::FuncKind::Setter);
     // `prototype` of a generator function inherits the generator prototype, and `new` on it throws: both are read before the first call.
     if f.mode == crate::ast::FuncMode::Generator {
@@ -517,6 +518,10 @@ mod tests;
 #[cfg(test)]
 #[path = "conversion_tests.rs"]
 mod conversion_tests;
+
+#[cfg(test)]
+#[path = "fn_source_tests.rs"]
+mod fn_source_tests;
 
 #[cfg(test)]
 #[path = "proto_ic_tests.rs"]
