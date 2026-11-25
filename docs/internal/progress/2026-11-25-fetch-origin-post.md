@@ -19,7 +19,8 @@ Teams sets its image cookie with a same-origin `POST /api/mt/<region>/beta/users
 
 - New file `crates/bare/src/browser_fetch_origin_tests.rs`: a same-origin `POST` from `fetch` and from `XMLHttpRequest` sends the page origin; a same-origin `GET` sends none. The POST test failed before the change (`left: []`) and passes after it.
 - `browser_cors_tests.rs`: the old test asserted no `Origin` on a same-origin `PUT`. That was wrong against the standard. It now asserts the page origin.
-- `t` on the changed files: 7 passed. `browser_cors_tests.rs`: 17 passed. The new file: 2 passed.
+- `browser_fetch_tests.rs`, `managed_and_sensitive_headers_cannot_be_set_by_script`: it asserted no `Origin` on a same-origin `POST`. It now asserts the page origin. The check that script cannot set `Origin` (`evil.test`) stays.
+- `t` on the changed files (through `tools/ship.sh`): all passed. `browser_cors_tests.rs`: 17 passed. The new file: 2 passed.
 
 ## Live result (archMachine, one run each, saved session, no login)
 
