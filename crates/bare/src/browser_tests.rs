@@ -164,13 +164,10 @@ fn long_selector_lists_parse_and_the_caches_stay_bounded() {
         let long = format!("{},#s", list("c", 600));
         assert!(long.len() > 3000 && long.len() < 4500, "{}", long.len());
         assert_eq!(js(&mut b, &format!("document.querySelectorAll('{long}').length")), "1");
-        // Over the cap, the length check is the first one.
-        let over = "a,".repeat(BrowserLimits::default().max_selector_len / 2 + 1);
-        assert_eq!(js(&mut b, &format!("document.querySelectorAll('{over}')")), lim("dom-selector"));
-        // New names are bounded before the parse: a short table refuses a list of many tags.
-        let mut small = browser_with(PAGE, BrowserLimits { max_names: 100, ..Default::default() });
-        let tags = (0..300).map(|i| format!("x{i}")).collect::<Vec<_>>().join(",");
-        assert_eq!(js(&mut small, &format!("document.querySelectorAll('{tags}')")), lim("dom-names"));
+        // No length or name cap: a list past the old 64 KiB cap, with 20,000 new tag names, parses.
+        let tags = (0..20_000).map(|i| format!("x{i}")).collect::<Vec<_>>().join(",");
+        assert!(tags.len() > 1 << 16);
+        assert_eq!(js(&mut b, &format!("document.querySelectorAll('{tags}').length")), "0");
         // A parse is charged by its bytes (4 steps each): 40,000 bytes need 160,000 steps.
         let mut tight = Browser::new(tree::parse(PAGE), BrowserLimits::default(), EvalLimits { max_steps: 100_000, ..Default::default() }, HeapLimits::default()).unwrap();
         assert_eq!(js(&mut tight, &format!("document.createElement('p').querySelectorAll('{}a').length", "a,".repeat(5000))), "0");
@@ -199,7 +196,7 @@ fn selectors_lookups_and_errors() {
         assert_eq!(js(&mut b, "document.querySelector(':not(a b c d e f g)')"), lim("dom-selector-complexity"));
         assert_eq!(js(&mut b, "document.querySelector('a b :not(c d :is(e f g))')"), lim("dom-selector-complexity"));
         assert_eq!(js(&mut b, &format!("document.querySelector('{}')", "a".repeat(2000))), "null");
-        assert_eq!(js(&mut b, &format!("document.querySelector('{}')", "a".repeat(BrowserLimits::default().max_selector_len + 1))), lim("dom-selector"));
+        assert_eq!(js(&mut b, &format!("document.querySelector('{}')", "a".repeat((1 << 16) + 1))), "null");
         // a detached subtree is searched too, and is not found from the document
         assert_eq!(js(&mut b, "var d = document.createElement('div'); d.innerText2 = 1; d.appendChild(document.createElement('b')); [d.querySelector('b').tagName, document.querySelector('b'), d.isConnected].join()"), "B,,false");
         // the cause of the error is a DOMException-like object that inherits from Error
@@ -782,46 +779,17 @@ fn window_listeners_and_a_kept_event_survive_collect() {
 #[test]
 fn caps_return_distinct_limit_errors() {
     big(|| {
-        let l = BrowserLimits { max_nodes: 80, max_wrappers: 70, max_listeners: 5, max_results: 6, max_text_bytes: 4096, max_tree_depth: 8, max_attr_slots: 60, max_names: 40, ..Default::default() };
-        let mut b = browser_with(PAGE, l);
-        // listeners
-        js(&mut b, "var t = new EventTarget(); function f() {} function g() {} function h() {} function k() {}");
-        assert_eq!(js(&mut b, "t.addEventListener('a', f); t.addEventListener('a', g); t.addEventListener('a', h); t.addEventListener('a', k)"), "undefined");
-        assert_eq!(js(&mut b, "var u = new EventTarget(); u.addEventListener('a', f); u.addEventListener('a', g); u.addEventListener('b', f)"), lim("dom-listeners"));
+        let mut b = browser_with(PAGE, BrowserLimits { max_tree_depth: 8, ..Default::default() });
         // depth
         assert_eq!(js(&mut b, "var d = document.createElement('div'); var treeTop = d; for (var i = 0; i < 20; i++) { var c = document.createElement('div'); c.appendChild(treeTop); treeTop = c; } 0"), lim("dom-depth"));
-        // results: a flat list longer than the cap
-        let mut b2 = browser_with(&format!("<body>{}</body>", "<i></i>".repeat(10)), BrowserLimits { max_results: 6, ..Default::default() });
-        assert_eq!(js(&mut b2, "document.querySelectorAll('i')"), lim("dom-results"));
-        assert_eq!(js(&mut b2, "document.body.childNodes.length"), lim("dom-results"));
-        assert_eq!(js(&mut b2, "document.querySelector('i').tagName"), "I"); // first match needs no list
-        // nodes and text
-        let mut b3 = browser_with(PAGE, BrowserLimits { max_nodes: 20, max_text_bytes: 400, ..Default::default() });
-        assert_eq!(js(&mut b3, "for (var i = 0; i < 100; i++) document.createElement('p')"), lim("dom-nodes"));
-        assert_eq!(js(&mut b3, "document.body.setAttribute('x', new Array(500).join('x'))"), lim("dom-text"));
-        // wrappers: all of them are alive until a collect
-        let mut b4 = browser_with(PAGE, BrowserLimits { max_wrappers: 40, ..Default::default() });
-        assert_eq!(js(&mut b4, "for (var i = 0; i < 100; i++) document.createTextNode('x')"), lim("dom-wrappers"));
-        gc(&mut b4, &[]);
-        assert_eq!(js(&mut b4, "document.createTextNode('x').data"), "x");
-        // string size
-        let mut b5 = browser_with(PAGE, BrowserLimits { max_string_bytes: 100, ..Default::default() });
-        assert_eq!(js(&mut b5, "document.createTextNode(new Array(200).join('x'))"), lim("dom-string"));
-        // names: a selector or attribute may not grow the name table without bound
-        let mut b6 = browser_with(PAGE, BrowserLimits { max_names: 30, ..Default::default() });
-        assert_eq!(js(&mut b6, "for (var i = 0; i < 100; i++) document.body.setAttribute('a' + i, '1')"), lim("dom-names"));
     });
 }
 
 #[test]
-fn caps_hold_after_failures_and_a_cap_cannot_be_caught() {
+fn a_cap_cannot_be_caught() {
     big(|| {
-        let mut b = browser_with(PAGE, BrowserLimits { max_listeners: 2, ..Default::default() });
-        js(&mut b, "var t = new EventTarget(); function f() {} function g() {}");
-        assert_eq!(js(&mut b, "t.addEventListener('a', f); t.addEventListener('b', f); try { t.addEventListener('c', f) } catch (e) { 'caught' }"), lim("dom-listeners"));
-        assert_eq!(b.stats().listeners, 2);
-        // a removed listener makes room again
-        assert_eq!(js(&mut b, "t.removeEventListener('a', f); t.addEventListener('c', f); 'ok'"), "ok");
+        let mut b = browser_with(PAGE, BrowserLimits { max_tree_depth: 4, ..Default::default() });
+        assert_eq!(js(&mut b, "var top = document.createElement('div'); try { for (var i = 0; i < 10; i++) { var c = document.createElement('div'); c.appendChild(top); top = c; } } catch (e) { 'caught' }"), lim("dom-depth"));
     });
 }
 
@@ -855,38 +823,10 @@ fn wrappers_survive_between_calls_and_a_second_host_is_refused() {
 }
 
 #[test]
-fn clone_checks_attribute_and_input_capacity_before_allocating() {
-    big(|| {
-        let mut b = browser_with("<body><input id=i></body>", BrowserLimits::default());
-        js(&mut b, "var input = document.getElementById('i'); input.value = 'abcdefgh';");
-        let old = b.stats();
-        // Set limits before creating a new browser with the same source.
-        let mut a = browser_with("<body><input id=i></body>", BrowserLimits { max_attr_slots: old.attr_slots, ..Default::default() });
-        let before = a.stats();
-        assert_eq!(js(&mut a, "document.getElementById('i').cloneNode(true)"), lim("dom-attrs"));
-        assert_eq!(a.stats().nodes, before.nodes);
-        let mut c = browser_with("<body><input id=i></body>", BrowserLimits { max_text_bytes: 12, ..Default::default() });
-        js(&mut c, "var input = document.getElementById('i'); input.value = 'abcdefgh';");
-        let before = c.stats();
-        assert_eq!(js(&mut c, "input.cloneNode(true)"), lim("dom-input-bytes"));
-        assert_eq!(c.stats().nodes, before.nodes);
-    });
-}
-
-#[test]
 fn custom_event_with_undefined_detail_keeps_custom_prototype() {
     big(|| {
         let mut b = browser();
         assert_eq!(js(&mut b, "var e = new CustomEvent('x', {detail: undefined}); [e instanceof CustomEvent, e.detail === null].join()"), "true,true");
-    });
-}
-
-#[test]
-fn dom_string_limit_counts_utf8_bytes() {
-    big(|| {
-        let mut b = browser_with(PAGE, BrowserLimits { max_string_bytes: 100, ..Default::default() });
-        let src = format!("document.createTextNode('{}')", "é".repeat(64));
-        assert_eq!(js(&mut b, &src), lim("dom-string"));
     });
 }
 
@@ -926,21 +866,6 @@ fn reports_truncate_large_thrown_strings_before_copying() {
         assert_eq!(r.len(), 1);
         assert!(r[0].message.len() <= 4096);
         assert!(r[0].message.is_char_boundary(r[0].message.len()));
-    });
-}
-
-#[test]
-fn browser_rejects_an_initial_document_over_its_caps() {
-    big(|| {
-        for (limits, name) in [
-            (BrowserLimits { max_nodes: 1, ..Default::default() }, "dom-nodes"),
-            (BrowserLimits { max_text_bytes: 1, ..Default::default() }, "dom-text"),
-            (BrowserLimits { max_attr_slots: 0, ..Default::default() }, "dom-attrs"),
-            (BrowserLimits { max_names: 0, ..Default::default() }, "dom-names"),
-        ] {
-            let r = Browser::new(tree::parse(PAGE), limits, EvalLimits::default(), HeapLimits::default());
-            assert!(matches!(r, Err(Error::Limit(LimitKind::Host(k))) if k == name), "initial cap {name}");
-        }
     });
 }
 

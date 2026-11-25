@@ -140,9 +140,6 @@ impl<E: Eng> Dom<E> {
 
     fn new_signal(&self, it: &mut E::Vm) -> R<E, E::Obj> {
         let proto = self.abort.objs.borrow().expect("made")[0];
-        if self.st.borrow().by_obj.len() >= self.lim.max_wrappers {
-            return Err(self.lim("dom-wrappers"));
-        }
         let o = self.obj(it, proto)?;
         let mut st = self.st.borrow_mut();
         st.by_obj.insert(o, Target::Obj(o));
@@ -175,9 +172,6 @@ impl<E: Eng> Dom<E> {
                 Algo::Remove(t, id) => st.listeners.get(t).is_some_and(|v| v.iter().any(|l| l.id == *id)),
                 Algo::Fetch(_) => true,
             });
-        }
-        if s.algos.len() >= self.lim.max_listeners {
-            return Err(self.lim("abort-algorithms"));
         }
         s.algos.push(a);
         Ok(())
@@ -333,9 +327,6 @@ fn any_inputs<E: Eng>(d: &Dom<E>, it: &mut E::Vm, v: E::Raw) -> R<E, Vec<E::Obj>
             },
             Ok(None) => break,
             Err(e) => return Err(e),
-        }
-        if inputs.len() > d.lim.max_listeners {
-            return Err(d.lim("abort-any-sources"));
         }
     }
     Ok(inputs)

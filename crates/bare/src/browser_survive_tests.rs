@@ -166,7 +166,7 @@ fn runaway_recursion_ends_the_task_and_the_next_one_runs() {
 }
 
 #[test]
-fn a_long_selector_ends_only_its_task() {
+fn a_long_selector_does_not_end_its_task() {
     big(|| {
         let srv = page("<button id=go></button><script>
             document.getElementById('go').addEventListener('click', function () { localStorage.setItem('click', '1') });
@@ -176,11 +176,10 @@ fn a_long_selector_ends_only_its_task() {
         let mut s = Session::new(cfg(&srv));
         let r = s.run();
         assert_eq!(r.stop, SessionStop::Page(Stop::Settled), "{r:?}");
-        assert_eq!(get(&s, &srv, "unreachable"), None);
+        // A selector has no length cap, as in Chrome: the script goes on.
+        assert_eq!(get(&s, &srv, "unreachable").as_deref(), Some("1"));
         assert_eq!(get(&s, &srv, "next").as_deref(), Some("1"));
-        let e = errors(&mut s);
-        assert_eq!(e.len(), 1, "{e:?}");
-        assert!(e[0].contains("dom-selector"), "{e:?}");
+        assert_eq!(errors(&mut s), Vec::<String>::new());
         let r = s.resume(&[Input::Click("#go")]);
         assert_eq!(r.stop, SessionStop::Page(Stop::Settled), "{r:?}");
         assert_eq!(get(&s, &srv, "click").as_deref(), Some("1"));

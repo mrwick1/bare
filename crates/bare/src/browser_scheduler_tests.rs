@@ -420,9 +420,6 @@ fn limits_are_checked_before_growth() {
         assert_eq!(js(&mut b, "var c = new MessageChannel(); c.port1.postMessage('a'); c.port1.postMessage('0123456789012345678901234567890123456789')"), host_limit("message-bytes"));
         let s = b.sched_stats();
         assert_eq!((s.queued_messages, s.queued_message_bytes), (1, 18));
-        // the wrapper cap also bounds ports
-        let mut b = make(2_000_000, BrowserLimits { max_wrappers: 4, ..Default::default() });
-        assert_eq!(js(&mut b, "new MessageChannel(); new MessageChannel()"), host_limit("dom-wrappers"));
     });
 }
 

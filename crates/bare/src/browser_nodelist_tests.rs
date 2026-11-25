@@ -305,22 +305,6 @@ fn a_borrowed_document_stops_the_script_instead_of_an_empty_list() {
 }
 
 #[test]
-fn limits_fire_before_the_scan_and_cannot_be_caught() {
-    big(|| {
-        // result cap: a list with more members than `max_results` is a limit, never a short list
-        let lim = BrowserLimits { max_results: 8, ..Default::default() };
-        let mut b = browser_with("<!doctype html><body></body>", lim, 5_000_000);
-        ok(&mut b, "for (var i = 0; i < 8; i++) { var e = document.createElement('i'); e.setAttribute('name', 'm'); document.body.appendChild(e); } document.getElementsByName('m').length", "8");
-        ok(&mut b, "var e = document.createElement('i'); e.setAttribute('name', 'm'); document.body.appendChild(e); 1", "1");
-        assert_eq!(js(&mut b, "var fin = 0, caught = 0; try { document.getElementsByName('m').length } catch (e) { caught = 1 } finally { fin = 1 }"), "limit:Host(\"dom-results\")");
-        ok(&mut b, "[caught, fin].join()", "0,0");
-        assert_eq!(js(&mut b, "document.getElementsByName('m')[0]"), "limit:Host(\"dom-results\")");
-        // a name that matches nothing is still fine
-        ok(&mut b, "document.getElementsByName('zz').length", "0");
-    });
-}
-
-#[test]
 fn step_budget_is_charged_for_the_scan_and_stops_it() {
     big(|| {
         let mut html = String::from("<!doctype html><body>");
@@ -353,9 +337,9 @@ fn an_unchanged_document_is_not_scanned_again() {
 #[test]
 fn pending_promise_job_that_hits_a_limit_is_not_replayed() {
     big(|| {
-        let lim = BrowserLimits { max_results: 2, ..Default::default() };
-        let mut b = browser_with("<!doctype html><body><i name=m></i><i name=m></i><i name=m></i></body>", lim, 5_000_000);
-        ok(&mut b, "var runs = 0; var L = document.getElementsByName('m'); Promise.resolve().then(function () { runs++; return L.length; }).catch(function () { runs += 100; }); 1", "1");
+        let lim = BrowserLimits { max_tree_depth: 2, ..Default::default() };
+        let mut b = browser_with("<!doctype html><body></body>", lim, 5_000_000);
+        ok(&mut b, "var runs = 0; Promise.resolve().then(function () { runs++; var t = document.createElement('i'); for (var i = 0; i < 4; i++) { var p = document.createElement('i'); p.appendChild(t); t = p; } }).catch(function () { runs += 100; }); 1", "1");
         let r = b.drain();
         assert!(matches!(r, Err(Error::Limit(_))), "{r:?}");
         // The engine keeps a failed checkpoint failed (`failed_job`): the same error again, and the job does not run twice.
@@ -366,7 +350,6 @@ fn pending_promise_job_that_hits_a_limit_is_not_replayed() {
 }
 
 // ---- part 2: tests that use the stats API and the heap callbacks directly (they need `nodelist_stats`) ----
-
 
 #[test]
 fn stale_list_works_with_has_property_keys_and_for_in_without_a_prior_length_read() {
@@ -409,42 +392,6 @@ fn tables_are_pruned_and_slots_are_not_aliased() {
         ok(&mut b, "N = null; keep = null; 1", "1");
         b.collect(&[]).expect("collect");
         assert_eq!(b.nodelist_stats().lists, 0);
-    });
-}
-
-#[test]
-fn list_objects_name_bytes_and_cached_ids_are_capped_before_growth() {
-    big(|| {
-        let lim = BrowserLimits { max_wrappers: 40, ..Default::default() };
-        let mut b = browser_with(PAGE, lim, 5_000_000);
-        let r = js(&mut b, "var all = []; for (var i = 0; i < 100; i++) all.push(document.getElementsByName('x')); all.length");
-        assert_eq!(r, "limit:Host(\"dom-wrappers\")", "{r}");
-        assert!(b.nodelist_stats().lists <= 40);
-        // the name-bytes cap
-        let mut b = browser();
-        let r = js(&mut b, "var big = 'n'; for (var j = 0; j < 19; j++) big += big; big = big.slice(0, 400000); var keep = []; for (var i = 0; i < 4; i++) keep.push(document.getElementsByName(big)); keep.length");
-        assert_eq!(r, "limit:Host(\"dom-nodelist-names\")", "{r}");
-        assert_eq!(b.nodelist_stats().lists, 2);
-        // the cached-ids cap (4 * max_results), checked before the vector grows
-        let lim = BrowserLimits { max_results: 4, ..Default::default() };
-        let mut b = browser_with("<!doctype html><body><i name=m></i><i name=m></i><i name=m></i></body>", lim, 5_000_000);
-        let r = js(&mut b, "var ls = []; for (var i = 0; i < 10; i++) { var l = document.getElementsByName('m'); ls.push(l); l.length; } ls.length");
-        assert_eq!(r, "limit:Host(\"dom-nodelist-nodes\")", "{r}");
-        // 5 lists of 3 fit under the cap of 16; the sixth fails after its first push and keeps no ids.
-        assert_eq!(b.nodelist_stats().cached_ids, 15);
-    });
-}
-
-#[test]
-fn a_limit_during_a_rebuild_leaves_the_old_cache_and_the_script_stopped() {
-    big(|| {
-        let lim = BrowserLimits { max_results: 3, ..Default::default() };
-        let mut b = browser_with("<!doctype html><body><i name=m></i><i name=m></i></body>", lim, 5_000_000);
-        ok(&mut b, "var L = document.getElementsByName('m'); L.length", "2");
-        ok(&mut b, "for (var i = 0; i < 2; i++) { var e = document.createElement('i'); e.setAttribute('name', 'm'); document.body.appendChild(e); } 1", "1");
-        assert_eq!(js(&mut b, "L.length"), "limit:Host(\"dom-results\")");
-        assert_eq!(b.nodelist_stats().cached_ids, 2);
-        ok(&mut b, "document.body.lastChild.remove(); L.length", "3");
     });
 }
 

@@ -140,10 +140,6 @@ fn image_ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'
     }
     let n = {
         let mut doc = d.doc.borrow_mut();
-        d.room_s(s, &doc, 1, 0)?;
-        if doc.find_atom("img").is_none() && doc.name_count() + 1 > d.lim.max_names {
-            return Err(d.lim_s(s, "dom-names"));
-        }
         doc.create_element("img")
     };
     let w = d.wrap_s(s, n)?;

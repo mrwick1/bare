@@ -321,9 +321,6 @@ fn match_media<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<
     if d.plat.s.borrow().mql.len() >= lim.max_media_lists {
         return Err(d.lim_s(s, "media-lists"));
     }
-    if d.st.borrow().by_obj.len() >= d.lim.max_wrappers {
-        return Err(d.lim_s(s, "dom-wrappers"));
-    }
     let matches = old::<E, _>(s, |it| d.media_eval(it, &q))?;
     let o = d.obj_s(s, d.plat.p.get().expect("installed").mql)?;
     d.st.borrow_mut().add_target(s.engine(), o, crate::browser::Owner::Mql(o));
@@ -396,9 +393,6 @@ fn onchange_set<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: A
                 d.own_listeners(st, it, t);
             }
             (Some(f), None) => {
-                if st.n_listeners >= d.lim.max_listeners {
-                    return Err(d.lim("dom-listeners"));
-                }
                 st.next_id += 1;
                 let id = st.next_id;
                 let cb = it.trace_value(E::obj_raw(f));

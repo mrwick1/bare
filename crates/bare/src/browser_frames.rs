@@ -502,12 +502,6 @@ fn context<E: Eng>(d: &Dom<E>, it: &mut E::Vm, n: NodeId) -> R<E, E::Raw> {
     {
         return Ok(E::obj_raw(o));
     }
-    if d.frames.state().as_ref().map_or(0, |s| s.contexts.len()) >= d.lim.max_wrappers {
-        return Err(d.lim("dom-wrappers"));
-    }
-    if d.st.borrow().by_obj.len() >= d.lim.max_wrappers {
-        return Err(d.lim("dom-wrappers"));
-    }
     let element = d.wrap(it, n)?;
     // The frame window is an `EventTarget` (`Target::Obj`, as a worker or an abort signal is).
     let o = d.obj(it, d.p().et)?;

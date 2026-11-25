@@ -46,9 +46,6 @@ impl<E: Eng> Dom<E> {
 
     /// Like `new_event`, with the prototype given (a host event interface such as `MessageEvent`).
     pub(crate) fn new_event_proto(&self, it: &mut E::Vm, ty: &str, bubbles: bool, cancelable: bool, composed: bool, proto: E::Obj) -> R<E, E::Obj> {
-        if ty.len() > self.lim.max_string_bytes {
-            return Err(self.lim("dom-string"));
-        }
         it.charge_o((ty.len() / 32) as u64)?;
         let o = self.obj(it, proto)?;
         let e = EventState {
@@ -316,7 +313,7 @@ impl<E: Eng> Dom<E> {
         let mut diagnostic = self.error_text_inner(it, thrown, true);
         if let Some(frames) = diagnostic.find("\n    at ") {
             diagnostic = format!("{message}{}", &diagnostic[frames..]);
-            let cap = self.lim.max_string_bytes.min(4096);
+            let cap = 4096usize;
             let mut end = diagnostic.len().min(cap);
             while !diagnostic.is_char_boundary(end) { end -= 1; }
             diagnostic.truncate(end);
@@ -353,7 +350,7 @@ impl<E: Eng> Dom<E> {
 
     #[cold]
     fn error_text_inner(&self, it: &mut E::Vm, thrown: E::Raw, stack: bool) -> String {
-        let cap = self.lim.max_string_bytes.min(4096);
+        let cap = 4096usize;
         let append = |out: &mut String, units: &[u16]| {
             for c in char::decode_utf16(units.iter().copied()) {
                 let c = c.unwrap_or(char::REPLACEMENT_CHARACTER);
@@ -456,9 +453,6 @@ pub(crate) fn custom_event_ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Lo
 }
 
 pub(crate) fn event_target_ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
-    if d.st.borrow().by_obj.len() >= d.lim.max_wrappers {
-        return Err(d.lim_s(s, "dom-wrappers"));
-    }
     let default = d.obj_local(s, d.p().et);
     let proto = s.proto_from_new_target(default)?;
     let proto = obj_id::<E>(s, proto).expect("a prototype is an object");
@@ -538,9 +532,6 @@ pub(crate) fn add_event_listener<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this
     let list = st.listeners.entry(t).or_default();
     if list.iter().any(|l| *l.ty == *ty && !l.handler && matches!(E::kind(*l.cb.raw()), Val::Object(x) if x == cb) && l.capture == capture) {
         return Ok(s.undefined());
-    }
-    if st.n_listeners >= d.lim.max_listeners {
-        return Err(d.lim_s(s, "dom-listeners"));
     }
     st.next_id += 1;
     let id = st.next_id;

@@ -43,10 +43,6 @@ fn js(b: &mut Browser, src: &str) -> String {
     show(b, r)
 }
 
-fn lim(name: &'static str) -> String {
-    format!("limit:{:?}", LimitKind::Host(name))
-}
-
 #[test]
 fn the_properties_exist_where_the_standard_puts_them_and_nowhere_else() {
     big(|| {
@@ -255,21 +251,6 @@ fn a_handler_lives_while_its_owner_lives_and_slots_are_reused() {
 }
 
 #[test]
-fn the_listener_caps_are_checked_before_a_handler_slot_is_added() {
-    big(|| {
-        let mut b = make(2_000_000, BrowserLimits { max_listeners: 3, ..Default::default() });
-        js(&mut b, "var i = document.getElementById('i'); i.oninput = function () {}; i.addEventListener('x', function () {});");
-        js(&mut b, "document.addEventListener('y', function () {})");
-        assert_eq!(js(&mut b, "window.onchange = function () {}"), lim("dom-listeners"));
-        assert_eq!(js(&mut b, "window.onchange"), "null");
-        assert_eq!(b.stats().listeners, 3);
-        // a replacement and a null never grow, so they work at the cap
-        assert_eq!(js(&mut b, "i.oninput = function () {}; i.oninput = null; i.oninput"), "null");
-        assert_eq!(js(&mut b, "window.onchange = function () {}; typeof window.onchange"), "function");
-    });
-}
-
-#[test]
 fn a_limit_fault_in_a_handler_ends_the_dispatch_and_replays_nothing() {
     big(|| {
         let mut b = make(300_000, BrowserLimits::default());
@@ -422,10 +403,10 @@ fn callback_report_stack_fallback_bounds_and_caps() {
         let reports = b.take_reports();
         assert_eq!(reports.iter().map(|r| r.message.lines().next().unwrap()).collect::<Vec<_>>(), vec!["Error: missing", "Error: number", "Error: accessor"]);
         assert_eq!(js(&mut b, "window.dispatchEvent(new Event('probe')); 1"), "1");
-        let mut b = make(2_000_000, BrowserLimits { max_string_bytes: 128, ..Default::default() });
-        js(&mut b, "window.addEventListener('probe', function() { throw {name:'Error',message:'unicode',stack:'😀'.repeat(100)}; }); window.dispatchEvent(new Event('probe'))");
+        let mut b = browser();
+        js(&mut b, "window.addEventListener('probe', function() { throw {name:'Error',message:'unicode',stack:'😀'.repeat(2000)}; }); window.dispatchEvent(new Event('probe'))");
         let reports = b.take_reports();
-        assert_eq!(reports[0].message, "😀".repeat(32));
+        assert_eq!(reports[0].message, "😀".repeat(1024));
         let mut b = browser();
         js(&mut b, "window.addEventListener('probe', function() { throw 'plain'; }); window.dispatchEvent(new Event('probe'))");
         assert_eq!(b.take_reports()[0].message, "plain");

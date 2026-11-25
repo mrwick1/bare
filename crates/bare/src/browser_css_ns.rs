@@ -20,8 +20,7 @@
 //! one function. The first read makes the namespace and replaces the accessor with a data property (writable, configurable, not
 //! enumerable, as WebIDL says for a namespace).
 //!
-//! Bounds: a condition text is at most `max_selector_len` bytes (`Limit(Host("dom-selector"))`, as a selector is), and a
-//! `selector()` term is not parsed when it would take the document past `max_names`. Each call is charged by its text size.
+//! Bounds: a condition text has no length cap, as a selector has none. Each call is charged by its text size.
 //! A lone surrogate in an argument is `Unsupported`, as for every DOM string (`string_arg`).
 
 use crate::eng::{Eng, Ops};
@@ -93,14 +92,8 @@ fn supports<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>
         }
         None => first,
     };
-    if text.len() > d.lim.max_selector_len {
-        return Err(d.lim_s(s, "dom-selector"));
-    }
     s.charge(1 + (text.len() / 16) as u64)?;
     let mut doc = d.doc.borrow_mut();
-    if doc.name_count() + text.len() > d.lim.max_names {
-        return Err(d.lim_s(s, "dom-names"));
-    }
     let mut yes = bare_css::at_rules::supports_matches(&mut doc, &text);
     // `display: grid` is not a condition: try `(display: grid)`
     if !yes && a.len() == 1 && !text.starts_with('(') && text.contains(':') && balanced(&text) {
@@ -162,9 +155,6 @@ fn register_property<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a:
     }
     if initial.as_deref().is_some_and(|v| bad(v) || v.trim().is_empty()) || (initial.is_none() && syntax.trim() != "*") {
         return Err(d.dom_err_s(s, "SyntaxError", "Failed to execute 'registerProperty' on 'CSS': The initial value is missing or not valid."));
-    }
-    if name.len() + syntax.len() + initial.as_ref().map_or(0, |v| v.len()) > d.lim.max_selector_len {
-        return Err(d.lim_s(s, "dom-selector"));
     }
     s.charge(1 + (name.len() / 16) as u64)?;
     let mut all = d.computed.registered.borrow_mut();

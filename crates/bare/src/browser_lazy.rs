@@ -40,7 +40,7 @@ pub(crate) fn tag<E: Eng>(d: &Dom<E>, it: &mut E::Vm, proto: E::Obj, name: &str)
     let (ks, kt) = (d.key(it, "Symbol")?, d.key(it, "toStringTag")?);
     let sy = it.get_value(E::obj_raw(g), ks)?;
     if let Val::Symbol(s) = E::kind(it.get_value(sy, kt)?) {
-        // Not `js_str`: a constant of the setup is not script data, and a small `max_string_bytes` must not stop the browser.
+        // Not `js_str`: a constant of the setup is not script data, and it is not charged.
         let t = E::str_raw(it.h_intern(name)?);
         it.define_data(proto, E::sym_key(s), t, false, false, true)?;
     }

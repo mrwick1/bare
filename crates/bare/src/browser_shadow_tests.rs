@@ -738,28 +738,6 @@ fn a_listener_on_a_shadow_root_survives_while_the_root_is_reachable_and_dies_wit
 // ------------------------------------------------------------------------------------------ caps and bounds
 
 #[test]
-fn caps_are_checked_before_growth_and_no_catch_or_finally_sees_a_limit() {
-    // nodes: the host fits, the root does not.
-    let nodes = browser().stats().nodes;
-    let lim_nodes = BrowserLimits { max_nodes: nodes + 1, ..Default::default() };
-    let mut b = browser_with(PAGE, lim_nodes, 5_000_000);
-    let out = js(&mut b, "var h = document.createElement('div'), s = 'start'; try { h.attachShadow({mode: 'open'}); s = 'attached'; } catch (e) { s = 'caught'; } finally { s += '+finally'; } s");
-    assert_eq!(out, lim("dom-nodes"));
-    assert_eq!(b.stats().nodes, nodes + 1);
-    assert_eq!(js(&mut b, "h.shadowRoot"), "null");
-
-    // wrappers: the call fails before the node is made.
-    let w = browser().stats().wrappers;
-    let mut b = browser_with(PAGE, BrowserLimits { max_wrappers: w + 1, ..Default::default() }, 5_000_000);
-    js(&mut b, "var h = document.createElement('div');");
-    let nodes = b.stats().nodes;
-    let out = js(&mut b, "try { h.attachShadow({mode: 'open'}); 'ok' } catch (e) { 'caught' }");
-    assert_eq!(out, lim("dom-wrappers"));
-    assert_eq!(b.stats().nodes, nodes, "no node was made");
-    assert_eq!(js(&mut b, "h.shadowRoot"), "null");
-}
-
-#[test]
 fn depth_cap_counts_the_hops_through_hosts_and_is_checked_before_mutation() {
     let mut b = browser_with(PAGE, BrowserLimits { max_tree_depth: 6, ..Default::default() }, 5_000_000);
     let out = js(
@@ -809,14 +787,6 @@ fn walks_through_roots_charge_steps_and_stop_at_the_step_budget() {
          var s = 0; for (var j = 0; j < 100000; j++) { s += cur.getRootNode({composed: true}) === treeTop ? 1 : 0; } s",
     );
     assert!(out.starts_with("limit:"), "{out}");
-}
-
-#[test]
-fn query_results_in_a_root_are_capped_and_traversal_is_charged() {
-    let mut b = browser_with(PAGE, BrowserLimits { max_results: 5, ..Default::default() }, 5_000_000);
-    let out = js(&mut b, "var h = document.createElement('div'), r = h.attachShadow({mode: 'open'}); for (var i = 0; i < 6; i++) r.appendChild(document.createElement('i')); try { r.querySelectorAll('i'); 'ok' } catch (e) { 'caught' }");
-    assert_eq!(out, lim("dom-results"));
-    assert_eq!(js(&mut b, "r.querySelector('i') !== null && r.children.length > 0"), lim("dom-results"));
 }
 
 // ------------------------------------------------------------------------------------------ neighbours keep working
@@ -889,17 +859,6 @@ fn shadow_load_model() {
     assert!(st.wrappers <= base.wrappers + model_kept * 16, "{st:?}");
     assert_eq!(js(&mut b, "document.querySelectorAll('span').length + document.getElementById('a').children.length"), (model_kept + 1).to_string());
     assert_eq!(js(&mut b, "document.getElementById('a').lastElementChild.shadowRoot === null || document.getElementById('a').lastElementChild.shadowRoot instanceof ShadowRoot"), "true");
-}
-
-#[test]
-fn shadow_root_creation_counts_live_lists_before_native_mutation() {
-    let w=browser().stats().wrappers;
-    let mut b=browser_with(PAGE,BrowserLimits{max_wrappers:w+2,..Default::default()},5_000_000);
-    js(&mut b,"var h=document.createElement('div'); var list=document.getElementsByName('x');");
-    let before=b.stats().nodes;
-    assert_eq!(js(&mut b,"h.attachShadow({mode:'open'})"),lim("dom-wrappers"));
-    assert_eq!(b.stats().nodes,before);
-    assert_eq!(js(&mut b,"h.shadowRoot"),"null");
 }
 
 #[test]

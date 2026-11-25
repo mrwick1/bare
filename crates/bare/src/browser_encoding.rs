@@ -37,13 +37,10 @@ fn structured_clone<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: 
 
 const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-/// The UTF-16 units of `ToString(v)`, within the DOM string cap.
-fn units_of<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>) -> Res<'s, Vec<u16>> {
+/// The UTF-16 units of `ToString(v)`.
+fn units_of<'s, E: Eng>(s: &mut Sc<'s, E>, v: Local<'s>) -> Res<'s, Vec<u16>> {
     let v = if s.type_of(v) == Type::String { v } else { s.to_string(v)? };
     let len = s.as_str(v).map_or(0, |t| t.len());
-    if len > d.lim.max_string_bytes {
-        return Err(d.lim_s(s, "dom-string"));
-    }
     s.charge((len / 32) as u64)?;
     Ok(match s.as_str(v) {
         Some(Str::Latin1(b)) => b.iter().map(|&c| c as u16).collect(),
@@ -67,7 +64,7 @@ pub(crate) fn base64(bytes: &[u8]) -> String {
 fn btoa<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     need::<E>(s, a, "btoa")?;
     let a0 = arg_s::<E>(s, a, 0);
-    let u = units_of(d, s, a0)?;
+    let u = units_of::<E>(s, a0)?;
     if u.iter().any(|&c| c > 0xFF) {
         return Err(d.dom_err_s(s, "InvalidCharacterError", "Failed to execute 'btoa' on 'Window': The string to be encoded contains characters outside of the Latin1 range."));
     }
@@ -84,7 +81,7 @@ fn btoa<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) ->
 fn atob<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     need::<E>(s, a, "atob")?;
     let a0 = arg_s::<E>(s, a, 0);
-    let mut u = units_of(d, s, a0)?;
+    let mut u = units_of::<E>(s, a0)?;
     u.retain(|&c| !matches!(c, 9 | 10 | 12 | 13 | 32));
     if u.len() % 4 == 0 {
         for _ in 0..2 {

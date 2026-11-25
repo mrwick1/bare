@@ -38,7 +38,7 @@
 //! `labels`, `validity`, `willValidate`, `validationMessage`, `setCustomValidity()`, `checkValidity()` and `reportValidity()` of a select, and
 //! the whole `HTMLTextAreaElement`, are in `browser_controls.rs` and `browser_textarea.rs`.
 //!
-//! Bounds: the options of one select count with `dom-results`; a list counts with the wrappers.
+//! Bounds: none on the options of one select or on the lists.
 
 use crate::eng::{Eng, Ops};
 use crate::browser::*;
@@ -167,7 +167,7 @@ fn display_size(doc: &Document, select: NodeId) -> u32 {
 }
 
 /// The options of `select` in tree order. A nested `select` is not entered and a foreign element is skipped.
-fn collect<E: Eng>(d: &Dom<E>, doc: &Document, it: &mut Option<&mut E::Vm>, select: NodeId) -> R<E, Vec<NodeId>> {
+fn collect<E: Eng>(doc: &Document, it: &mut Option<&mut E::Vm>, select: NodeId) -> R<E, Vec<NodeId>> {
     let mut out = Vec::new();
     let mut stack: Vec<NodeId> = doc.children(select).collect();
     stack.reverse();
@@ -178,9 +178,6 @@ fn collect<E: Eng>(d: &Dom<E>, doc: &Document, it: &mut Option<&mut E::Vm>, sele
         }
         match doc.element_name(n) {
             "option" => {
-                if out.len() >= d.lim.max_results {
-                    return Err(d.lim("dom-results"));
-                }
                 out.push(n);
             }
             "select" => {}
@@ -251,7 +248,7 @@ impl<E: Eng> Dom<E> {
         }
         let (list, attrs, multiple, size1) = {
             let doc = self.doc.borrow();
-            let list = collect(self, &doc, &mut it, select)?;
+            let list = collect(&doc, &mut it, select)?;
             let attrs: Vec<bool> = list.iter().map(|&o| has_in(self, &doc, o, "selected")).collect();
             let multiple = has(&doc, select, "multiple");
             (list, attrs, multiple, !multiple && display_size(&doc, select) == 1)
@@ -726,10 +723,6 @@ fn set_length<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Arg
     let mut doc = d.doc.borrow_mut();
     if n > opts.len() {
         let add = n - opts.len();
-        d.room_s(s, &doc, add, 0)?;
-        if doc.find_atom("option").is_none() && doc.name_count() + 1 > d.lim.max_names {
-            return Err(d.lim_s(s, "dom-names"));
-        }
         for _ in 0..add {
             s.charge(1)?;
             let o = doc.create_element("option");
@@ -1001,10 +994,7 @@ fn option_ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<
     let selected = s.to_boolean(a3);
     let o = {
         let mut doc = d.doc.borrow_mut();
-        d.room_s(s, &doc, 1 + !text.is_empty() as usize, text.len())?;
-        if doc.find_atom("option").is_none() && doc.name_count() + 1 > d.lim.max_names {
-            return Err(d.lim_s(s, "dom-names"));
-        }
+        d.room_s(s, &doc, text.len())?;
         let o = doc.create_element("option");
         if !text.is_empty() {
             let t = doc.create_text(&text);

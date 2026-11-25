@@ -21,6 +21,9 @@ use std::hash::BuildHasherDefault;
 /// waits until this many bytes of nodes, text and attributes (and a fourth of the bytes in use after the last walk) were made since the last one.
 /// The same budget as the native-byte trigger of the collect (`Interp::gc_due`).
 const FLOOR: usize = 1 << 20;
+/// A text list longer than this asks for a rebuild between two tasks (`Dom::room`). The next rebuild waits until the list grew by a fourth of
+/// this, or by half its length after the last rebuild: a large live text is not copied again for each small write.
+pub(crate) const TEXT_COMPACT: usize = 64 << 20;
 const MISSES: u32 = 4;
 
 /// The state of the reclaim of one realm.
@@ -28,7 +31,7 @@ const MISSES: u32 = 4;
 pub(crate) struct Reclaim {
     /// A collection ran since the last reclaim: wrappers died.
     due: Cell<bool>,
-    /// The text list holds more than the cap: much of it is dead text that waits for a rebuild (`Dom::room`).
+    /// The text list is past `TEXT_COMPACT`: much of it is dead text that waits for a rebuild (`Dom::room`).
     compact: Cell<bool>,
     /// The length of the text list after the last walk that `compact` asked for.
     compact_mark: Cell<usize>,
@@ -78,11 +81,12 @@ impl<E: Eng> Dom<E> {
         self.reclaim.pins.borrow_mut().insert(n);
     }
 
-    /// The text list is over the cap: rebuild it after this task, also when no wrapper died. A walk costs time in the nodes in use, so
-    /// the next one waits until a fourth of the cap was written since the last one.
+    /// The text list is past `TEXT_COMPACT`: rebuild it after this task, also when no wrapper died. A walk costs time in the nodes in use,
+    /// so the next one waits for the growth that `TEXT_COMPACT` gives.
     pub(crate) fn compact_wanted(&self, len: usize) {
         let r = &self.reclaim;
-        if len >= r.compact_mark.get().saturating_add(self.lim.max_text_bytes / 4) {
+        let mark = r.compact_mark.get();
+        if len >= mark.saturating_add((TEXT_COMPACT / 4).max(mark / 2)) {
             r.compact.set(true);
         }
     }
@@ -159,9 +163,8 @@ impl<E: Eng> Dom<E> {
             r.due.set(true);
             return 0;
         };
-        // A tree that waits counts as in use, so a page near a cap frees them now: the caps count nodes in use.
-        let lim = &self.lim;
-        let free = if doc.live_len() > lim.max_nodes / 2 || doc.live_text_bytes() > lim.max_text_bytes / 2 || doc.text_bytes() > lim.max_text_bytes || doc.live_attr_slots() > lim.max_attr_slots / 2 {
+        // A long text list frees the trees that wait now, so that their text is dead and the rebuild drops it.
+        let free = if doc.text_bytes() > TEXT_COMPACT {
             Free::Now
         } else if collect {
             Free::Collect

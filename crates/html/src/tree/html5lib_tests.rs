@@ -73,7 +73,7 @@ fn tree_of(case: &Case) -> String {
     match &case.context {
         None => parse(&case.data).dump_with_contents(),
         Some(context) => {
-            let lim = FragmentLimits { max_source: 1 << 20, max_nodes: 1 << 16, max_text_bytes: 1 << 20, max_attr_slots: 1 << 16, max_names: 1 << 12, max_depth: 512 };
+            let lim = FragmentLimits { max_depth: 512 };
             // A foreign context is written `svg path` or `math mi`.
             let (ns, context) = match context.split_once(' ') {
                 Some(("svg", name)) => (Ns::Svg, name),

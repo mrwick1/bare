@@ -6,7 +6,7 @@ use crate::eng_new::Peek;
 use crate::browser::*;
 use bare_html::tree;
 use crate::eng_new::NewFault as Error;
-use crate::js_limits::{EvalLimits, LimitKind};
+use crate::js_limits::EvalLimits;
 use crate::js_limits::HeapLimits;
 
 const SVG: &str = "http://www.w3.org/2000/svg";
@@ -31,10 +31,6 @@ fn js(b: &mut Browser, src: &str) -> String {
         Err(Error::Limit(l)) => format!("limit:{l:?}"),
         Err(e) => format!("other:{e:?}"),
     }
-}
-
-fn lim(name: &'static str) -> String {
-    format!("limit:{:?}", LimitKind::Host(name))
 }
 
 #[test]
@@ -151,34 +147,6 @@ fn wrong_receivers_and_foreign_namespaces_are_illegal() {
     // an SVG `link` is an ordinary wrapper: a JS property, not the attribute
     assert_eq!(js(&mut b, &format!("var sl = document.createElementNS('{SVG}', 'link'); sl.rel = 'x'; sl.hasAttribute('rel') + ',' + sl.rel")), "false,x");
 }
-
-#[test]
-fn rel_caps_are_checked_before_the_write_and_on_read() {
-    // a value over `max_string_bytes` is refused before any write (the attribute keeps its old value)
-    let mut b = browser_with(PAGE, BrowserLimits { max_string_bytes: 100, ..Default::default() });
-    assert_eq!(js(&mut b, "var a = document.getElementById('a'), v = ''; for (var i = 0; i < 50; i++) v += 'x'; a.rel = v; a.rel.length"), "50");
-    assert_eq!(js(&mut b, "var w = ''; for (var i = 0; i < 200; i++) w += 'y'; a.rel = w; 0"), lim("dom-string"));
-    assert_eq!(js(&mut b, "a.getAttribute('rel').length"), "50");
-
-    // reading a long value is refused too: the same string cap as every other string out of the document
-    let page = format!("<body><link id=big rel='{}'></body>", "z".repeat(200));
-    let mut b = browser_with(&page, BrowserLimits { max_string_bytes: 100, ..Default::default() });
-    assert_eq!(js(&mut b, "document.getElementById('big').rel"), lim("dom-string"));
-    assert_eq!(js(&mut b, "document.getElementById('big').hasAttribute('rel')"), "true");
-
-    // a new attribute needs an attribute slot: none left, nothing is written (this page has no attribute or text)
-    let plain = "<!doctype html><body><p></p></body>";
-    let mut b = browser_with(plain, BrowserLimits { max_attr_slots: 0, ..Default::default() });
-    assert_eq!(js(&mut b, "var n = document.createElement('link'); n.rel = 'x'; 0"), lim("dom-attrs"));
-    assert_eq!(js(&mut b, "n.hasAttribute('rel') + ',' + n.rel.length"), "false,0");
-
-    // the value bytes count against the native text cap, before the write: the cap is the page's own text, so one more byte is refused
-    let base = browser(plain).document().borrow().text_bytes();
-    let mut b = browser_with(plain, BrowserLimits { max_text_bytes: base, ..Default::default() });
-    assert_eq!(js(&mut b, "var n = document.createElement('link'); n.rel = 'x'; 0"), lim("dom-text"));
-    assert_eq!(js(&mut b, "n.hasAttribute('rel')"), "false");
-}
-
 
 #[test]
 fn rel_reflects_only_the_null_namespace_attribute() {

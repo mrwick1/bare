@@ -13,7 +13,7 @@ type V<E: Eng> = R<E, E::Raw>;
 
 pub(crate) fn attr_set<E: Eng>(d: &Dom<E>, it: &mut E::Vm, n: NodeId, name: &str, value: &str) -> R<E, ()> {
     let mut doc = d.doc.borrow_mut();
-    d.attr_room(&doc, n, name, value)?;
+    d.room(&doc, value.len())?;
     it.charge_o(doc.attr_count(n) as u64 + 1)?;
     doc.set_attr(n, name, value);
     Ok(())
@@ -26,7 +26,6 @@ impl<E: Eng> Dom<E> {
     pub(crate) fn put_input_value(&self, it: Option<&mut E::Vm>, n: NodeId, v: String) -> R<E, ()> {
         let changed = self.with_input_value(n, |old| old != v) != Some(false);
         let moved = if changed { self.selection_after_value(it, n, &v)? } else { false };
-        self.value_room(n, v.len())?;
         self.selection_room(n, moved, false)?; // every cap is checked before the first write
         self.queue_selection_tasks(n, moved, false, false)?;
         self.write_value(n, v, changed)

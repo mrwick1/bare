@@ -42,7 +42,7 @@ pub(crate) fn define<E: Eng>(d: &Dom<E>, it: &mut E::Vm, name: &str) -> R<E, boo
     let g = it.global_object();
     let k = d.key(it, sentinel)?;
     if it.h_peek_own(g, k)?.is_none() {
-        // Not `js_str`: the source is part of the host, not script data, and a small `max_string_bytes` must not stop the browser.
+        // Not `js_str`: the source is part of the host, not script data, and it is not charged.
         let s = it.h_intern(src)?;
         let made = it.eval_global_o(E::str_raw(s))?;
         if sentinel == "CompressionStream" {

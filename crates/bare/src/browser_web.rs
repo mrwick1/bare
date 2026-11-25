@@ -533,13 +533,12 @@ pub(crate) fn need<'s, E: Eng>(s: &mut Sc<'s, E>, a: Args<'s>, n: usize, what: &
 }
 
 /// `ToString(v)` as a USVString: a lone surrogate becomes U+FFFD.
-pub(crate) fn usv<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>) -> Res<'s, String> {
+pub(crate) fn usv<'s, E: Eng>(_d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>) -> Res<'s, String> {
     let l = s.to_string(v)?;
     let (len, text) = {
         let t = s.as_str(l).expect("a string");
-        (t.len(), (t.len() <= d.lim.max_string_bytes).then(|| t.to_string_lossy()))
+        (t.len(), t.to_string_lossy())
     };
-    let Some(text) = text else { return Err(d.lim_s(s, "dom-string")) };
     s.charge((len / 32) as u64)?;
     Ok(text)
 }

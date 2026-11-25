@@ -297,24 +297,15 @@ impl<E: Eng> Dom<E> {
     /// The UTF-8 text of a string value and its length in units, or the error of a cap.
     fn text_of(&self, text: bare_js_api::Str<'_>) -> Result<(String, usize), Fault<E>> {
         let len = text.len();
-        if len > self.lim.max_string_bytes {
-            return Err(self.lim("dom-string"));
-        }
         let t = match text {
             bare_js_api::Str::Latin1(b) => b.iter().map(|&c| c as char).collect::<String>(),
             bare_js_api::Str::Utf16(u) => String::from_utf16(u).map_err(|_| Fault::Unsupported("lone surrogate in a DOM string (the native document is UTF-8)"))?,
         };
-        if t.len() > self.lim.max_string_bytes {
-            return Err(self.lim("dom-string"));
-        }
         Ok((t, len))
     }
 
     /// `Dom::js_str` into a local.
     pub(crate) fn js_str_s<'s>(&self, s: &mut Sc<'s, E>, text: &str) -> Res<'s, Local<'s>> {
-        if text.len() > self.lim.max_string_bytes {
-            return Err(s.engine().api_err(self.lim("dom-string")));
-        }
         s.charge((text.len() / 32) as u64)?;
         s.string(text)
     }
@@ -602,16 +593,8 @@ impl<E: Eng> Dom<E> {
     }
 
     /// `Dom::room`, with the cap as an error of the interface.
-    pub(crate) fn room_s<'s>(&self, s: &mut Sc<'s, E>, doc: &Document, nodes: usize, text: usize) -> Res<'s, ()> {
-        match self.room(doc, nodes, text) {
-            Ok(()) => Ok(()),
-            Err(e) => Err(lift_err::<E>(s, e)),
-        }
-    }
-
-    /// `Dom::attr_room`, with the cap as an error of the interface.
-    pub(crate) fn attr_room_s<'s>(&self, s: &mut Sc<'s, E>, doc: &Document, el: NodeId, name: &str, value: &str) -> Res<'s, ()> {
-        match self.attr_room(doc, el, name, value) {
+    pub(crate) fn room_s<'s>(&self, s: &mut Sc<'s, E>, doc: &Document, text: usize) -> Res<'s, ()> {
+        match self.room(doc, text) {
             Ok(()) => Ok(()),
             Err(e) => Err(lift_err::<E>(s, e)),
         }

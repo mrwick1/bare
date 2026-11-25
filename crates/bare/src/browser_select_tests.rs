@@ -73,8 +73,6 @@ fn bounds_and_the_collector_keep_the_lists_right() {
     assert_eq!(js(&mut b, "s.options.length + ',' + s.selectedOptions.length + ',' + (s.options === s.options)"), "5,1,true");
     b.collect(&[]).expect("gc");
     assert_eq!(js(&mut b, "s.options.length + ',' + s.options[4].text"), "5,o4");
-    let mut small = Browser::new(tree::parse("<body><select id=s></select>"), BrowserLimits { max_results: 4, ..Default::default() }, EvalLimits::default(), HeapLimits::default()).expect("browser");
-    assert!(js(&mut small, "var s = document.getElementById('s'); s.options.length = 9; s.options.length").contains("dom-results"));
 }
 
 #[test]

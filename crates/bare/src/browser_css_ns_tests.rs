@@ -55,12 +55,10 @@ fn supports_answers_like_an_at_supports_prelude() {
 }
 
 #[test]
-fn supports_text_is_bounded() {
+fn supports_text_has_no_length_cap() {
     big(|| {
         let mut b = mk();
-        let max = b.dom.lim.max_selector_len;
-        assert_eq!(js(&mut b, &format!("CSS.supports('(display: grid)' + ' '.repeat({}))", max - 20)), "true");
-        assert_eq!(js(&mut b, &format!("CSS.supports('(display: grid)' + ' '.repeat({}))", max)), "limit:Host(\"dom-selector\")");
+        assert_eq!(js(&mut b, "CSS.supports('(display: grid)' + ' '.repeat(1 << 16))"), "true");
     });
 }
 

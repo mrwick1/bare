@@ -125,13 +125,6 @@ pub(crate) fn attach_shadow<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Loc
     if manual {
         return Err(unsupp("attachShadow with slotAssignment manual"));
     }
-    d.room_s(s, &d.doc.borrow(), 1, 0)?;
-    {
-        let attrs = d.attr.s.borrow();
-        if d.st.borrow().by_obj.len() + attrs.attrs.len() + attrs.maps.len() + d.nl.s.borrow().lists.len() >= d.lim.max_wrappers {
-            return Err(d.lim_s(s, "dom-wrappers"));
-        }
-    }
     if d.depth_of_s(s, host)? + 1 > d.lim.max_tree_depth {
         return Err(d.lim_s(s, "dom-depth"));
     }

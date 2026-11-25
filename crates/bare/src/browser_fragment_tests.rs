@@ -228,13 +228,9 @@ fn getter_writes_noscript_and_the_contents_of_a_template() {
 }
 
 #[test]
-fn template_markup_fills_the_contents_and_counts_against_the_caps() {
+fn template_markup_fills_the_contents_and_counts_against_the_depth_bound() {
     let mut b = browser();
     assert_eq!(js(&mut b, "var d = document.createElement('div'); d.innerHTML = '<template><p>a</p><template><i></i></template></template>'; var t = d.firstChild; [t.childNodes.length, t.content.firstChild.tagName, t.content.lastChild.content.firstChild.tagName, d.innerHTML].join()"), "0,P,I,<template><p>a</p><template><i></i></template></template>");
-    // Every node of the contents counts: 1 template, 1 content fragment, 40 elements.
-    let mut b = browser_with(PAGE, BrowserLimits { max_nodes: 30, ..Default::default() }, 5_000_000);
-    assert_eq!(js(&mut b, &format!("{REP}var d = document.createElement('div'); d.innerHTML = 'k'; var k = d.firstChild; d.innerHTML = '<template>' + rep('<i></i>', 40) + '</template>'")), lim("dom-nodes"));
-    assert_eq!(js(&mut b, "[d.firstChild === k, d.childNodes.length].join()"), "true,1");
     // The contents hang one level below the template: a template at depth 3 (under `#a`) with a div inside is depth 5 of 5.
     let mut b = browser_with(PAGE, BrowserLimits { max_tree_depth: 5, ..Default::default() }, 5_000_000);
     assert_eq!(js(&mut b, "var a = document.getElementById('a'); a.innerHTML = '<template><div></div></template>'; a.firstChild.content.firstChild.tagName"), "DIV");
@@ -326,12 +322,7 @@ fn the_brand_is_checked_before_anything_runs() {
 #[test]
 fn caps_fail_before_the_target_changes_and_cannot_be_caught() {
     let cases: Vec<(&str, BrowserLimits, String, &'static str)> = vec![
-        ("nodes", BrowserLimits { max_nodes: 30, ..Default::default() }, "rep('<i></i>', 40)".into(), "dom-nodes"),
-        ("text", BrowserLimits { max_text_bytes: 400, ..Default::default() }, "'<i>' + rep('x', 500) + '</i>'".into(), "dom-text"),
-        ("attrs", BrowserLimits { max_attr_slots: 20, ..Default::default() }, "'<i a=1 b=2 c=3 d=4 e=5 f=6 g=7 h=8 j=9 k=0 l=1 m=2 n=3 o=4 p=5 q=6 r=7 s=8 t=9 u=0 v=1 w=2></i>'".into(), "dom-attrs"),
-        ("names", BrowserLimits { max_names: 40, ..Default::default() }, "'<i ' + Array.from({ length: 80 }, function (_, i) { return 'n' + i + '=1' }).join(' ') + '></i>'".into(), "dom-names"),
         ("depth", BrowserLimits { max_tree_depth: 6, ..Default::default() }, "rep('<div>', 7)".into(), "dom-depth"),
-        ("string", BrowserLimits { max_string_bytes: 100, ..Default::default() }, "rep('x', 200)".into(), "dom-string"),
     ];
     for (what, limits, expr, kind) in cases {
         let mut b = browser_with(PAGE, limits, 5_000_000);
@@ -445,7 +436,7 @@ fn a_very_deep_tree_is_read_and_replaced_without_recursion() {
     let r = std::thread::Builder::new()
         .stack_size(1 << 20)
         .spawn(move || {
-            let limits = BrowserLimits { max_tree_depth: 100_000, max_nodes: 1 << 20, ..Default::default() };
+            let limits = BrowserLimits { max_tree_depth: 100_000, ..Default::default() };
             let mut b = browser_with(&page, limits, 50_000_000);
             let got = js(&mut b, "var treeTop = document.getElementById('top'); treeTop.innerHTML.length");
             let moved = js(&mut b, "var h = treeTop.innerHTML; treeTop.innerHTML = h; [treeTop.innerHTML === h, treeTop.innerHTML.length].join()");
@@ -532,14 +523,9 @@ fn outer_html_setter_gates_what_the_parser_does_not_build() {
 }
 
 #[test]
-fn outer_html_scripts_stay_inert_and_the_caps_apply_before_any_change() {
+fn outer_html_scripts_stay_inert() {
     let mut b = browser();
     assert_eq!(js(&mut b, "window.ran = 0; var d = document.createElement('div'); d.innerHTML = '<a></a>'; d.firstChild.outerHTML = '<script>window.ran = 1</script>'; document.body.appendChild(d); window.ran + d.innerHTML"), "0<script>window.ran = 1</script>");
-    let lim = BrowserLimits { max_nodes: 40, ..Default::default() };
-    let mut b = browser_with(PAGE, lim, 5_000_000);
-    let got = js(&mut b, &format!("{REP} var d = document.createElement('div'); d.innerHTML = '<a></a>'; var a = d.firstChild; a.outerHTML = rep('<i></i>', 100)"));
-    assert_eq!(got, format!("limit:{:?}", LimitKind::Host("dom-nodes")));
-    assert_eq!(js(&mut b, "[d.innerHTML, a.parentNode === d].join()"), "<a></a>,true");
 }
 
 #[test]
@@ -549,7 +535,7 @@ fn outer_html_of_a_deep_tree_does_not_recurse() {
     let r = std::thread::Builder::new()
         .stack_size(1 << 20)
         .spawn(move || {
-            let limits = BrowserLimits { max_tree_depth: 100_000, max_nodes: 1 << 20, ..Default::default() };
+            let limits = BrowserLimits { max_tree_depth: 100_000, ..Default::default() };
             let mut b = browser_with(&page, limits, 50_000_000);
             js(&mut b, "var treeTop = document.getElementById('top'); var h = treeTop.outerHTML; treeTop.outerHTML = h; [h.length, document.body.innerHTML === h].join()")
         })

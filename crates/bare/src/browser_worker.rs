@@ -311,9 +311,6 @@ fn check_url<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, who: &str, url: &str) ->
     if d.worker.objs.borrow().len() >= MAX_WORKERS {
         return Err(d.dom_err_s(s, "NotSupportedError", &format!("Failed to construct '{who}': at most {MAX_WORKERS} workers can be alive in this page (bare cannot run them).")));
     }
-    if d.st.borrow().by_obj.len() >= d.lim.max_wrappers {
-        return Err(d.lim_s(s, "dom-wrappers"));
-    }
     Ok(href)
 }
 

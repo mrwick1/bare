@@ -276,7 +276,7 @@ fn a_range_cut_in_a_very_deep_tree_is_a_limit_not_a_stack_overflow() {
     let r = std::thread::Builder::new()
         .stack_size(8 << 20)
         .spawn(move || {
-            let limits = BrowserLimits { max_tree_depth: 100_000, max_nodes: 1 << 20, ..Default::default() };
+            let limits = BrowserLimits { max_tree_depth: 100_000, ..Default::default() };
             let mut b = Browser::new(tree::parse(&page), limits, EvalLimits { max_steps: 200_000_000, ..Default::default() }, HeapLimits::default()).expect("browser");
             // The start is the text in the deepest div; the end is after the top div: each level on the start path is a partly selected node.
             js(&mut b, "var t = document.getElementById('top'), x = t; while (x.firstChild && x.firstChild.nodeType === 1) x = x.firstChild; var r = document.createRange(); r.setStart(x.firstChild, 0); r.setEnd(document.body, 1);");

@@ -129,24 +129,23 @@ fn reclaim_after_every_task_with_poison_does_not_panic() {
     });
 }
 
-/// The caps `dom-nodes`, `dom-text` and `dom-attrs` count the nodes, the text and the attribute slots that are alive, not the length of the arena.
+/// The arena reuses the slots of dead trees: a page that parses and drops documents does not grow it, and a page that keeps them has no cap.
 #[test]
-fn the_dom_caps_count_live_nodes_text_and_attributes() {
+fn dead_trees_give_their_slots_back_and_kept_trees_have_no_cap() {
     big(|| {
-        let lim = BrowserLimits { max_nodes: 2_000, max_text_bytes: 20_000, max_attr_slots: 600, ..BrowserLimits::default() };
-        let mut b = Browser::new(tree::parse(PAGE), lim, EvalLimits { max_steps: 50_000_000, ..Default::default() }, HeapLimits::default()).expect("browser");
+        let mut b = Browser::new(tree::parse(PAGE), BrowserLimits::default(), EvalLimits { max_steps: 50_000_000, ..Default::default() }, HeapLimits::default()).expect("browser");
         b.use_virtual_clock_at(1000.0).unwrap();
         // One call parses 5 documents of about 95 nodes, 300 bytes of text and 60 attributes, and keeps none.
         let parse = "function parse() { for (var i = 0; i < 5; i++) new DOMParser().parseFromString('<div>' + '<p class=c id=i>0123456789</p>'.repeat(30) + '</div>', 'text/html'); } parse()";
-        // 30 rounds are 14,000 nodes, 45,000 bytes of text and 9,000 attribute slots: far over each cap, and each round alone is under.
+        // 30 rounds make 14,000 nodes: the arena stays far smaller.
         for round in 0..30 {
             let r = b.run_script(parse);
             assert!(r.is_ok(), "round {round}: {:?}", r.err());
             b.collect(&[]).unwrap();
         }
+        assert!(b.stats().nodes < 5_000, "{} slots", b.stats().nodes);
         assert_eq!(js(&mut b, "document.getElementById('p').textContent"), "hi");
-        // A cap still stops a page that keeps what it parses.
-        let r = b.run_script("var keep = []; for (var i = 0; i < 40; i++) keep.push(new DOMParser().parseFromString('<div>' + '<p class=c id=i>0123456789</p>'.repeat(30) + '</div>', 'text/html'));");
-        assert!(r.is_err(), "40 documents that stay are over the caps");
+        // A page that keeps what it parses is not stopped.
+        assert_eq!(js(&mut b, "var keep = []; for (var i = 0; i < 40; i++) keep.push(new DOMParser().parseFromString('<div>' + '<p class=c id=i>0123456789</p>'.repeat(30) + '</div>', 'text/html')); keep.length"), "40");
     });
 }

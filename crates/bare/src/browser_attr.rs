@@ -38,9 +38,7 @@
 //!   invocation`. `new Attr()` and `new NamedNodeMap()` are illegal constructors. `toggleAttribute` is in `browser_custom.rs`.
 //! - A JS string with a lone surrogate cannot be stored: `Unsupported` (the shared rule of the DOM host).
 //!
-//! Caps: `Attr` and map objects count with `max_wrappers` (checked before anything is made, `dom-wrappers`); values and new
-//! names use the document caps (`dom-text`, `dom-attrs`, `dom-names`) through the same path as `setAttribute`. Scans charge
-//! the step budget. No document or table borrow is held while JS runs (string conversion comes first).
+//! Caps: none on `Attr` and map objects, values or names (`docs/internal/caps-audit.md`). Scans charge the step budget. No document or table borrow is held while JS runs (string conversion comes first).
 
 use crate::eng::{Eng, Ops};
 use crate::browser_sources::Roots;
@@ -272,22 +270,12 @@ fn protos<E: Eng>(d: &Dom<E>) -> (E::Obj, E::Obj) {
     *d.attr.protos.get().expect("installed")
 }
 
-/// Room for one more `Attr` or map object, before it is made.
-fn room<E: Eng>(d: &Dom<E>) -> R<E, ()> {
-    let t = d.attr.s.borrow();
-    if d.st.borrow().by_obj.len() + t.attrs.len() + t.maps.len() + d.nl_count() >= d.lim.max_wrappers {
-        return Err(d.lim("dom-wrappers"));
-    }
-    Ok(())
-}
-
 /// The `Attr` of the attached attribute `atom` of `el`: the same object while it is attached.
 fn wrapper_for<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, el: NodeId, atom: Atom) -> Res<'s, E::Obj> {
     drain(d);
     if let Some(&(_, o)) = d.attr.s.borrow().by_el.get(&el).and_then(|l| l.iter().find(|(a, _)| *a == atom)) {
         return Ok(o);
     }
-    lift::<E, _>(s, room(d))?;
     let o = d.obj_s(s, protos(d).0)?;
     {
         let mut t = d.attr.s.borrow_mut();
@@ -302,7 +290,6 @@ fn wrapper_for<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, el: NodeId, atom: Atom
 
 /// A new detached `Attr` with this name and value.
 fn new_detached<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, atom: Atom, value: Span) -> Res<'s, E::Obj> {
-    lift::<E, _>(s, room(d))?;
     let o = d.obj_s(s, protos(d).0)?;
     d.attr.s.borrow_mut().attrs.insert(o, AttrObj { atom, owner: None, value: Some(value) });
     d.own_obj(s.engine(), o, crate::browser::Owner::Attr(o));
@@ -371,7 +358,6 @@ pub(crate) fn attributes<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<
     if let Some(&o) = d.attr.s.borrow().map_of.get(&el) {
         return Ok(d.obj_local(s, o));
     }
-    lift::<E, _>(s, room(d))?;
     let o = d.new_source_s(s, crate::browser_sources::Source::AttrMap, Some(protos(d).1))?;
     let mut t = d.attr.s.borrow_mut();
     t.maps.insert(o, el);
@@ -611,12 +597,8 @@ pub(crate) fn create_attribute_ns<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, thi
 }
 
 fn make_detached<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, kind: Option<bare_html::dom::Ns>, qname: &str) -> Res<'s, Local<'s>> {
-    lift::<E, _>(s, room(d))?;
     let (atom, span) = {
         let mut doc = d.doc.borrow_mut();
-        if doc.find_ns_atom(kind, qname).is_none() && doc.name_count() + 1 > d.lim.max_names {
-            return Err(d.lim_s(s, "dom-names"));
-        }
         let atom = doc.intern_ns(kind, qname);
         (atom, doc.new_span(""))
     };
@@ -679,7 +661,7 @@ fn set_value<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, v: Loca
         None => {
             let span = {
                 let mut doc = d.doc.borrow_mut();
-                d.room_s(s, &doc, 0, st.len())?;
+                d.room_s(s, &doc, st.len())?;
                 doc.new_span(&st)
             };
             d.attr.s.borrow_mut().attrs.get_mut(&o).expect("checked").value = Some(span);

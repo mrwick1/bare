@@ -272,31 +272,16 @@ impl<K: SlotKey, V> IdTab<K, V> {
 }
 /// A host method: the DOM, the interpreter, `this`, the arguments.
 
-/// Hard bounds of one browser. Every one is checked before the thing grows.
+/// Bounds of one browser. The browser does not count what a page makes (nodes, text, names, wrappers, listeners, results, strings): the JS heap and
+/// the process bound them, as in Chrome. What stays guards the native stack, a script budget, or a diagnostic list (`docs/internal/caps-audit.md`).
 #[derive(Clone, Copy, Debug)]
 pub struct BrowserLimits {
-    /// Nodes in the native document arena (it never frees one).
-    pub max_nodes: usize,
-    /// Bytes in the native text buffer (it never shrinks).
-    pub max_text_bytes: usize,
-    /// Slots in the native attribute list.
-    pub max_attr_slots: usize,
-    /// Names (tags, attributes) in the native name table.
-    pub max_names: usize,
-    /// Live wrappers (and plain event targets).
-    pub max_wrappers: usize,
-    pub max_listeners: usize,
-    /// Elements of one result array.
-    pub max_results: usize,
     /// Depth of a tree that JS builds, and the longest event path.
     pub max_tree_depth: usize,
-    /// Bytes of one selector text. GitHub sends lists of 3 to 4 KB; Chrome has no cap.
-    pub max_selector_len: usize,
-    /// Bytes of one string that crosses between JS and the document.
-    pub max_string_bytes: usize,
     /// Kept listener exception reports. The oldest is dropped (and counted) after this.
     pub max_reports: usize,
-    /// Child pages that are live in one top page, at all depths (`browser_child.rs`). An iframe over it stays empty.
+    /// Child pages that are live in one top page, at all depths (`browser_child.rs`). An iframe over it stays empty. It stops a page that
+    /// makes frames without end.
     pub max_child_pages: usize,
     /// Nesting depth of child pages. An iframe over it stays empty.
     pub max_child_depth: usize,
@@ -305,18 +290,9 @@ pub struct BrowserLimits {
 impl Default for BrowserLimits {
     fn default() -> Self {
         BrowserLimits {
-            max_nodes: 1 << 20,
-            max_text_bytes: 64 << 20,
-            max_attr_slots: 1 << 21,
-            max_names: 1 << 16,
-            max_wrappers: 1 << 16,
-            max_listeners: 1 << 16,
-            max_results: 1 << 16,
             max_tree_depth: 512,
-            max_selector_len: 1 << 16,
-            max_string_bytes: 16 << 20,
             max_reports: 256,
-            max_child_pages: 64,
+            max_child_pages: 1000,
             max_child_depth: 8,
         }
     }
@@ -631,7 +607,7 @@ pub(crate) struct EventState<E: Eng> {
 
 /// Is `e` a task budget that aborts a task and not the page (see [`Browser::survive`])?
 pub(crate) fn is_budget<E: Eng>(e: &Fault<E>) -> bool {
-    matches!(e, Fault::Limit(LimitKind::Steps | LimitKind::CallDepth | LimitKind::TraversalDepth | LimitKind::StatementFrames | LimitKind::DrainJobs | LimitKind::Host("dom-selector")))
+    matches!(e, Fault::Limit(LimitKind::Steps | LimitKind::CallDepth | LimitKind::TraversalDepth | LimitKind::StatementFrames | LimitKind::DrainJobs))
 }
 
 /// What [`Browser::survive`] decided about the error of a task.
@@ -1253,7 +1229,6 @@ fn domexception_ctor_s<'s, E: Eng>(d: &Dom<E>, s: &mut crate::browser_scoped::Sc
         values[i] = if s.type_of(v) == bare_js_api::Type::Undefined { d.js_str_s(s, default)? } else {
             let t = s.to_string(v)?;
             let n = s.as_str(t).map_or(0, |x| x.len());
-            if n > d.lim.max_string_bytes { return Err(d.lim_s(s, "dom-string")); }
             s.charge((n / 32) as u64)?;
             t
         };
@@ -1370,7 +1345,6 @@ impl<E: Eng> Dom<E> {
     /// A string value (the JS string has the same UTF-16 as `s`).
     #[inline]
     pub(crate) fn js_str(&self, it: &mut E::Vm, s: &str) -> R<E, E::Raw> {
-        if s.len() > self.lim.max_string_bytes { return Err(self.lim("dom-string")); }
         it.charge_o((s.len() / 32) as u64)?;
         match it.h_intern(s) {
             Ok(s) => Ok(E::str_raw(s)),
@@ -1380,7 +1354,6 @@ impl<E: Eng> Dom<E> {
 
     /// Like `js_str`, for a body of text: an equal live text is the same string (`Heap::shared_text`).
     pub(crate) fn js_text(&self, it: &mut E::Vm, s: &str) -> R<E, E::Raw> {
-        if s.len() > self.lim.max_string_bytes { return Err(self.lim("dom-string")); }
         it.charge_o((s.len() / 32) as u64)?;
         match it.h_shared_text(s) {
             Ok(s) => Ok(E::str_raw(s)),
@@ -1392,21 +1365,11 @@ impl<E: Eng> Dom<E> {
     pub(crate) fn string_arg(&self, it: &mut E::Vm, v: E::Raw) -> R<E, String> {
         let s = it.to_js_string(v)?;
         let len = it.h_str_len(s)?;
-        if len > self.lim.max_string_bytes { return Err(self.lim("dom-string")); }
         it.charge_o((len / 32) as u64)?;
         let units = match it.h_str_units(s) {
             Ok(u) => u,
             Err(e) => return Err(e),
         };
-        if units.len() > self.lim.max_string_bytes {
-            return Err(self.lim("dom-string"));
-        }
-        let bytes = char::decode_utf16(units.iter().copied()).try_fold(0usize, |n, c| {
-            c.map(|c| n.saturating_add(c.len_utf8()))
-        }).map_err(|_| Fault::Unsupported("lone surrogate in a DOM string (the native document is UTF-8)"))?;
-        if bytes > self.lim.max_string_bytes {
-            return Err(self.lim("dom-string"));
-        }
         String::from_utf16(&units).map_err(|_| Fault::Unsupported("lone surrogate in a DOM string (the native document is UTF-8)"))
     }
 
@@ -1444,10 +1407,6 @@ impl<E: Eng> Dom<E> {
                 it.charge_o(1)?;
                 chain.push(n);
                 cur = doc.parent(n);
-            }
-            let attrs = self.attr.s.borrow();
-            if st.by_obj.len() + attrs.attrs.len() + attrs.maps.len() + self.nl.s.borrow().lists.len() + chain.len() > self.lim.max_wrappers {
-                return Err(self.lim("dom-wrappers"));
             }
         }
         let p = self.p();
@@ -1528,17 +1487,10 @@ impl<E: Eng> Dom<E> {
         if let Some(s) = self.st.borrow().sel_cache.get(text) {
             return Ok(s.clone());
         }
-        if text.len() > self.lim.max_selector_len {
-            return Err(self.lim("dom-selector"));
-        }
         // A parse costs up to about 1,050 instructions for each byte (a list of one-letter tags) and a step about 370, so 4 steps per byte.
         it.charge_o(text.len() as u64 * 4)?;
         let parsed = {
             let mut doc = self.doc.borrow_mut();
-            // Only tag and attribute names are new names, and each one needs a byte and a separator.
-            if doc.name_count() + text.len() / 2 + 1 > self.lim.max_names {
-                return Err(self.lim("dom-names"));
-            }
             bare_css::selector::parse_scoped(text, &mut doc, bare_css::selector::Mode::Script, Some(self.selector_scope.clone()))
         };
         let Some(list) = parsed else { return Err(self.dom_err(it, "SyntaxError", &format!("'{text}' is not a valid selector"))) };
@@ -2081,14 +2033,6 @@ impl<E: Eng> Browser<E> {
 
     /// A realm over `doc` with `window`, `document` and the DOM interfaces installed, on the engine `it`.
     pub fn with_vm(mut it: E::Vm, doc: Document, limits: BrowserLimits) -> R<E, Browser<E>> {
-        for (used, cap, name) in [
-            (doc.len(), limits.max_nodes, "dom-nodes"),
-            (doc.text_bytes(), limits.max_text_bytes, "dom-text"),
-            (doc.attr_slots(), limits.max_attr_slots, "dom-attrs"),
-            (doc.name_count(), limits.max_names, "dom-names"),
-        ] {
-            if used > cap { return Err(Fault::Limit(LimitKind::Host(name))); }
-        }
         bare_css::rule_cache::new_document();
         let dom = Rc::new(Dom {
             doc: Rc::new(RefCell::new(doc)),

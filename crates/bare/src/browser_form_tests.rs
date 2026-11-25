@@ -338,28 +338,6 @@ fn brands_and_receivers_are_checked() {
     });
 }
 
-#[test]
-fn a_cap_error_leaves_no_partial_attribute() {
-    big(|| {
-        let body = "<form id=f novalidate><input id=i name=a><button id=b>x</button></form>";
-        let used = page(body).stats().attr_slots;
-        let mut b = page_with(body, BrowserLimits { max_attr_slots: used, ..BrowserLimits::default() }, 5_000_000);
-        js(&mut b, "var f = document.getElementById('f'), i = document.getElementById('i'), bt = document.getElementById('b'); 'x'");
-        assert_eq!(js(&mut b, "bt.name = 'n'"), lim("dom-attrs"));
-        assert_eq!(js(&mut b, "bt.disabled = true"), lim("dom-attrs"));
-        assert_eq!(js(&mut b, "bt.type = 'button'"), lim("dom-attrs"));
-        assert_eq!(js(&mut b, "i.formNoValidate = true"), lim("dom-attrs"));
-        assert_eq!(js(&mut b, "f.noValidate = false; [bt.hasAttribute('name'), bt.hasAttribute('disabled'), bt.hasAttribute('type'), i.hasAttribute('formnovalidate')].join()"), "false,false,false,false");
-        // Removing never needs a slot.
-        assert_eq!(js(&mut b, "i.disabled = false; i.removeAttribute('name'); i.name"), "");
-        // A string over the cap is refused before anything is written.
-        let mut b = page_with(body, BrowserLimits { max_string_bytes: 8, ..BrowserLimits::default() }, 5_000_000);
-        js(&mut b, "var i = document.getElementById('i'); 'x'");
-        assert_eq!(js(&mut b, "i.name = 'much too long for the cap'"), lim("dom-string"));
-        assert_eq!(js(&mut b, "i.name"), "a");
-    });
-}
-
 // ------------------------------------------------------------------------------------------ SubmitEvent
 
 #[test]
