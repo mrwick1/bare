@@ -80,3 +80,26 @@ WorkerGlobalScope.prototype -> Window.prototype -> .. -> EventTarget.prototype`.
 `Window.prototype` stays in the chain, because the functions of the global live there; the standard has no window names in
 a worker (`design-workers.md`, step 3). Fix: `crates/bare/src/browser_worker.rs` (`install_scope`). Tests:
 `crates/bare/src/browser_worker_scope_tests.rs`.
+
+## Link attempt 2 (2026-11-25)
+
+Build: main with #1076 and WebAssembly PR 1 (#1079). The link handshake worked. The page stayed on "Your messages are
+downloading", and the phone failed.
+
+- The backend worker failed to start again. This time the server answered 400 with an empty body to the `init_script`
+  requests of `webworker_v1` and `webworker_v4`. Some minutes later, `curl` and an in-page `fetch` got 200 for the same URL.
+  On a fresh page, the same requests got 200 again. Hypothesis: a short block on the server side after a failed init.
+- `suspicious-host-checks-init` failed: a WebAssembly module exports its memory, and PR 1 refused that. Fix: WebAssembly
+  PR 2 (#1084), `Memory` and `Table`.
+
+## Link attempt 3 (2026-11-25)
+
+Build: main with #1084. The link handshake worked, and the backend worker script loaded (no 400). The page then logged two
+errors and showed "Logging out".
+
+- `suspicious-host-checks-init-failed`: "The argument must be a WebAssembly.Module". The page compiles the host check module
+  (`WAGetUrlSpoofChecksWasm`) and posts it to the backend worker in `{wasmModule}` (`WAWebBackendWorkerInitState`,
+  `setSuspiciousHostChecksModule`). The worker calls `new WebAssembly.Instance(t)`. Bare cloned the module as a plain object.
+  Fix: structured clone of a `WebAssembly.Module` (WebAssembly step 6).
+- `backend-worker-init-fails`: "globals: PN-less setup requires a LID device jid". Not analysed yet. Hypothesis: a
+  consequence of the first error.
