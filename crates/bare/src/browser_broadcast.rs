@@ -161,17 +161,17 @@ fn post_message<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: A
         return Ok(s.undefined());
     }
     if let Some(hub) = hub {
-        let from: Rc<str> = origin.as_str().into();
+        let from: std::sync::Arc<str> = origin.as_str().into();
         for end in far {
             if hub.wires() >= d.max_messages() {
                 return Err(d.lim_s(s, "messages"));
             }
             let cloned = crate::browser_navigation_state::clone_state_with(d, s, v, &[])?;
             let bytes = 16usize.saturating_add(cloned.cost());
-            if hub.bytes().saturating_add(bytes) > d.sched_max_message_bytes() {
-                return Err(d.lim_s(s, "message-bytes"));
+            let wire = crate::browser_port_hub::Wire { cloned, error: false, bytes, origin: Some(from.clone()) };
+            if let Err((_, Some(limit))) = hub.push(end, wire, d.max_messages(), d.sched_max_message_bytes()) {
+                return Err(d.lim_s(s, limit));
             }
-            let _ = hub.push(end, crate::browser_port_hub::Wire { cloned, bytes, origin: Some(from.clone()) });
         }
     }
     for o in to {

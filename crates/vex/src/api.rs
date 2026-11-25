@@ -1255,3 +1255,7 @@ mod clone_tests;
 #[cfg(test)]
 #[path = "api_error_stack_tests.rs"]
 mod error_stack_tests;
+
+#[cfg(test)]
+#[path = "api_clone_shared_tests.rs"]
+mod api_clone_shared_tests;

@@ -127,6 +127,7 @@ pub struct Item {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Expect {
     Script,
+    Module,
     Style,
     /// Any content type and encoding (a font, an image, a `fetch` preload). The body is read and dropped, never kept: the reply
     /// is `Resource` with empty text. Status, redirects, the time limit and the size cap of one resource still apply.
@@ -300,6 +301,7 @@ pub fn discover(doc: &Document, page: &Url, limits: &Limits) -> Result<Discovery
                 continue;
             }
         }
+        let expect = if module { Expect::Module } else { expect };
         let timing = |external: bool| {
             let has = |n: Option<Atom>| attr(node, n).is_some();
             if module {
@@ -486,7 +488,18 @@ pub fn fetch(client: &mut http::Client, target: &Target, limits: &Limits, deadli
     let mut redirects = 0;
     let mut streamed = loop {
         if Instant::now() >= deadline { return Err(LoadError::TimedOut); }
-        let streamed = client.send_stream_cached(&http::Request::get(&current)).map_err(|e| if e.is::<bare_net::blocklist::Blocked>() { LoadError::Blocked } else { LoadError::Network(e.to_string()) })?;
+        let cors_origin = client.embedder_document().filter(|doc| target.expect == Expect::Module && !doc.same_origin(&current))
+            .map(|doc| Url { scheme: doc.scheme, host: doc.host.clone(), port: doc.port, path: String::new() }.to_string());
+        let headers = [("Origin", cors_origin.as_deref().unwrap_or("")), ("Sec-Fetch-Mode", "cors")];
+        let mut req = http::Request::get(&current);
+        if cors_origin.is_some() {
+            req.headers = &headers;
+            req.cookies.on = false;
+        }
+        // Modules use a separate network path for CORS responses so a response
+        // cached for a no-CORS load cannot supply the module.
+        let sent = if cors_origin.is_some() { client.send_stream_once(&req) } else { client.send_stream_cached(&req) };
+        let streamed = sent.map_err(|e| if e.is::<bare_net::blocklist::Blocked>() { LoadError::Blocked } else { LoadError::Network(e.to_string()) })?;
         if !matches!(streamed.response.status, 301 | 302 | 303 | 307 | 308) { break streamed; }
         if redirects == 20 { return Err(LoadError::Redirect); }
         let Some(location) = streamed.response.header("location") else { break streamed };
@@ -501,7 +514,7 @@ pub fn fetch(client: &mut http::Client, target: &Target, limits: &Limits, deadli
     let content_type = response.header("content-type");
     let good = target.expect == Expect::Opaque
         || content_type.map(essence).is_some_and(|m| match target.expect {
-            Expect::Script => JS_TYPES.iter().any(|j| m.eq_ignore_ascii_case(j)),
+            Expect::Script | Expect::Module => JS_TYPES.iter().any(|j| m.eq_ignore_ascii_case(j)),
             _ => m.eq_ignore_ascii_case("text/css"),
         });
     if !good {

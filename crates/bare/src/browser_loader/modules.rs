@@ -386,12 +386,13 @@ impl<E: Eng> Run<'_, E> {
         if let Some(why) = self.dom.scripts.modules.borrow().failed.get(&key) {
             return Err(why.clone());
         }
-        let preloaded = self.dom.scripts.preloads.borrow_mut().take_script(url);
+        let preloaded = if self.net.client.has_embedder_policy() { None }
+            else { self.dom.scripts.preloads.borrow_mut().take_script(url) };
         let r = match preloaded {
             Some(r) => r,
             None => {
                 let kept = self.kept();
-                let target = Target { expect: Expect::Script, url: copy(url) };
+                let target = Target { expect: Expect::Module, url: copy(url) };
                 let r = download(&mut self.net, self.https_only, &self.lim, self.deadline, kept, &mut self.res, &target);
                 // A slot of the window is free: the next module of the page's `modulepreload` links starts.
                 self.prefetch();
@@ -512,7 +513,7 @@ impl<E: Eng> Run<'_, E> {
             if todo.len() >= 2 || (!todo.is_empty() && self.net.client.parallel_pays()) {
                 let kept = self.kept();
                 for u in todo {
-                    self.net.start(Expect::Script, u, &self.lim.resources, self.deadline, kept);
+                    self.net.start(Expect::Module, u, &self.lim.resources, self.deadline, kept);
                 }
             }
         }
@@ -638,7 +639,7 @@ impl<E: Eng> Run<'_, E> {
         if todo.len() >= 2 || (!todo.is_empty() && self.net.client.parallel_pays()) {
             let kept = self.kept();
             for u in &todo {
-                self.net.start(Expect::Script, u, &self.lim.resources, self.deadline, kept);
+                self.net.start(Expect::Module, u, &self.lim.resources, self.deadline, kept);
             }
         }
         for r in reqs {

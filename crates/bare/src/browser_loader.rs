@@ -1490,7 +1490,8 @@ impl<E: Eng> Run<'_, E> {
                     }
                     Some(Err(why)) => Err(why),
                     None => {
-                        let preloaded = self.dom.scripts.preloads.borrow_mut().take_script(&self.disc.targets[t].url);
+                        let preloaded = if p.module && self.net.client.has_embedder_policy() { None }
+                            else { self.dom.scripts.preloads.borrow_mut().take_script(&self.disc.targets[t].url) };
                         match preloaded {
                             Some(r) => r,
                             None => {
@@ -1543,8 +1544,10 @@ impl<E: Eng> Run<'_, E> {
             Ext::Text(node, text) => self.finish_external(node, "blob script", text)?,
             Ext::Fetch(node, url) => {
                 let what = label(&url);
-                let target = resources::Target { expect: Expect::Script, url };
-                let preloaded = self.dom.scripts.preloads.borrow_mut().take_script(&target.url);
+                let module = self.dom.scripts.modules.borrow().nodes.contains(&node);
+                let target = resources::Target { expect: if module { Expect::Module } else { Expect::Script }, url };
+                let preloaded = if module && self.net.client.has_embedder_policy() { None }
+                    else { self.dom.scripts.preloads.borrow_mut().take_script(&target.url) };
                 let text = match preloaded {
                     Some(r) => r,
                     None => {

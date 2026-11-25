@@ -7,11 +7,20 @@ use crate::blob::Blob;
 use crate::interp_rt::{Key, Realm};
 use crate::object::{F_HOST, K_BUFFER, K_DATA_VIEW, K_DATE, K_MAP, K_NONE, K_REGEXP, K_SET, K_TYPED, K_WRAP, Obj};
 use crate::shapes::{A_C, A_E, A_W};
+use crate::shared_memory::SharedBuffer;
 use crate::value::Value;
-use bare_js_api::clone::{self as cl, CloneHost, CloneIn, CloneOpts, Cloned, Moved, Refused, Tag};
+use bare_js_api::clone::{self as cl, AgentCluster, CloneHost, CloneIn, CloneOpts, Cloned, Moved, Refused, Tag};
 use bare_js_api::{Abort, Engine, Error, enter};
 
 type R<'s, T> = Result<T, Error<'s>>;
+
+// A fixed view length is limited by the buffer's maximum byte length.
+const LENGTH_TRACKING: usize = usize::MAX;
+
+struct SharedRecord {
+    cluster: AgentCluster,
+    buffer: SharedBuffer,
+}
 
 struct Walk<'a> {
     out: cl::RecordWriter,
@@ -22,7 +31,7 @@ struct Walk<'a> {
     /// The listed items: a serializable host object is the item after them.
     listed: u32,
     /// What `write_host_object` gave, in walk order.
-    data: Vec<Box<dyn std::any::Any>>,
+    data: Vec<Box<dyn std::any::Any + Send>>,
 }
 
 fn id(o: Obj) -> u64 {
@@ -150,7 +159,14 @@ impl Walk<'_> {
             }
             K_BUFFER => {
                 if crate::shared_memory::is_shared(o) {
-                    return Err(self.refuse(rt, Refused::Object));
+                    let buffer = rt.shared_buffer(o).expect("shared backing");
+                    let Some(cluster) = self.host.shared_buffer_cluster() else {
+                        return Err(self.refuse(rt, Refused::Object));
+                    };
+                    let i = self.listed + self.data.len() as u32;
+                    self.data.push(Box::new(SharedRecord { cluster: cluster.clone(), buffer: buffer.clone() }));
+                    self.seen.insert(key, self.out.moved(i));
+                    return Ok(());
                 }
                 if rt.buffer_detached(o) {
                     return Err(self.refuse(rt, Refused::DetachedBuffer));
@@ -168,6 +184,11 @@ impl Walk<'_> {
             K_TYPED | K_DATA_VIEW => {
                 let view = View::of(o).expect("view");
                 let len = view.len(rt).ok_or_else(|| self.refuse(rt, Refused::DetachedBuffer))?;
+                let len = if view.len.is_none() && crate::shared_memory::is_shared(view.buffer) {
+                    LENGTH_TRACKING
+                } else {
+                    len
+                };
                 self.out.view(view.elem.map_or(11, |e| e.api() as u8), view.offset, len);
                 self.value(rt, view.buffer.value(), depth + 1)?;
                 self.seen.insert(key, self.out.view_done());
@@ -238,6 +259,9 @@ pub(super) fn write<'s>(rt: &mut Realm, root: Value, opts: &CloneOpts<'_, '_>, h
     let list: Vec<_> = opts.transfer.iter().filter_map(|&l| Realm::obj(rt.a_at(l))).collect();
     let mut walk = Walk { out: cl::RecordWriter::new(), meter: cl::Meter::new(opts.limits), seen: cl::IdMap::default(), transfer: cl::IdMap::default(), host, listed: list.len() as u32, data: Vec::new() };
     for (i, &o) in list.iter().enumerate() {
+        if crate::shared_memory::is_shared(o) {
+            return Err(walk.refuse(rt, Refused::Object));
+        }
         walk.transfer.insert(id(o), i as u32);
     }
     walk.value(rt, root, 0)?;
@@ -248,7 +272,7 @@ pub(super) fn write<'s>(rt: &mut Realm, root: Value, opts: &CloneOpts<'_, '_>, h
         }
     }
     for &o in &list {
-        if crate::shared_memory::is_shared(o) || crate::bi_buffer::immutable_buffer(o) {
+        if crate::bi_buffer::immutable_buffer(o) {
             return Err(walk.refuse(rt, Refused::Object));
         }
         let ok = if o.is_kind(K_BUFFER) { !rt.buffer_detached(o) } else { walk.host.can_transfer(&o.value()) };
@@ -379,7 +403,13 @@ impl Read<'_> {
                 };
                 let buf = self.value(rt, depth + 1)?;
                 let buffer = Realm::obj(buf).filter(|o| o.is_kind(K_BUFFER)).ok_or_else(damaged)?;
-                let view = View { buffer, offset, len: Some(len), elem };
+                let len = if len == LENGTH_TRACKING {
+                    if !crate::shared_memory::is_shared(buffer) { return Err(damaged()); }
+                    None
+                } else {
+                    Some(len)
+                };
+                let view = View { buffer, offset, len, elem };
                 if offset % view.width() != 0 || view.len(rt).is_none() {
                     return Err(damaged());
                 }
@@ -467,6 +497,19 @@ impl Read<'_> {
 }
 
 pub(super) fn load<'s>(rt: &mut Realm, c: &mut Cloned, host: &mut dyn CloneHost<Realm>) -> R<'s, CloneIn<'s>> {
+    let refused = c.moved().iter().any(|part| {
+        let Moved::Data(data) = part else { return false };
+        data.downcast_ref::<SharedRecord>().is_some_and(|record| {
+            host.shared_buffer_cluster() != Some(&record.cluster) || rt.shared_memory.is_none()
+        })
+    });
+    if refused {
+        // Keep the record intact so the receiver can release transferred ports.
+        return Err(enter(rt, |s| match host.data_clone_error(s, Refused::Object) {
+            Error::Throw(l) => Ok(s.engine().a_at(l)),
+            Error::Abort(a) => Err(a),
+        }).map_or_else(Error::Abort, |v| Error::Throw(rt.a_push(v))));
+    }
     let mut payloads = Vec::new();
     let mut data = Vec::new();
     let slots: Vec<_> = c.take_moved().into_iter().map(|item| match item {
@@ -474,14 +517,21 @@ pub(super) fn load<'s>(rt: &mut Realm, c: &mut Cloned, host: &mut dyn CloneHost<
         Moved::Host(h) => { payloads.push(h); None }
         Moved::Data(d) => { data.push(d); Some(Err(data.len() - 1)) }
     }).collect();
-    // The serializable host objects, made before the walk: the host may run script, the walk may not.
+    // Decode sidecar objects before the walk. Host callbacks may run script.
     let made = if data.is_empty() {
         Vec::new()
     } else {
         enter(rt, |s| {
             let mut out = Vec::with_capacity(data.len());
             for d in &data {
-                match host.read_host_object(s, &**d) {
+                let value = if let Some(record) = d.downcast_ref::<SharedRecord>() {
+                    s.engine().import_shared_buffer(record.buffer.clone())
+                        .map(|v| s.engine().a_push(v))
+                        .map_err(|e| s.engine().a_err(e))
+                } else {
+                    host.read_host_object(s, &**d)
+                };
+                match value {
                     Ok(l) => out.push(s.engine().a_at(l)),
                     Err(Error::Throw(l)) => return Err(Ok(s.engine().a_at(l))),
                     Err(Error::Abort(a)) => return Err(Err(a)),

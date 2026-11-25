@@ -781,6 +781,7 @@ pub struct Dom<E: Eng = New> {
     pub(crate) lim: BrowserLimits,
     pub(crate) p: OnceCell<Protos<E>>,
     pub(crate) global: OnceCell<E::Obj>,
+    pub(crate) agent_cluster: OnceCell<bare_js_api::clone::AgentCluster>,
     selector_scope: Rc<std::cell::Cell<Option<NodeId>>>,
     pub(crate) doc_wrapper: OnceCell<E::Obj>,
     /// Some element has an object that its wrapper must keep (`browser_sources::trace_node`), or some frame has a window. It starts
@@ -2062,6 +2063,14 @@ impl Browser<New> {
     pub fn new(doc: Document, limits: BrowserLimits, eval: EvalLimits, heap: HeapLimits) -> R<New, Browser<New>> {
         Browser::make(doc, limits, eval, heap)
     }
+
+    /// Start a window agent whose isolation the embedding host has already
+    /// established. Call before executing document scripts.
+    pub fn attach_isolated_agent(&mut self, cluster: bare_js_api::clone::AgentCluster) -> R<New, ()> {
+        self.dom.agent_cluster.set(cluster).map_err(|_| Fault::Unsupported("the agent cluster is already set"))?;
+        self.it.install_shared_memory(false, Some(bare_net::parallel::wake));
+        Ok(())
+    }
 }
 
 impl<E: Eng> Browser<E> {
@@ -2087,6 +2096,7 @@ impl<E: Eng> Browser<E> {
             lim: limits,
             p: OnceCell::new(),
             global: OnceCell::new(),
+            agent_cluster: OnceCell::new(),
             selector_scope: Default::default(),
             doc_wrapper: OnceCell::new(),
             wrapper_edges: Cell::new(false),

@@ -34,7 +34,7 @@ fn drain_agent(vm: &mut bare_vex::interp::Vm) -> Result<(), Exit> {
     let started = Instant::now();
     loop {
         vm.drain_microtasks(&mut |_, _| {}).map_err(|_| Exit::Fuel)?;
-        if vm.realm.deliver_test262_wait(Duration::ZERO).map_err(Exit::Throw)? {
+        if vm.realm.deliver_shared_wait(Duration::ZERO).map_err(Exit::Throw)? {
             continue;
         }
         let budget = Duration::from_secs(10).saturating_sub(started.elapsed());
@@ -48,13 +48,13 @@ fn drain_agent(vm: &mut bare_vex::interp::Vm) -> Result<(), Exit> {
         }
         let delay = next.as_f64().expect("test timer delay");
         if delay < 0.0 {
-            if !vm.realm.deliver_test262_wait(budget).map_err(Exit::Throw)? {
+            if !vm.realm.deliver_shared_wait(budget).map_err(Exit::Throw)? {
                 return Ok(());
             }
         } else {
             let wait = budget.min(Duration::from_secs_f64(delay / 1000.0));
             let since = Instant::now();
-            if !vm.realm.deliver_test262_wait(wait).map_err(Exit::Throw)? {
+            if !vm.realm.deliver_shared_wait(wait).map_err(Exit::Throw)? {
                 std::thread::sleep(wait.saturating_sub(since.elapsed()));
             }
         }

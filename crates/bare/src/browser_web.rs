@@ -78,7 +78,7 @@ const NAMES: [&str; 7] = ["crypto", "navigator", "Blob", "File", "FormData", "Su
 
 struct BlobData {
     /// Shared: a Blob never changes, so a clone (`structuredClone`, `postMessage`, `indexedDB`) shares the bytes.
-    bytes: std::rc::Rc<[u8]>,
+    bytes: std::sync::Arc<[u8]>,
     ty: String,
     /// `Some((name, lastModified))` for a File.
     file: Option<(String, f64)>,
@@ -1248,7 +1248,7 @@ fn fill_form<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, proto: E::Obj, list: Vec
             None => {
                 let fp = d.web.s.borrow().made.expect("made").file_p;
                 let now = s.wall_now_ms();
-                let f = new_blob_s(d, s, fp, BlobData { bytes: std::rc::Rc::from([]), ty: "application/octet-stream".into(), file: Some((String::new(), now)) })?;
+                let f = new_blob_s(d, s, fp, BlobData { bytes: std::sync::Arc::from([]), ty: "application/octet-stream".into(), file: Some((String::new(), now)) })?;
                 Ent::B(lid::<E>(s, f))
             }
         };
@@ -1611,12 +1611,12 @@ fn sw_ready<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<
 /// A serializable platform object of this file, as data: what a structured clone carries (HTML "serialization steps").
 pub(crate) enum WebClone {
     /// A `Blob` or a `File`: the bytes are shared, not copied.
-    Blob { bytes: std::rc::Rc<[u8]>, ty: String, file: Option<(String, f64)> },
+    Blob { bytes: std::sync::Arc<[u8]>, ty: String, file: Option<(String, f64)> },
     Key(crate::browser_subtle::Key),
 }
 
 /// The data of `o` if it is a `Blob`, a `File` or a `CryptoKey`, with its byte cost.
-pub(crate) fn clone_out<E: Eng>(d: &Dom<E>, o: E::Obj) -> Option<(Box<dyn std::any::Any>, usize)> {
+pub(crate) fn clone_out<E: Eng>(d: &Dom<E>, o: E::Obj) -> Option<(Box<dyn std::any::Any + Send>, usize)> {
     if let Some(b) = d.web.s.borrow().blobs.get(&o) {
         let n = b.bytes.len() + b.ty.len() + b.file.as_ref().map_or(0, |f| f.0.len());
         return Some((Box::new(WebClone::Blob { bytes: b.bytes.clone(), ty: b.ty.clone(), file: b.file.clone() }), n));

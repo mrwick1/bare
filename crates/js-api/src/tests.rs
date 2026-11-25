@@ -424,10 +424,10 @@ impl CloneHost<Toy> for NoClone {
     fn can_transfer(&self, _: &V) -> bool {
         false
     }
-    fn transfer_out(&mut self, _: &V) -> Box<dyn std::any::Any> {
+    fn transfer_out(&mut self, _: &V) -> Box<dyn std::any::Any + Send> {
         Box::new(())
     }
-    fn transfer_in<'s>(&mut self, _: &mut Scope<'s, Toy>, _: Vec<Box<dyn std::any::Any>>) -> Result<Vec<Local<'s>>, Error<'s>> {
+    fn transfer_in<'s>(&mut self, _: &mut Scope<'s, Toy>, _: Vec<Box<dyn std::any::Any + Send>>) -> Result<Vec<Local<'s>>, Error<'s>> {
         Ok(Vec::new())
     }
     fn data_clone_error<'s>(&mut self, s: &mut Scope<'s, Toy>, _: Refused) -> Error<'s> {
