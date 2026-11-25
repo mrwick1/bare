@@ -1,0 +1,6 @@
+timeout 90000
+open https://teams.microsoft.com/v2/ state="${STATE}"
+expect css="[data-tid='app-layout-area--main']" visible
+shot teams-main
+expect js "!document.getElementById('loading-screen') || document.getElementById('loading-screen').getAttribute('aria-hidden') === 'true'"
+shot teams-after-loading

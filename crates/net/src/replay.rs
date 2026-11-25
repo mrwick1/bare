@@ -23,6 +23,11 @@
 //! time that the server took. The page has no WebSocket in this browser, so there is nothing to replay for it.
 //! The cookie jar and the cache run as in a live run: `Set-Cookie` headers are in the stored head and the jar sees them.
 //!
+//! Loose match (`BARE_NET_REPLAY_LOOSE=1`, with `BARE_NET_REPLAY` or `BARE_NET_FILL`). A single-page app puts the time and random ids in
+//! its URLs and bodies (cache busters, UUIDv7 request ids, telemetry batches), so a replay never asks for the same label twice. When the
+//! exact label has no reply, the request takes the next unused reply, in recording order, of its loose key: the method, the URL with each
+//! volatile query value replaced by `*` (`loose_key`), and no body. Design: `docs/internal/design-replay-sessions.md`.
+//!
 //! The process reads the two variables once (`Tape::from_env`). A test makes its own tape with `Tape::record` or `Tape::replay`.
 
 use std::collections::HashMap;
@@ -38,6 +43,10 @@ pub struct Tape {
     /// Goes to the network, and records the reply, when the directory cannot answer.
     writes: bool,
     seen: Mutex<HashMap<String, usize>>,
+    /// Answer a miss of the exact label by its loose key.
+    loose: bool,
+    /// For each loose key: the files in recording order, and the next one to give. Built at the first miss.
+    index: OnceLock<Mutex<HashMap<String, (Vec<PathBuf>, usize)>>>,
 }
 
 /// One stored reply, or one stored failure (`error` is set).
@@ -69,25 +78,36 @@ impl Tape {
         TAPE.get_or_init(|| {
             let var = |name| std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from);
             match (var("BARE_NET_FILL"), var("BARE_NET_REPLAY"), var("BARE_NET_RECORD")) {
-                (Some(dir), ..) => Some(Tape::fill(dir)),
-                (None, Some(dir), _) => Some(Tape::replay(dir)),
-                (None, None, Some(dir)) => Some(Tape::record(dir)),
+                (Some(dir), ..) => Some(Tape::new(dir, true, true)),
+                (None, Some(dir), _) => Some(Tape::new(dir, true, false)),
+                (None, None, Some(dir)) => Some(Tape::new(dir, false, true)),
                 _ => None,
             }
+            .map(|t| if std::env::var("BARE_NET_REPLAY_LOOSE").is_ok_and(|v| v == "1") { t.loose() } else { Arc::new(t) })
         })
         .clone()
     }
 
+    fn new(dir: impl Into<PathBuf>, reads: bool, writes: bool) -> Tape {
+        Tape { dir: dir.into(), reads, writes, seen: Mutex::default(), loose: false, index: OnceLock::new() }
+    }
+
     pub fn record(dir: impl Into<PathBuf>) -> Arc<Tape> {
-        Arc::new(Tape { dir: dir.into(), reads: false, writes: true, seen: Mutex::default() })
+        Arc::new(Tape::new(dir, false, true))
     }
 
     pub fn replay(dir: impl Into<PathBuf>) -> Arc<Tape> {
-        Arc::new(Tape { dir: dir.into(), reads: true, writes: false, seen: Mutex::default() })
+        Arc::new(Tape::new(dir, true, false))
     }
 
     pub fn fill(dir: impl Into<PathBuf>) -> Arc<Tape> {
-        Arc::new(Tape { dir: dir.into(), reads: true, writes: true, seen: Mutex::default() })
+        Arc::new(Tape::new(dir, true, true))
+    }
+
+    /// This tape, with the loose match on.
+    pub fn loose(mut self) -> Arc<Tape> {
+        self.loose = true;
+        Arc::new(self)
     }
 
     /// Look in the directory before a request.
@@ -131,10 +151,89 @@ impl Tape {
             Some(_) => {
                 self.bump(label);
             }
+            None if self.loose => {
+                if let Some(e) = self.find_loose(label) {
+                    eprintln!("bare-net: replay: loose reply for {label}");
+                    return Some(e);
+                }
+                eprintln!("bare-net: replay: no recorded reply for {label}{}", if self.writes { " (fetching it)" } else { "" })
+            }
             None => eprintln!("bare-net: replay: no recorded reply for {label}{}", if self.writes { " (fetching it)" } else { "" }),
         }
         found
     }
+}
+
+impl Tape {
+    /// The next unused reply of the loose key of `label`, or the last one when all are used.
+    fn find_loose(&self, label: &str) -> Option<Entry> {
+        let index = self.index.get_or_init(|| Mutex::new(self.loose_index()));
+        let mut index = index.lock().unwrap_or_else(|e| e.into_inner());
+        let (paths, next) = index.get_mut(&loose_key(label))?;
+        let path = &paths[(*next).min(paths.len() - 1)];
+        *next += 1;
+        read(path).map(|(_, e)| e)
+    }
+
+    /// Every stored file by its loose key, in the order of recording (the time of the write).
+    fn loose_index(&self) -> HashMap<String, (Vec<PathBuf>, usize)> {
+        let mut files: Vec<(std::time::SystemTime, String, PathBuf)> = fs::read_dir(&self.dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|f| {
+                let path = f.path();
+                if path.extension().is_some_and(|e| e == "tmp") {
+                    return None;
+                }
+                let label = read_label(&path)?;
+                Some((f.metadata().ok()?.modified().ok()?, loose_key(&label), path))
+            })
+            .collect();
+        files.sort();
+        let mut index: HashMap<String, (Vec<PathBuf>, usize)> = HashMap::new();
+        for (_, key, path) in files {
+            index.entry(key).or_default().0.push(path);
+        }
+        index
+    }
+}
+
+/// The loose key of a label: the method and the URL, without the body hash, with each volatile query value replaced by `*`.
+pub(crate) fn loose_key(label: &str) -> String {
+    let mut parts = label.split(' ');
+    let (method, url) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+    let Some((base, query)) = url.split_once('?') else { return format!("{method} {url}") };
+    let query: Vec<String> = query
+        .split('&')
+        .map(|p| match p.split_once('=') {
+            Some((k, v)) if volatile(v) => format!("{k}=*"),
+            _ => p.to_string(),
+        })
+        .collect();
+    format!("{method} {base}?{}", query.join("&"))
+}
+
+/// A query value that changes from run to run: a time in ms or s (10 or more digits), a value that holds a UUID, or a long token.
+fn volatile(v: &str) -> bool {
+    let b = v.as_bytes();
+    (b.len() >= 10 && b.iter().all(u8::is_ascii_digit))
+        || b.windows(36).any(|w| w.iter().enumerate().all(|(i, c)| if matches!(i, 8 | 13 | 18 | 23) { *c == b'-' } else { c.is_ascii_hexdigit() }))
+        || (b.len() > 32 && b.iter().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'%' | b'.')))
+}
+
+/// The label of a stored file, without reading its body.
+fn read_label(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut f = fs::File::open(path).ok()?;
+    let mut head = [0u8; 8];
+    f.read_exact(&mut head).ok()?;
+    if &head[..4] != MAGIC {
+        return None;
+    }
+    let mut label = vec![0; u32::from_le_bytes(head[4..].try_into().ok()?) as usize];
+    f.read_exact(&mut label).ok()?;
+    String::from_utf8(label).ok()
 }
 
 impl Slot {
@@ -288,3 +387,7 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
     }
 }
+
+#[cfg(test)]
+#[path = "replay_loose_tests.rs"]
+mod loose_tests;
