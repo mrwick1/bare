@@ -135,6 +135,8 @@ mod browser_filereader_tests;
 mod browser_cors_tests;
 #[cfg(test)]
 mod browser_fetch_origin_tests;
+#[cfg(test)]
+mod browser_referer_tests;
 pub mod browser_navigation;
 mod browser_navigation_params;
 mod browser_navigation_state;

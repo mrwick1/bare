@@ -37,8 +37,8 @@
 //!   `Content-Length` come from the client. `Set-Cookie` of a response is never put in `response.headers`. Cookies: the
 //!   jar of the client (`bare_net::cookie`, shared with `document.cookie`) fills from every reply and gives the `Cookie` header of every hop. `credentials`
 //!   decides: `omit` sends and stores none, `same-origin` (the default, and XHR) only for the origin of the document, `include` (and `withCredentials`)
-//!   for any origin. A cross-site request sends only `SameSite=None` cookies, and its reply sets only those. No `Referer` is sent. `include` also needs the
-//!   exact origin and `Allow-Credentials` for the CORS check, as in Chrome. `Origin` is sent only to another origin. A same-origin POST sends none (Chrome does).
+//!   for any origin. A cross-site request sends only `SameSite=None` cookies, and its reply sets only those. `Referer` follows `resources::referrer`. `include` also needs the
+//!   exact origin and `Allow-Credentials` for the CORS check, as in Chrome. `Origin` goes to another origin and with every method that is not GET or HEAD.
 //! - A failed network request rejects with `TypeError: Failed to fetch`. Errors and diagnostics never hold a header value, a
 //!   body byte, a path or a query. [`Browser::take_fetch_diagnostics`] gives fixed labels and the origin.
 //!
@@ -373,17 +373,19 @@ struct Cors {
     blocked: Option<String>,
     /// For the console text: `fetch` or `XMLHttpRequest`.
     api: &'static str,
+    /// The document URL, for the `Referer` header (`resources::referrer`). `None`: no header.
+    page: Option<Url>,
 }
 
 impl Clone for Cors {
     fn clone(&self) -> Cors {
-        Cors { mode: self.mode, include: self.include, omit: self.omit, doc: self.doc.as_ref().map(dup), blocked: self.blocked.clone(), api: self.api }
+        Cors { mode: self.mode, include: self.include, omit: self.omit, doc: self.doc.as_ref().map(dup), blocked: self.blocked.clone(), api: self.api, page: self.page.as_ref().map(dup) }
     }
 }
 
 impl Cors {
     fn same(api: &'static str) -> Cors {
-        Cors { mode: Mode::Cors, include: false, omit: false, doc: None, blocked: None, api }
+        Cors { mode: Mode::Cors, include: false, omit: false, doc: None, blocked: None, api, page: None }
     }
 }
 
@@ -2227,7 +2229,7 @@ fn policy<E: Eng>(d: &Dom<E>, lim: &FetchLimits, url: &Url, mode: Mode, api: &'s
         st.diag(lim, "blocked: no document origin is configured".into());
         return Err(Fault::Unsupported("fetch without a configured document origin (Browser::configure_fetch)"));
     };
-    let mut cors = Cors { mode, ..Cors::same(api) };
+    let mut cors = Cors { mode, page: Some(dup(&base)), ..Cors::same(api) };
     if base.same_origin(url) {
         return Ok(cors);
     }
@@ -2447,9 +2449,13 @@ fn run_hops(client: &mut Client, lim: &FetchLimits, first: Parts<'_>, diag: &mut
             }
         }
         let metadata = potentially_trustworthy(&url);
-        let extra = usize::from(origin_s.is_some()) + if metadata { 3 } else { 0 };
+        let referer = cors.page.as_ref().and_then(|p| crate::resources::referrer(p, &url));
+        let extra = usize::from(origin_s.is_some()) + usize::from(referer.is_some()) + if metadata { 3 } else { 0 };
         let mut wire: Vec<(&str, &str)> = Vec::with_capacity(headers.len() + extra);
         wire.extend(headers.iter().map(|(n, v)| (n.as_str(), v.as_str())));
+        if let Some(r) = &referer {
+            wire.push(("referer", r));
+        }
         if let Some(o) = &origin_s {
             wire.push(("origin", o));
         }
