@@ -192,6 +192,7 @@ properties! {
     Appearance => "appearance",
     PointerEvents => "pointer-events",
     AspectRatio => "aspect-ratio",
+    Clip => "clip",
     Fill => "fill",
     Stroke => "stroke",
     ObjectFit => "object-fit",
@@ -546,6 +547,9 @@ fn parse_known(name: &str, value: &str, important: bool, side: &mut Side, out: &
     if (name == "transform" || name == "translate") && let Some(ok) = transform_declaration(name, value, important, side, out) {
         return ok;
     }
+    if name == "clip" && let Some(ok) = clip_declaration(value, important, out) {
+        return ok;
+    }
     if name == "backdrop-filter" && let Some(ok) = filter_declaration(value, important, side, out) {
         return ok;
     }
@@ -568,6 +572,20 @@ fn parse_known(name: &str, value: &str, important: bool, side: &mut Side, out: &
         // A shorthand may have added some items before it found the mistake. Take them back.
     }
     ok
+}
+
+/// `clip: rect(top, right, bottom, left)`. `None`: the value is a word (`auto`, `inherit`), for the usual path. Only a `rect()` with no area
+/// counts: the value is `none` for it, `auto` for any other rect (a gap: a rect with an area is good and clips nothing). A rect is empty
+/// when `right <= left` or `bottom <= top`, with `px` or unit-less numbers; the idiom for screen reader text is `rect(0, 0, 0, 0)`.
+fn clip_declaration(value: &str, important: bool, out: &mut Vec<Declared>) -> Option<bool> {
+    let lower = value.trim().to_ascii_lowercase();
+    let inner = lower.strip_prefix("rect(")?.strip_suffix(')')?;
+    let px = |t: &str| if t == "auto" { None } else { t.strip_suffix("px").unwrap_or(t).parse::<f32>().ok() };
+    let v: Vec<&str> = inner.split(|c: char| c == ',' || c.is_whitespace()).filter(|t| !t.is_empty()).collect();
+    let [t, r, b, l] = v[..] else { return Some(false) };
+    let empty = matches!((px(t), px(b)), (Some(t), Some(b)) if b <= t) || matches!((px(r), px(l)), (Some(r), Some(l)) if r <= l);
+    out.push(Declared { property: Property::Clip, value: Value::Keyword(if empty { Keyword::None } else { Keyword::Auto }), important, mirror: false });
+    Some(true)
 }
 
 /// `backdrop-filter` with a list of filter functions. `None`: the value is one word (`none`, `inherit`), for the usual path. Only the blur
@@ -1722,6 +1740,8 @@ fn longhand(property: Property, part: Part) -> Option<Value> {
         ObjectFit => one_of(part, &[K::Fill, K::Contain, K::Cover, K::None, K::ScaleDown]),
         // A ratio has more than one part: `expand` reads it.
         AspectRatio => Option::None,
+        // `auto`, or `none` for a `rect()` with no area: `clip_declaration` reads it.
+        Clip => one_of(part, &[K::Auto]),
         // The paint of an SVG shape: a color or `none`. A paint server (`url(#a)`) is not built, so it is not good.
         Fill | Stroke => match part {
             Part::Color(c) => Some(Value::Color(c)),
