@@ -76,6 +76,7 @@ impl ThreadWorker {
         let output = outbox.clone();
         let status = finished.clone();
         let stop = control.clone();
+        let engine = crate::browser_wasm::engine(dom);
         let worker = thread::Builder::new().name("bare-worker".into()).stack_size(16 << 20).spawn(move || {
             struct Done(Arc<AtomicU8>, bool);
             impl Drop for Done {
@@ -85,7 +86,7 @@ impl ThreadWorker {
                 }
             }
             let mut done = Done(status, false);
-            done.1 = run_worker::<E>(cfg, url, html, inline, cluster, stop, input, output);
+            done.1 = run_worker::<E>(cfg, url, html, inline, cluster, engine, stop, input, output);
         }).map_err(|e| e.to_string())?;
         Ok(Self { control, thread: worker.thread().clone(), inbox, outbox, finished })
     }
@@ -130,6 +131,7 @@ fn run_worker<E: Eng>(
     html: String,
     inline: Option<String>,
     cluster: AgentCluster,
+    engine: wasmi::Engine,
     control: Test262AgentControl,
     inbox: std::sync::Weak<Mailbox>,
     output: Arc<Mailbox>,
@@ -141,6 +143,7 @@ fn run_worker<E: Eng>(
     if control.is_stopped() { return true; }
     browser.it.start_shared_worker(control.clone());
     let dom = browser.dom.clone();
+    crate::browser_wasm::adopt_engine(&dom, engine);
     if dom.agent_cluster.set(cluster).is_err() || dom.kids.worker_parent.set(output).is_err() {
         return false;
     }

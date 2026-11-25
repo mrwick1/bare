@@ -55,7 +55,6 @@ const MEMORY: usize = 11;
 const TABLE: usize = 12;
 
 struct St<E: Eng> {
-    engine: wasmi::Engine,
     /// The prototypes, the error classes and the functions of the realm that the module uses, by the constants above.
     held: Vec<Persistent>,
     /// The JS functions that modules import, by the index that their wasmi function keeps.
@@ -85,11 +84,13 @@ pub(crate) struct Wasm<E: Eng> {
     store: RefCell<Option<Store<()>>>,
     pub(crate) items: RefCell<IdMap<E::Obj, Item<E>>>,
     pend: RefCell<Option<Pend>>,
+    /// The engine of this realm. A frame or a worker takes the engine of its parent, so a `WebAssembly.Module` can move between them.
+    engine: std::cell::OnceCell<wasmi::Engine>,
 }
 
 impl<E: Eng> Default for Wasm<E> {
     fn default() -> Self {
-        Wasm { st: RefCell::new(None), store: RefCell::new(None), items: RefCell::new(IdMap::default()), pend: RefCell::new(None) }
+        Wasm { st: RefCell::new(None), store: RefCell::new(None), items: RefCell::new(IdMap::default()), pend: RefCell::new(None), engine: Default::default() }
     }
 }
 
@@ -320,7 +321,7 @@ fn source_bytes<'s, E: Eng>(s: &mut Sc<'s, E>, v: Option<Local<'s>>) -> Res<'s, 
 }
 
 fn compile_bytes<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, bytes: &[u8]) -> Res<'s, Module> {
-    let engine = st(d, |st| st.engine.clone());
+    let engine = engine(d);
     Module::new(&engine, bytes).map_err(|e| make_error(d, s, COMPILE_ERROR, &e.to_string()))
 }
 
@@ -658,7 +659,7 @@ fn table_grow<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Arg
 
 fn validate<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let bytes = source_bytes::<E>(s, a.get(0))?;
-    let engine = st(d, |st| st.engine.clone());
+    let engine = engine(d);
     Ok(s.boolean(Module::validate(&engine, &bytes).is_ok()))
 }
 
@@ -925,10 +926,8 @@ fn make<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, Local<'s>> {
     let call = d.add_fn_s(s, call_export, "", 0, HostFn::Method)?;
     let list = [held[0].1, ip, gp, errs[0], errs[1], errs[2], bigint, as_int_n, freeze, call, ns, mp, tp];
     let held: Vec<Persistent> = list.iter().map(|v| s.persist(*v)).collect();
-    let engine = wasmi::Engine::default();
-    *d.wasm.store.borrow_mut() = Some(Store::new(&engine, ()));
+    *d.wasm.store.borrow_mut() = Some(Store::new(&engine(d), ()));
     *d.wasm.st.borrow_mut() = Some(Box::new(St {
-        engine,
         held,
         imports: Vec::new(),
         externs: Vec::new(),
@@ -939,6 +938,36 @@ fn make<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, Local<'s>> {
         bufs: Vec::new(),
     }));
     Ok(ns)
+}
+
+/// The engine of the realm of `d`.
+pub(crate) fn engine<E: Eng>(d: &Dom<E>) -> wasmi::Engine {
+    d.wasm.engine.get_or_init(wasmi::Engine::default).clone()
+}
+
+/// Give the new realm `d` the engine `e` of its parent. Call before its scripts run.
+pub(crate) fn adopt_engine<E: Eng>(d: &Dom<E>, e: wasmi::Engine) {
+    let _ = d.wasm.engine.set(e);
+}
+
+/// The module of `o` if it is a `WebAssembly.Module`: what a structured clone carries.
+pub(crate) fn module_data<E: Eng>(d: &Dom<E>, o: E::Obj) -> Option<Module> {
+    match d.wasm.items.borrow().get(&o) {
+        Some(Item::Module(m)) => Some(m.clone()),
+        _ => None,
+    }
+}
+
+/// A new `WebAssembly.Module` of `m` in the realm of `d`. A module of another engine cannot come in: it is from another agent cluster.
+pub(crate) fn module_obj<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, m: &Module) -> Res<'s, Local<'s>> {
+    if !wasmi::Engine::same(m.engine(), &engine(d)) {
+        return Err(d.dom_err_s(s, "DataCloneError", "The WebAssembly.Module is from another agent cluster."));
+    }
+    if d.wasm.st.borrow().is_none() {
+        make(d, s)?;
+    }
+    let mp = held(d, s, MODULE);
+    new_item(d, s, mp, Item::Module(m.clone()))
 }
 
 /// The global is an accessor until the first read. A call with an argument is the setter.

@@ -176,6 +176,8 @@ mod browser_wasm;
 mod browser_wasm_tests;
 #[cfg(test)]
 mod browser_wasm_memory_tests;
+#[cfg(test)]
+mod browser_wasm_clone_tests;
 mod browser_broadcast;
 mod browser_perf;
 mod browser_html;

@@ -111,3 +111,17 @@ Changes from the plan:
   call into wasm and after `instantiate`. `Memory.grow` detaches at once. Cost: one compare for each memory with a buffer.
 - A `Memory` or a `Table` has one JS object for each wasmi handle, kept for the life of the page, like the store.
 - Not built: a shared memory (`shared: true` is a `TypeError`), `Tag`, `Exception`, `type()` of the JS type reflection proposal.
+
+### Step 6: structured clone of a Module (2026-11-25)
+
+- Link attempt 3 of WhatsApp failed: the page posts a compiled `WebAssembly.Module` to its backend worker, and bare cloned it
+  as a plain object.
+- A `Module` is a serializable object (HTML structured clone, WebAssembly JS API "serialization steps"). The clone carries the
+  `wasmi::Module`, which shares its compiled code. Cost: one map lookup in `clone_out` for each host object of a clone.
+- A module can only run in a store of its own engine. Each realm had its own engine. Now a frame or a worker takes the engine
+  of its parent (`adopt_engine`), so a page and its workers share one engine. The engine is freed when the last realm of the
+  tree ends. A process-wide engine was rejected: wasmi frees compiled code only when the engine drops, so a long session
+  would keep the code of every module that it ever compiled.
+- A module from another engine (another tab) is a `DataCloneError`, as the standard requires across agent clusters.
+- Limit: the host clone hooks do not tell a message from storage. The standard refuses a `Module` for storage (IndexedDB);
+  bare does not check that.
