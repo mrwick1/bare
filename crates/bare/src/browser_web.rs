@@ -424,17 +424,17 @@ fn make<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, Made<E>> {
     getter(d, s, cp, "subtle", subtle_attr)?;
     let crypto = plain(d, s, cp)?;
 
-    // SubtleCrypto: `digest` hashes here; AES and HKDF are in `browser_subtle.rs`; the other methods reject until they are built.
+    // SubtleCrypto: `digest` hashes here; AES, HMAC and HKDF are in `browser_subtle.rs`; the other methods reject until they are built.
     let sp = proto(d, s, op_, "SubtleCrypto")?;
     op(d, s, sp, "digest", 2, subtle_digest)?;
     {
         use crate::browser_subtle as k;
-        let ops: [(&str, u32, HS<E>); 7] = [("encrypt", 3, k::encrypt), ("decrypt", 3, k::decrypt), ("generateKey", 3, k::generate_key), ("importKey", 5, k::import_key), ("exportKey", 2, k::export_key), ("deriveKey", 5, k::derive_key), ("deriveBits", 2, k::derive_bits)];
+        let ops: [(&str, u32, HS<E>); 9] = [("encrypt", 3, k::encrypt), ("decrypt", 3, k::decrypt), ("sign", 3, k::sign), ("verify", 4, k::verify), ("generateKey", 3, k::generate_key), ("importKey", 5, k::import_key), ("exportKey", 2, k::export_key), ("deriveKey", 5, k::derive_key), ("deriveBits", 2, k::derive_bits)];
         for (name, len, h) in ops {
             op(d, s, sp, name, len, h)?;
         }
     }
-    for (name, len) in [("sign", 3), ("verify", 4), ("wrapKey", 4), ("unwrapKey", 7)] {
+    for (name, len) in [("wrapKey", 4), ("unwrapKey", 7)] {
         op(d, s, sp, name, len, subtle_unsupported)?;
     }
     let kp = proto(d, s, op_, "CryptoKey")?;

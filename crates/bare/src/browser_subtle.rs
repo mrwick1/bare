@@ -1,5 +1,5 @@
-//! `SubtleCrypto` key methods (W3C Web Cryptography API) for AES-GCM, AES-CBC and HKDF: `generateKey`, `importKey`, `exportKey`,
-//! `encrypt`, `decrypt`, `deriveBits` and `deriveKey`. `digest` is in `browser_web.rs`. The cipher code is `bare_tls::aes` and
+//! `SubtleCrypto` key methods (W3C Web Cryptography API) for AES-GCM, AES-CBC, AES-CTR, HMAC and HKDF: `generateKey`, `importKey`,
+//! `exportKey`, `encrypt`, `decrypt`, `sign`, `verify`, `deriveBits` and `deriveKey`. `digest` is in `browser_web.rs`. The cipher code is `bare_tls::aes` and
 //! `bare_tls::hkdf`. Learning code, not audited.
 //!
 //! A `CryptoKey` is an object of `CryptoKey.prototype` with an entry in `WebHost::keys`: the algorithm, the key bytes, `extractable`
@@ -7,8 +7,9 @@
 //! `usages` give a new object on each read (the spec caches one). There is no `CryptoKey` global and no structured clone of a key.
 //!
 //! Limits: key formats "raw" only ("jwk", "spki" and "pkcs8" reject with `NotSupportedError`). AES-GCM takes a 12-byte IV only
-//! (`NotSupportedError` for other lengths). HKDF takes SHA-256 only. RSA, ECDSA, ECDH, HMAC, `sign`, `verify`, `wrapKey` and
-//! `unwrapKey` reject with `NotSupportedError`.
+//! (`NotSupportedError` for other lengths). HKDF and HMAC take SHA-256 only. RSA, ECDSA, ECDH, `wrapKey` and `unwrapKey` reject
+//! with `NotSupportedError`. AES-CTR counts in the low `length` bits of the 16-byte counter block, as the spec says, and rejects
+//! data that would reuse a counter value. `verify` of HMAC compares in constant time.
 
 use crate::browser::*;
 use crate::browser_scoped::*;
@@ -20,6 +21,8 @@ use bare_js_api::{Args, Attrs, Local, Type};
 pub(crate) enum Alg {
     AesGcm,
     AesCbc,
+    AesCtr,
+    Hmac,
     Hkdf,
 }
 
@@ -28,6 +31,8 @@ impl Alg {
         match self {
             Alg::AesGcm => "AES-GCM",
             Alg::AesCbc => "AES-CBC",
+            Alg::AesCtr => "AES-CTR",
+            Alg::Hmac => "HMAC",
             Alg::Hkdf => "HKDF",
         }
     }
@@ -56,12 +61,17 @@ impl Drop for Key {
 const USAGES: [&str; 8] = ["encrypt", "decrypt", "sign", "verify", "deriveKey", "deriveBits", "wrapKey", "unwrapKey"];
 const ENCRYPT: u8 = 1;
 const DECRYPT: u8 = 2;
+const SIGN: u8 = 4;
+const VERIFY: u8 = 8;
 const DERIVE_KEY: u8 = 16;
 const DERIVE_BITS: u8 = 32;
 const AES_USES: u8 = ENCRYPT | DECRYPT | 64 | 128;
 const HKDF_USES: u8 = DERIVE_KEY | DERIVE_BITS;
+const HMAC_USES: u8 = SIGN | VERIFY;
+/// The block size of SHA-256: the length of a generated HMAC key with no `length`.
+const HMAC_DEFAULT: usize = 64;
 
-/// The most keys of a page. A key holds at most 32 bytes.
+/// The most keys of a page. An AES key holds at most 32 bytes; an HMAC key is as long as the page gives.
 const MAX_KEYS: usize = 100_000;
 
 fn err<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, name: &str, msg: &str) -> bare_js_api::Error<'s> {
@@ -114,6 +124,31 @@ fn aes_len<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, obj: Option<Local<'s>>) ->
     match s.to_number(v)? {
         n if n == 128.0 || n == 192.0 || n == 256.0 => Ok(n as usize / 8),
         _ => Err(err(d, s, "OperationError", "AES key length must be 128, 192 or 256 bits.")),
+    }
+}
+
+/// The `hash` member of HMAC parameters: SHA-256 is built, another known hash is `NotSupportedError`.
+fn hmac_hash<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, obj: Option<Local<'s>>) -> Res<'s, ()> {
+    let hash = member::<E>(s, obj, "hash")?;
+    let hash = if is_object::<E>(s, hash) { member::<E>(s, Some(hash), "name")? } else { hash };
+    if usv(d, s, hash)?.eq_ignore_ascii_case("SHA-256") {
+        Ok(())
+    } else {
+        Err(err(d, s, "NotSupportedError", "HMAC takes SHA-256 only."))
+    }
+}
+
+/// The optional `length` of HMAC parameters, in bits. A length that is not a whole number of bytes is not built.
+fn hmac_len<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, obj: Option<Local<'s>>) -> Res<'s, Option<usize>> {
+    let Some(o) = obj else { return Ok(None) };
+    let v = s.get_str(o, "length")?;
+    if undef::<E>(s, v) {
+        return Ok(None);
+    }
+    match s.to_number(v)? {
+        n if n > 0.0 && n % 8.0 == 0.0 && n <= (1u32 << 16) as f64 => Ok(Some(n as usize / 8)),
+        n if n == 0.0 => Err(err(d, s, "DataError", "The HMAC key length must not be 0.")),
+        _ => Err(err(d, s, "NotSupportedError", "The HMAC key length must be a whole number of bytes.")),
     }
 }
 
@@ -205,6 +240,12 @@ pub(crate) fn key_algorithm<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Loc
     let o = s.new_object()?;
     let n = d.js_str_s(s, alg.name())?;
     s.define_str(o, "name", n, Attrs::ALL)?;
+    if alg == Alg::Hmac {
+        let h = s.new_object()?;
+        let hn = d.js_str_s(s, "SHA-256")?;
+        s.define_str(h, "name", hn, Attrs::ALL)?;
+        s.define_str(o, "hash", h, Attrs::ALL)?;
+    }
     if alg != Alg::Hkdf {
         let l = s.number((len * 8) as f64);
         s.define_str(o, "length", l, Attrs::ALL)?;
@@ -239,11 +280,19 @@ fn promise<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'
 
 pub(crate) fn generate_key<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     promise(d, s, this, a, 3, "generateKey", |s, v| {
-        let (alg, obj) = alg(d, s, v[0], &[Alg::AesGcm, Alg::AesCbc])?;
+        let (alg, obj) = alg(d, s, v[0], &[Alg::AesGcm, Alg::AesCbc, Alg::AesCtr, Alg::Hmac])?;
         let extractable = s.to_boolean(v[1]);
         let uses = usages(d, s, v[2])?;
-        let len = aes_len(d, s, obj)?;
-        check_uses(d, s, uses, AES_USES)?;
+        let len = if alg == Alg::Hmac {
+            hmac_hash(d, s, obj)?;
+            let len = hmac_len(d, s, obj)?.unwrap_or(HMAC_DEFAULT);
+            check_uses(d, s, uses, HMAC_USES)?;
+            len
+        } else {
+            let len = aes_len(d, s, obj)?;
+            check_uses(d, s, uses, AES_USES)?;
+            len
+        };
         let mut bytes = vec![0u8; len];
         if page_random(&mut bytes).is_err() {
             return Err(err(d, s, "OperationError", "The operating system random source failed."));
@@ -265,10 +314,19 @@ pub(crate) fn import_key<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<
     promise(d, s, this, a, 5, "importKey", |s, v| {
         format(d, s, v[0])?;
         let bytes = buf::<E>(s, v[1], "keyData")?;
-        let (alg, _) = alg(d, s, v[2], &[Alg::AesGcm, Alg::AesCbc, Alg::Hkdf])?;
+        let (alg, obj) = alg(d, s, v[2], &[Alg::AesGcm, Alg::AesCbc, Alg::AesCtr, Alg::Hmac, Alg::Hkdf])?;
         let extractable = s.to_boolean(v[3]);
         let uses = usages(d, s, v[4])?;
-        if alg == Alg::Hkdf {
+        if alg == Alg::Hmac {
+            hmac_hash(d, s, obj)?;
+            check_uses(d, s, uses, HMAC_USES)?;
+            if bytes.is_empty() {
+                return Err(err(d, s, "DataError", "The HMAC key data must not be empty."));
+            }
+            if hmac_len(d, s, obj)?.is_some_and(|l| l != bytes.len()) {
+                return Err(err(d, s, "DataError", "The HMAC key length does not match the key data."));
+            }
+        } else if alg == Alg::Hkdf {
             if extractable {
                 return Err(err(d, s, "SyntaxError", "HKDF keys cannot be extractable."));
             }
@@ -302,7 +360,23 @@ pub(crate) fn export_key<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<
 /// `encrypt` and `decrypt` with AES-GCM or AES-CBC.
 fn cipher<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>, enc: bool) -> Res<'s, Local<'s>> {
     promise(d, s, this, a, 3, if enc { "encrypt" } else { "decrypt" }, |s, v| {
-        let (alg, obj) = alg(d, s, v[0], &[Alg::AesGcm, Alg::AesCbc])?;
+        let (alg, obj) = alg(d, s, v[0], &[Alg::AesGcm, Alg::AesCbc, Alg::AesCtr])?;
+        if alg == Alg::AesCtr {
+            let counter = member::<E>(s, obj, "counter")?;
+            let counter = buf::<E>(s, counter, "counter")?;
+            let len = member::<E>(s, obj, "length")?;
+            let len = s.to_number(len)?;
+            let key = use_key(d, s, v[1], alg, if enc { ENCRYPT } else { DECRYPT })?;
+            let data = buf::<E>(s, v[2], "data")?;
+            let Ok(counter) = <[u8; 16]>::try_from(counter.as_slice()) else { return Err(err(d, s, "OperationError", "The AES-CTR counter must be 16 bytes.")) };
+            if !(1.0..=128.0).contains(&len) || len.fract() != 0.0 {
+                return Err(err(d, s, "OperationError", "The AES-CTR length must be between 1 and 128."));
+            }
+            return match ctr(&key, counter, len as u32, data) {
+                Some(b) => s.new_array_buffer(b),
+                None => Err(err(d, s, "OperationError", "The data is too long for the AES-CTR counter length.")),
+            };
+        }
         let iv = member::<E>(s, obj, "iv")?;
         let iv = buf::<E>(s, iv, "iv")?;
         let (aad, tag) = if alg == Alg::AesGcm {
@@ -333,6 +407,25 @@ fn cipher<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s
             Err(_) => Err(err(d, s, "OperationError", "The operation failed for an operation-specific reason.")),
         }
     })
+}
+
+/// AES-CTR: XOR `data` with the AES of the counter block. The low `bits` bits of the block count up and wrap; the rest stays. `None`
+/// when the data needs more blocks than the counter has values (a counter value would repeat).
+fn ctr(key: &[u8], counter: [u8; 16], bits: u32, mut data: Vec<u8>) -> Option<Vec<u8>> {
+    let aes = bare_tls::aes::Aes::new(key)?;
+    let blocks = data.len().div_ceil(16) as u128;
+    if bits < 128 && blocks > 1u128 << bits {
+        return None;
+    }
+    let mask = if bits == 128 { u128::MAX } else { (1u128 << bits) - 1 };
+    let mut c = u128::from_be_bytes(counter);
+    for chunk in data.chunks_mut(16) {
+        let mut b = c.to_be_bytes();
+        aes.encrypt_block(&mut b);
+        chunk.iter_mut().zip(b).for_each(|(x, k)| *x ^= k);
+        c = (c & !mask) | (c.wrapping_add(1) & mask);
+    }
+    Some(data)
 }
 
 pub(crate) fn encrypt<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
@@ -388,5 +481,28 @@ pub(crate) fn derive_key<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<
         let bytes = hkdf(d, s, obj, &key, (len * 8) as f64)?;
         check_uses(d, s, uses, AES_USES)?;
         new_key(d, s, Key { alg: to, bytes, extractable, usages: uses })
+    })
+}
+
+/// `sign` with HMAC SHA-256.
+pub(crate) fn sign<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    promise(d, s, this, a, 3, "sign", |s, v| {
+        alg(d, s, v[0], &[Alg::Hmac])?;
+        let key = use_key(d, s, v[1], Alg::Hmac, SIGN)?;
+        let data = buf::<E>(s, v[2], "data")?;
+        s.new_array_buffer(bare_tls::hmac::hmac_sha256(&key, &data).to_vec())
+    })
+}
+
+/// `verify` with HMAC SHA-256: the MAC of the data against the signature, compared in constant time.
+pub(crate) fn verify<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    promise(d, s, this, a, 4, "verify", |s, v| {
+        alg(d, s, v[0], &[Alg::Hmac])?;
+        let key = use_key(d, s, v[1], Alg::Hmac, VERIFY)?;
+        let sig = buf::<E>(s, v[2], "signature")?;
+        let data = buf::<E>(s, v[3], "data")?;
+        let mac = bare_tls::hmac::hmac_sha256(&key, &data);
+        let same = sig.len() == mac.len() && sig.iter().zip(mac).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0;
+        Ok(s.boolean(same))
     })
 }
