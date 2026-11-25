@@ -95,6 +95,9 @@ pub struct Lazy {
     pending: Vec<Wait>,
     /// The unit of `prelude.js`, made at the first function that a realm asks for (`prelude_fn`).
     pre: Option<usize>,
+    /// `(first code index, unit)` of each text and each lazy compile, in the order of the first index: the unit of a code that has no
+    /// entry in `pending` (a top level, a child that is ready) is the last span at or before it (`source_of`).
+    spans: Vec<(usize, usize)>,
 }
 
 /// A function that waits at the code index `ci`, and the unit that holds its text.
@@ -106,12 +109,14 @@ struct Wait {
 
 impl Lazy {
     fn new(atoms: Arc<SharedAtoms>, limits: Limits) -> Lazy {
-        Lazy { units: Vec::new(), atoms, limits, pending: Vec::new(), pre: None }
+        Lazy { units: Vec::new(), atoms, limits, pending: Vec::new(), pre: None, spans: Vec::new() }
     }
 
     /// Add a text and the stubs that its loader made.
     fn add(&mut self, source: Rc<str>, facts: Facts, pending: Vec<(usize, Child)>) {
         let u = self.units.len();
+        // The text of a new program: its codes start at 0.
+        self.spans.push((0, u));
         self.units.push(Unit { source: Some(source), facts, scoped: false, pre: false });
         self.wait(u, pending);
     }
@@ -155,8 +160,17 @@ impl LazyCompile for Lazy {
         }
         codes.push_all(new);
         codes.set(ci, code);
+        self.spans.push((base, u));
         self.wait(u, pending);
         Ok(())
+    }
+
+    fn source_of(&self, ci: usize) -> Option<&str> {
+        let u = match self.pending.binary_search_by_key(&ci, |w| w.ci) {
+            Ok(at) => self.pending[at].unit,
+            Err(_) => self.spans.get(self.spans.partition_point(|&(b, _)| b <= ci).checked_sub(1)?)?.1,
+        };
+        Some(self.units[u].source.as_deref().unwrap_or(PRELUDE))
     }
 
     /// A stub for the top-level function `top` of `prelude.js`, added at the end of `codes`. The unit of the prelude is made here, at the first
@@ -233,6 +247,7 @@ fn bind_unit(lazy: &mut Lazy, codes: &Codes, source: Rc<str>, unit: UnitCode, sc
     }
     codes.push_all(new);
     let u = lazy.units.len();
+    lazy.spans.push((base, u));
     lazy.units.push(Unit { source: Some(source), facts, scoped, pre: false });
     lazy.wait(u, pending.into_iter().map(|(i, ch)| (base + i, ch)));
     Ok((base, info))

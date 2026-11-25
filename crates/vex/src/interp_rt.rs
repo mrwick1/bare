@@ -391,6 +391,8 @@ pub struct Realm {
     pub(crate) pins: Vec<ShapeId>,
     /// The top frame when a collection runs: code index, frame pointer, `pc` of the safepoint.
     pub cur: (usize, usize, u32),
+    /// The state of `Error.stack` (`error_stack.rs`).
+    pub(crate) es: crate::error_stack::ErrStack,
     /// The program that the realm runs, the code indexes of its default constructors, and the back edges that may still run (`Vm` sets
     /// the first two, and copies the third at each call from the host). A native that calls a script function needs all three.
     pub(crate) prog: Rc<Codes>,
@@ -573,6 +575,7 @@ impl Realm {
             lex: HashMap::new(),
             pins,
             cur: (0, 0, 0),
+            es: Default::default(),
             prog: Rc::default(),
             dctor: [0, 0],
             fuel: u64::MAX,
