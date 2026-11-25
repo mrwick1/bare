@@ -24,6 +24,8 @@ mod browser_rejection_tests;
 mod browser_handlers;
 #[cfg(test)]
 mod browser_handler_tests;
+#[cfg(test)]
+mod browser_listener_per_target_tests;
 mod browser_focus;
 mod browser_form;
 mod browser_details;

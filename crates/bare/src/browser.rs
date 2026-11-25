@@ -286,7 +286,6 @@ pub struct BrowserLimits {
     /// Live wrappers (and plain event targets).
     pub max_wrappers: usize,
     pub max_listeners: usize,
-    pub max_listeners_per_target: usize,
     /// Live event objects.
     pub max_events: usize,
     /// Elements of one result array.
@@ -316,7 +315,6 @@ impl Default for BrowserLimits {
             max_names: 1 << 16,
             max_wrappers: 1 << 16,
             max_listeners: 1 << 16,
-            max_listeners_per_target: 1024,
             max_events: 1 << 14,
             max_results: 1 << 16,
             max_tree_depth: 512,

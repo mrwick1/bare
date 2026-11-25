@@ -257,12 +257,8 @@ fn a_handler_lives_while_its_owner_lives_and_slots_are_reused() {
 #[test]
 fn the_listener_caps_are_checked_before_a_handler_slot_is_added() {
     big(|| {
-        let mut b = make(2_000_000, BrowserLimits { max_listeners: 3, max_listeners_per_target: 2, ..Default::default() });
+        let mut b = make(2_000_000, BrowserLimits { max_listeners: 3, ..Default::default() });
         js(&mut b, "var i = document.getElementById('i'); i.oninput = function () {}; i.addEventListener('x', function () {});");
-        // per-target cap
-        assert_eq!(js(&mut b, "i.onchange = function () {}"), lim("dom-listeners-per-target"));
-        assert_eq!(js(&mut b, "i.onchange"), "null");
-        // total cap: another target
         js(&mut b, "document.addEventListener('y', function () {})");
         assert_eq!(js(&mut b, "window.onchange = function () {}"), lim("dom-listeners"));
         assert_eq!(js(&mut b, "window.onchange"), "null");

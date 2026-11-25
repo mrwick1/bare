@@ -399,9 +399,6 @@ fn onchange_set<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: A
                 if st.n_listeners >= d.lim.max_listeners {
                     return Err(d.lim("dom-listeners"));
                 }
-                if st.listeners.get(&t).map_or(0, |l| l.len()) >= d.lim.max_listeners_per_target {
-                    return Err(d.lim("dom-listeners-per-target"));
-                }
                 st.next_id += 1;
                 let id = st.next_id;
                 let cb = it.trace_value(E::obj_raw(f));
