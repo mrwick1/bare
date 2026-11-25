@@ -418,6 +418,8 @@ mod browser_resume_tests;
 #[cfg(test)]
 mod browser_survive_tests;
 #[cfg(test)]
+mod browser_task_aborts_tests;
+#[cfg(test)]
 mod browser_survive_vex_tests;
 #[cfg(test)]
 mod browser_settle_tests;
