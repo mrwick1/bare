@@ -39,6 +39,13 @@ To read page state, run `bare-mcp` (same build) and call `open`, then `eval`. Wh
 - **Source text in `Function.prototype.toString`** (PR 2). `WAWeb-curve25519-donna` reads the source of small functions
   with `t.toString().match(d)`. Vex gave `[native code]`, the match was `null`, and the boot threw. Fix: `Code.span` and
   `fn_to_string` (`crates/vex/src/builtins.rs`). Tests: `crates/vex/src/fn_source_tests.rs`.
+- **Canvas size and pixels** (PR 4). The QR code is a `<canvas>` that a script makes and sizes with `c.width = 228`. Bare
+  had no `width` and `height` members on a canvas and no size for its box, so the QR box was 0x0. After that, the canvas was
+  blank: WhatsApp draws the code with `fillRect` and `strokeRect` (a `QRCode` port, `p.prototype.draw`), and bare drew
+  nothing. Fix: `width` and `height` reflect their attributes; the box takes them as a hint (`crates/css/src/hints.rs`);
+  `fillRect`, `strokeRect` and `clearRect` draw into a bitmap per canvas, and paint shows it like an `<img>`
+  (`crates/bare/src/browser_canvas.rs`, `crates/paint/src/display.rs`). Tests: `browser_canvas_size_tests.rs`,
+  `browser_canvas_raster_tests.rs`.
 
 Live effect, same journey, before vs after PR 1 (archMachine, 1 run each):
 
@@ -48,9 +55,7 @@ Live effect, same journey, before vs after PR 1 (archMachine, 1 run each):
 | page idle after            | 1.1 s    | not idle at 90 s                      |
 | first page error           | none     | `WAWeb-curve25519-donna` (see below)  |
 
-## Open blocker: `Function.prototype.toString` gives no source text
+## State after PR 4
 
-`WAWeb-curve25519-donna` is old Emscripten output. Its `cwrap` helper reads the source of small functions:
-`t.toString().match(d).slice(1)`. Vex gives `function NAME() { [native code] }` for a script function, so `match` is
-`null` and the module throws `Cannot read properties of null (reading 'slice')`. The Teams record names the same gap
-(`design-teams-bringup.md`, "Remaining gap").
+With PRs 1 to 4, `whatsapp-qr.steps` passes: the login page shows a QR code in 15 s (archMachine, 1 run). `zbarimg` reads
+the screenshot as a `https://wa.me/settings/li...` link. Next: link a device, then the chat list.

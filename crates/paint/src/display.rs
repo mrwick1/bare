@@ -261,7 +261,7 @@ impl DisplayList {
             page.layers |= style.picture_set() != 0;
             page.flex |= matches!(style.get(Property::Display), Value::Keyword(Keyword::Flex | Keyword::InlineFlex | Keyword::Grid | Keyword::InlineGrid));
         }
-        let mut b = Builder { tree, doc, frags: &layout.fragments, list: self, view, propagated, depth: 0, page, svg: if doc.has_foreign() { doc.find_atom("svg") } else { None }, img: if doc.has_images() { doc.find_atom("img") } else { None }, clips: Vec::new(), areas, scrolls: Vec::new(), ext };
+        let mut b = Builder { tree, doc, frags: &layout.fragments, list: self, view, propagated, depth: 0, page, svg: if doc.has_foreign() { doc.find_atom("svg") } else { None }, img: if doc.has_images() { doc.find_atom("img") } else { None }, canvas: if doc.has_images() { doc.find_atom("canvas") } else { None }, clips: Vec::new(), areas, scrolls: Vec::new(), ext };
         b.context(0);
     }
 }
@@ -342,6 +342,8 @@ struct Builder<'a> {
     svg: Option<bare_html::dom::Atom>,
     /// The atom of `img`, if some element has a picture.
     img: Option<bare_html::dom::Atom>,
+    /// The atom of `canvas` on a page with a picture: a canvas that a script drew on shows its bitmap like an `<img>`.
+    canvas: Option<bare_html::dom::Atom>,
     /// The clips that are open now (the same as the ones of `Painter::draw`).
     clips: Vec<IRect>,
     /// The scroll containers of the page, if it scrolls.
@@ -572,7 +574,7 @@ impl Builder<'_> {
         if self.svg.is_some() {
             self.svg_of(&f, style, i);
         }
-        if self.img.is_some() {
+        if self.img.is_some() || self.canvas.is_some() {
             self.picture(&f, style, i);
         }
         // A box that clips, with its inside outside the canvas, has nothing more to show.
@@ -620,7 +622,7 @@ impl Builder<'_> {
                             if self.svg.is_some() {
                                 self.svg_of(&g, style, j);
                             }
-                            if self.img.is_some() {
+                            if self.img.is_some() || self.canvas.is_some() {
                                 self.picture(&g, style, j);
                             }
                             j += 1;
@@ -1044,10 +1046,10 @@ impl Builder<'_> {
         }
     }
 
-    /// The picture of the box, if it is an `<img>` that has one and shows. Not inline: it runs for each box of a page that has a picture.
+    /// The picture of the box, if it is an `<img>` or a `<canvas>` that has one and shows. Not inline: it runs for each box of a page that has a picture.
     #[inline(never)]
     fn picture(&mut self, f: &Fragment, style: &ComputedStyle, i: usize) {
-        if i == 0 || !matches!(self.doc.data(f.node), NodeData::Element { name, .. } if Some(*name) == self.img) || style.get(Property::Visibility) != Value::Keyword(Keyword::Visible) {
+        if i == 0 || !matches!(self.doc.data(f.node), NodeData::Element { name, .. } if Some(*name) == self.img || Some(*name) == self.canvas) || style.get(Property::Visibility) != Value::Keyword(Keyword::Visible) {
             return;
         }
         let Some(bitmap) = self.doc.image(f.node) else { return };

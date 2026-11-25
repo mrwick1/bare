@@ -192,6 +192,7 @@ impl<E: Eng> Dom<E> {
             st.input_bytes = st.inputs.values().map(|i| i.value.as_ref().map_or(0, String::len)).sum();
         }
         self.dialogs.borrow_mut().retain(|&n, _| !gone(n));
+        self.canvases.borrow_mut().retain(|&n, _| !gone(n));
         crate::browser_computed::forget(self, &gone);
         crate::browser_controls::forget(self, &gone);
         crate::browser_custom::forget(self, doc, &gone);

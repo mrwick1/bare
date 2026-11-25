@@ -4,6 +4,10 @@
 //! allocation in Chrome; the message is ours). `createPattern` gives `null` for an `<img>` that is not complete and an object
 //! with a no-op `setTransform` for any other element. A gradient is an object with a no-op `addColorStop`.
 //! Deviation: `width`, `height`, `data` and `colorSpace` are own read-only data properties, not prototype accessors.
+//!
+//! Pixels: `fillRect`, `strokeRect` and `clearRect` draw into the bitmap of the canvas (`Raster`), in a solid `fillStyle` or
+//! `strokeStyle` (a CSS color) with `globalAlpha`. A pixel is in a rectangle when its center is (no anti-aliasing). The other drawing
+//! calls and the transform do nothing yet. Paint shows the bitmap like the picture of an `<img>` (`Document::set_image`).
 use crate::eng::Eng;
 use crate::browser::*;
 use crate::browser_scoped::*;
@@ -143,6 +147,7 @@ fn image_data<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'
 pub(crate) fn members<E: Eng>(d: &Dom<E>, it: &mut E::Vm, p: E::Obj) -> R<E, ()> {
     d.def_method_s(it, p, "getContext", 1, context)?;
     d.def_method_s(it, p, "toDataURL", 0, data_url)?;
+    crate::browser_reflect::reflect!(d, it, p, &["canvas"], { "width" => "width": Long(300, 0), "height" => "height": Long(150, 0) });
     Ok(())
 }
 
@@ -179,9 +184,6 @@ fn context<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'
         "transform",
         "setTransform",
         "resetTransform",
-        "clearRect",
-        "fillRect",
-        "strokeRect",
         "beginPath",
         "closePath",
         "moveTo",
@@ -205,6 +207,9 @@ fn context<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'
         d.def_method_l(s, o, name, 0, noop, false)?;
     }
     d.def_method_l(s, o, "measureText", 1, measure, false)?;
+    d.def_method_l(s, o, "fillRect", 4, |d, s, t, a| draw(d, s, t, a, Op::Fill), false)?;
+    d.def_method_l(s, o, "strokeRect", 4, |d, s, t, a| draw(d, s, t, a, Op::Stroke), false)?;
+    d.def_method_l(s, o, "clearRect", 4, |d, s, t, a| draw(d, s, t, a, Op::Clear), false)?;
     for (name, len, h) in [
         ("createImageData", 1, create_image_data as HS<E>),
         ("getImageData", 4, get_image_data),
@@ -216,6 +221,11 @@ fn context<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'
         ("isPointInStroke", 2, no),
     ] {
         d.def_method_l(s, o, name, len, h, false)?;
+    }
+    // The defaults of the drawing state (HTML, "CanvasFillStrokeStyles", "CanvasCompositing", "CanvasPathDrawingStyles").
+    let (black, one) = (d.js_str_s(s, "#000000")?, s.number(1.0));
+    for (name, v) in [("fillStyle", black), ("strokeStyle", black), ("lineWidth", one), ("globalAlpha", one)] {
+        s.define_str(o, name, v, Attrs { writable: true, enumerable: true, configurable: true })?;
     }
     s.define_str(o, "canvas", this, Attrs { writable: false, enumerable: true, configurable: true })?;
     s.define_str(this, "__bareCanvas2D", o, Attrs { writable: false, enumerable: false, configurable: false })?;
@@ -334,4 +344,123 @@ fn pattern<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>)
     let o = s.new_object()?;
     d.def_method_l(s, o, "setTransform", 1, noop, false)?;
     Ok(o)
+}
+
+/// The bitmap of a canvas that a script drew on, `0xAARRGGBB` not premultiplied. The document holds a lazy copy (`Pixels::lazy`) that
+/// paint makes at its first read, so the many calls of one frame copy the pixels once.
+pub(crate) struct Raster {
+    w: u32,
+    h: u32,
+    px: std::sync::Arc<std::sync::Mutex<Vec<u32>>>,
+}
+
+#[derive(Clone, Copy)]
+enum Op {
+    Fill,
+    Stroke,
+    Clear,
+}
+
+/// A CSS color as a canvas style: `#hex`, a name, or `rgb()`, `rgba()`, `hsl()`, `hsla()`. `None` for another value (a gradient object).
+fn style_color(v: &str) -> Option<bare_css::color::Color> {
+    use bare_css::tokenizer::Token;
+    let mut t = bare_css::tokenizer::tokenize(v.trim());
+    let c = match t.next()? {
+        Token::Hash { value, .. } => bare_css::color::Color::hex(&value),
+        Token::Ident(name) => bare_css::color::Color::named(&name.to_ascii_lowercase()),
+        Token::Function(name) if bare_css::color::is_function(&name) => bare_css::color::parse_function(&name, &mut t),
+        _ => None,
+    };
+    t.next().is_none().then_some(c?)
+}
+
+/// `fillRect`, `strokeRect` and `clearRect(x, y, w, h)`. A value that is not finite draws nothing, as the standard says.
+fn draw<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>, op: Op) -> Res<'s, Local<'s>> {
+    let mut r = [0f32; 4];
+    for (i, v) in r.iter_mut().enumerate() {
+        let x = arg_s::<E>(s, a, i);
+        *v = s.to_number(x)? as f32;
+    }
+    let el = s.get_str(this, "canvas")?;
+    let n = d.el_s(s, el)?;
+    if r.iter().any(|v| !v.is_finite()) {
+        return Ok(s.undefined());
+    }
+    let color = match op {
+        Op::Clear => 0,
+        Op::Fill | Op::Stroke => {
+            let v = s.get_str(this, if matches!(op, Op::Fill) { "fillStyle" } else { "strokeStyle" })?;
+            let text = if matches!(s.type_of(v), bare_js_api::Type::String) { d.string_arg_s(s, v)? } else { String::new() };
+            let Some(c) = style_color(&text) else { return Ok(s.undefined()) };
+            let ga = s.get_str(this, "globalAlpha")?;
+            let ga = if matches!(s.type_of(ga), bare_js_api::Type::Number) { s.to_number(ga)?.clamp(0.0, 1.0) } else { 1.0 };
+            let alpha = (c.a as f64 * ga).round() as u32;
+            if alpha == 0 {
+                return Ok(s.undefined());
+            }
+            alpha << 24 | (c.r as u32) << 16 | (c.g as u32) << 8 | c.b as u32
+        }
+    };
+    let (w, h) = (s.get_str(el, "width")?, s.get_str(el, "height")?);
+    let (w, h) = (long_abs::<E>(s, w)?, long_abs::<E>(s, h)?);
+    if w == 0 || h == 0 || (w as u64) * (h as u64) * 4 > MAX_BYTES {
+        return Ok(s.undefined());
+    }
+    let mut map = d.canvases.borrow_mut();
+    let raster = map.entry(n).or_insert_with(|| Raster { w, h, px: Default::default() });
+    {
+        let mut px = raster.px.lock().unwrap_or_else(|e| e.into_inner());
+        // A new size clears the bitmap (HTML, "the canvas element": setting `width` or `height`).
+        if (raster.w, raster.h) != (w, h) || px.len() != (w * h) as usize {
+            (raster.w, raster.h) = (w, h);
+            *px = vec![0; (w * h) as usize];
+        }
+        let [x, y, rw, rh] = r;
+        let (x0, x1, y0, y1) = (x.min(x + rw), x.max(x + rw), y.min(y + rh), y.max(y + rh));
+        match op {
+            Op::Fill | Op::Clear => fill(&mut px, w, h, (x0, y0, x1, y1), color),
+            Op::Stroke => {
+                let lw = s.get_str(this, "lineWidth")?;
+                let lw = if matches!(s.type_of(lw), bare_js_api::Type::Number) { s.to_number(lw)? as f32 } else { 1.0 };
+                let k = if lw.is_finite() && lw > 0.0 { lw / 2.0 } else { 0.5 };
+                // The four sides, each a rectangle of the line width centered on the path.
+                for e in [(x0 - k, y0 - k, x1 + k, y0 + k), (x0 - k, y1 - k, x1 + k, y1 + k), (x0 - k, y0 + k, x0 + k, y1 - k), (x1 - k, y0 + k, x1 + k, y1 - k)] {
+                    fill(&mut px, w, h, e, color);
+                }
+            }
+        }
+    }
+    // Paint reads a lazy copy. A copy that paint made already, or one of another size, is out of date: give a new one.
+    let mut doc = d.doc.borrow_mut();
+    if doc.image(n).is_none_or(|b| b.2.is_ready() || (b.0, b.1) != (w, h)) {
+        let px = raster.px.clone();
+        doc.set_image(n, Some((w, h, bare_html::dom::Pixels::lazy(move || px.lock().unwrap_or_else(|e| e.into_inner()).clone()))));
+    }
+    Ok(s.undefined())
+}
+
+/// Paint the pixels whose centers are in `(x0, y0, x1, y1)` with `color` over the old ones (source-over). `0` clears them.
+fn fill(px: &mut [u32], w: u32, h: u32, (x0, y0, x1, y1): (f32, f32, f32, f32), color: u32) {
+    let span = |lo: f32, hi: f32, max: u32| ((lo - 0.5).ceil().max(0.0) as u32, ((hi - 0.5).ceil().max(0.0) as u32).min(max));
+    let ((cx0, cx1), (cy0, cy1)) = (span(x0, x1, w), span(y0, y1, h));
+    let a = color >> 24;
+    for y in cy0..cy1 {
+        for p in &mut px[(y * w + cx0) as usize..(y * w + cx1) as usize] {
+            *p = if color == 0 || a == 255 { color } else { over(color, *p) };
+        }
+    }
+}
+
+/// `src` over `dst`, both `0xAARRGGBB` not premultiplied.
+fn over(src: u32, dst: u32) -> u32 {
+    let (sa, da) = ((src >> 24) as f32 / 255.0, (dst >> 24) as f32 / 255.0);
+    let oa = sa + da * (1.0 - sa);
+    if oa <= 0.0 {
+        return 0;
+    }
+    let ch = |sh: u32| {
+        let (s, d) = (((src >> sh) & 255) as f32, ((dst >> sh) & 255) as f32);
+        (((s * sa + d * da * (1.0 - sa)) / oa).round() as u32).min(255) << sh
+    };
+    ((oa * 255.0).round() as u32) << 24 | ch(16) | ch(8) | ch(0)
 }
