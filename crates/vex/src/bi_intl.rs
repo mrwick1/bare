@@ -67,7 +67,6 @@ pub(crate) struct State {
     icu: icu::Cache,
     bound_key: Option<Str>,
     bound_natives: Option<usize>,
-    locale_proto: Option<Obj>,
 }
 
 impl Realm {
@@ -115,7 +114,7 @@ fn constructor<const K: usize>(rt: &mut Realm) -> Value {
         NAMES => late_table![m("of", 1, name_of)],
         NUMBER => late_table![getter("format", "get format", number_get), m("formatToParts", 1, number_parts)],
         LOCALE => {
-            rt.intl_state().locale_proto = Some(proto);
+            rt.state.intl_locale_proto = Some(proto);
             late_table![
                 m("toString", 0, locale_string), m("maximize", 0, locale_resize::<true>), m("minimize", 0, locale_resize::<false>),
                 getter("baseName", "get baseName", locale_get::<0>),
@@ -526,7 +525,7 @@ fn locale_string(rt: &mut Realm, this: Value, _: &[Value]) -> R<Value> {
 fn locale_resize<const MAX: bool>(rt: &mut Realm, this: Value, _: &[Value]) -> R<Value> {
     let Some(Format::Locale(tag)) = format(rt, this) else { return rt.type_error("incompatible Intl.Locale receiver") };
     let tag = if MAX { intl::loc_maximize(tag) } else { intl::loc_minimize(tag) };
-    let proto = rt.intl_state().locale_proto.expect("Locale prototype");
+    let proto = rt.state.intl_locale_proto.expect("Locale prototype");
     Ok(remember(rt, proto, Format::Locale(tag.into())))
 }
 

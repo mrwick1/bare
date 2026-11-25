@@ -2,7 +2,6 @@
 # NAME skips a feature. include:FILE skips a harness file. text:STRING skips source text.
 # allow:NAME permits a feature. An optional path prefix after a space limits that permission.
 # What the runner does not offer (the same as tools/fixtures/js/test262-skip.txt):
-cross-realm
 IsHTMLDDA
 SharedArrayBuffer
 Atomics
@@ -130,3 +129,8 @@ allow:DataView.prototype.getInt32
 allow:DataView.prototype.getUint16
 allow:DataView.prototype.getUint32
 allow:DataView.prototype.setUint8
+
+# The Test262 host supports cross-realm execution in the pinned buffer groups.
+allow:cross-realm test/built-ins/ArrayBuffer/
+allow:cross-realm test/built-ins/DataView/
+allow:cross-realm test/built-ins/TypedArrayConstructors/

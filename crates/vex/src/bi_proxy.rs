@@ -52,7 +52,7 @@ impl Realm {
         base
     }
 
-    fn proxy_target(&mut self, proxy: Obj) -> R<Obj> {
+    pub(crate) fn proxy_target(&mut self, proxy: Obj) -> R<Obj> {
         Self::obj(proxy.slot(&self.shapes, TARGET)).ok_or_else(|| self.error(ErrKind::Type, "Proxy has been revoked"))
     }
 

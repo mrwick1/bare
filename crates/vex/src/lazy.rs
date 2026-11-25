@@ -236,6 +236,7 @@ impl Realm {
         }
         l.tabs.push(Tab { obj: o, ents, base, left: ents.len(), has_same: ents.iter().any(|e| matches!(e.kind, Kind::Same(_) | Kind::SymSame(..))) });
         o.set_flag(F_LAZYTAB);
+        self.note_home(o);
     }
 
     /// A test switch: make every entry of every table now, as an eager install did.
@@ -253,7 +254,8 @@ impl Realm {
     #[inline]
     pub(crate) fn lazy_prep(&mut self, o: Obj, k: Str) {
         if o.has_flag(F_LAZYTAB) {
-            self.lazy_probe(o, k);
+            let home = self.home_realm(o.value());
+            self.in_realm(home, |rt| rt.lazy_probe(o, k));
         }
     }
 
@@ -295,7 +297,8 @@ impl Realm {
     #[inline]
     pub(crate) fn lazy_all(&mut self, o: Obj) {
         if o.has_flag(F_LAZYTAB) {
-            self.lazy_all_slow(o);
+            let home = self.home_realm(o.value());
+            self.in_realm(home, |rt| rt.lazy_all_slow(o));
         }
     }
 

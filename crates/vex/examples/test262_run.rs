@@ -33,6 +33,9 @@ fn run(code: &str, steps: u64) -> Out {
         Err(e) if e.starts_with("SyntaxError: ") => return Out::Threw { name: "SyntaxError".into(), message: e["SyntaxError: ".len()..].into() },
         Err(e) => return Out::Internal(e),
     };
+    if let Err(e) = vm.realm.install_test262_realms(include_str!("test262_host.inc.js")) {
+        return Out::Internal(format!("realm hook installation failed: {}", vm.display(e, false)));
+    }
     vm.fuel = steps;
     let end = |vm: &mut bare_vex::interp::Vm, name: &str, args: &[Value]| -> Result<String, String> {
         let f = vm.global(name);
@@ -127,11 +130,17 @@ impl Ctx {
         if m.flags.iter().any(|f| f == "module") {
             return Some("flag:module".into());
         }
+        let allowed = |f: &str| self.skip.iter().filter_map(|r| r.strip_prefix("allow:")).any(|rule| {
+            match rule.split_once(' ') {
+                Some((feature, prefix)) => feature == f && path.starts_with(prefix),
+                None => rule == f,
+            }
+        });
         for rule in &self.skip {
             let hit = if let Some(f) = rule.strip_prefix("include:") {
                 m.includes.iter().any(|i| i == f)
             } else if let Some(s) = rule.strip_prefix("text:") {
-                src.contains(s)
+                src.contains(s) && (s != "$262.createRealm" || !allowed("cross-realm"))
             } else if rule.starts_with("allow:") {
                 false
             } else {
@@ -141,12 +150,6 @@ impl Ctx {
                 return Some(rule.clone());
             }
         }
-        let allowed = |f: &String| self.skip.iter().filter_map(|r| r.strip_prefix("allow:")).any(|rule| {
-            match rule.split_once(' ') {
-                Some((feature, prefix)) => feature == f && path.starts_with(prefix),
-                None => rule == f,
-            }
-        });
         if self.skip.iter().any(|r| r.starts_with("allow:"))
             && let Some(f) = m.features.iter().find(|f| !allowed(f))
         {

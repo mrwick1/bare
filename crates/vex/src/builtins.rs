@@ -86,6 +86,7 @@ impl Realm {
         let o = Obj::new(&mut self.heap, &self.shapes, self.state.s_native).expect("memory");
         o.set_slot(&self.shapes, 0, Value::int(id as i32));
         o.set_flag(F_CALLABLE | F_NATIVE);
+        self.note_home(o);
         o
     }
 
@@ -186,7 +187,8 @@ impl Realm {
         let Some(id) = self.native_id(callee) else { return Ok(Outcome::Enter { f: callee, this }) };
         let f = self.natives[id].f;
         (self.callee, self.nt) = (callee, Value::UNDEFINED);
-        let v = f(self, this, args)?;
+        let home = self.home_realm(callee);
+        let v = self.in_realm(home, |rt| f(rt, this, args))?;
         match self.tail.take() {
             None => Ok(Outcome::Val(v)),
             Some((f2, this2)) if self.native_id(f2).is_some() => {
@@ -209,7 +211,8 @@ impl Realm {
         }
         let f = self.natives[id].f;
         (self.callee, self.nt) = (callee, nt);
-        let v = f(self, Value::UNDEFINED, args);
+        let home = self.home_realm(callee);
+        let v = self.in_realm(home, |rt| f(rt, Value::UNDEFINED, args));
         self.nt = Value::UNDEFINED;
         v
     }
@@ -283,6 +286,11 @@ impl Realm {
     }
 
     pub(crate) fn make_prototype(&mut self, f: Obj) -> R<Value> {
+        let home = self.home_realm(f.value());
+        self.in_realm(home, |rt| rt.make_function_prototype(f))
+    }
+
+    fn make_function_prototype(&mut self, f: Obj) -> R<Value> {
         let kind = self.function(f.value()).map_or(0, |(ci, _)| self.prog[ci].gen_kind);
         if kind == crate::bytecode::GK_GEN || kind == crate::bytecode::GK_ASYNCGEN {
             // A generator function: its `prototype` inherits `%GeneratorPrototype%` (`%AsyncGeneratorPrototype%`) and has no `constructor`.
@@ -368,8 +376,9 @@ impl Realm {
 
     pub(crate) fn install_builtins(&mut self) {
         // The native that runs a bound function has the index `bound_id`.
-        self.natives.push(Native { f: bound_call, ctor: false, len: 0, name: "" });
-        self.bound_id = 0;
+        if self.natives.is_empty() {
+            self.natives.push(Native { f: bound_call, ctor: false, len: 0, name: "" });
+        }
         let g = self.global;
         self.hidden(g, "globalThis", g.value());
         self.hidden(g, "self", g.value());
@@ -406,6 +415,7 @@ impl Realm {
         proto.set_slot(&self.shapes, 0, Value::int(id as i32));
         // Its metadata is in the table so inherited lookups can also materialize it.
         proto.set_flag(F_CALLABLE | F_NATIVE | F_FNPROPS);
+        self.note_home(proto);
         self.ctor("Function", 1, function_ctor, proto);
         static FUNCTION_PROTO: &[Ent] = &[
             data("length", |_| Value::int(0), A_C),

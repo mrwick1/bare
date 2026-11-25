@@ -152,6 +152,14 @@ pub(crate) struct Promises {
 }
 
 impl Promises {
+    pub(crate) fn swap_intrinsics(&mut self, other: &mut Self) {
+        macro_rules! swap {
+            ($($field:ident),*) => { $(std::mem::swap(&mut self.$field, &mut other.$field);)* };
+        }
+        swap!(proto, shape, ctor, then_fn, ctor_spot, id_resolve, id_reject, id_executor,
+              ids, species_fn, species_spot, agg_proto);
+    }
+
     pub(crate) fn new(heap: &mut Heap, shapes: &mut Shapes, base: ShapeId, k_then: Str, k_state: Str, k_result: Str) -> Promises {
         let proto = Obj::new(heap, shapes, base).expect("memory");
         let shape = Promises::shape_of(shapes, proto, k_state, k_result);

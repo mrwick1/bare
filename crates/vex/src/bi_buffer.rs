@@ -458,7 +458,16 @@ pub(crate) fn instance_proto(rt: &mut Realm) -> R<Obj> {
         return Ok(default);
     }
     let p = rt.get_prop(nt, Key::Name(rt.k_prototype))?;
-    Ok(Realm::obj(p).unwrap_or(default))
+    if let Some(p) = Realm::obj(p) {
+        return Ok(p);
+    }
+    let home = rt.function_realm(nt)?;
+    if home == rt.active_realm() {
+        return Ok(default);
+    }
+    let id = rt.native_id(rt.callee).expect("buffer constructor");
+    let name = rt.natives[id].name;
+    Ok(rt.in_realm(home, |rt| rt.buffer_intrinsic(name)))
 }
 
 pub(crate) fn species(_rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
