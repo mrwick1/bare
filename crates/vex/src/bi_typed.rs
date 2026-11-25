@@ -316,7 +316,7 @@ impl Realm {
     }
 
     pub(crate) fn typed_len(&self, o: Obj) -> usize {
-        View::of(o).and_then(|v| v.len()).unwrap_or(0)
+        View::of(o).and_then(|v| v.len(self)).unwrap_or(0)
     }
 
     pub(crate) fn alloc_typed(&mut self, proto: Obj, elem: Element, len: usize) -> R<Obj> {
@@ -422,7 +422,7 @@ fn require(rt: &mut Realm, this: Value) -> R<View> {
 fn validated(rt: &mut Realm, this: Value) -> R<(View, usize)> {
     let v = require(rt, this)?;
     let n = v
-        .len()
+        .len(rt)
         .ok_or_else(|| rt.error(ErrKind::Type, "typed array is out of bounds"))?;
     Ok((v, n))
 }
@@ -516,17 +516,17 @@ fn buffer(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
 
 fn length(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
     let v = require(rt, this)?;
-    Ok(Realm::num(v.len().unwrap_or(0) as f64))
+    Ok(Realm::num(v.len(rt).unwrap_or(0) as f64))
 }
 
 fn byte_length(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
     let v = require(rt, this)?;
-    Ok(Realm::num((v.len().unwrap_or(0) * v.width()) as f64))
+    Ok(Realm::num((v.len(rt).unwrap_or(0) * v.width()) as f64))
 }
 
 fn byte_offset(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
     let v = require(rt, this)?;
-    Ok(Realm::num(v.len().map_or(0, |_| v.offset) as f64))
+    Ok(Realm::num(v.len(rt).map_or(0, |_| v.offset) as f64))
 }
 
 fn class_name(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
@@ -544,7 +544,7 @@ fn copy(rt: &mut Realm, src: View, start: usize, dst: View, at: usize, count: us
     if src_elem == dst_elem || src_elem.is_big() {
         let w = src.width();
         rt.copy_buffer_bytes(src.buffer, src.offset + start * w, dst.buffer, dst.offset + at * w, count * w);
-    } else if src.buffer == dst.buffer {
+    } else if rt.same_buffer_storage(src.buffer, dst.buffer) {
         let mut values = Vec::new();
         if values.try_reserve_exact(count).is_err() {
             return range(rt, "out of memory");
@@ -615,7 +615,7 @@ fn copy_within(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
 
 fn subarray(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let src = require(rt, this)?;
-    let len = src.len().unwrap_or(0);
+    let len = src.len(rt).unwrap_or(0);
     let start = relative(rt, arg(args, 0), len, 0)?;
     let end_arg = arg(args, 1);
     let end = relative(rt, end_arg, len, len)?;
@@ -656,14 +656,15 @@ fn slice(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
             for i in 0..count {
                 dst.write(rt, i, src.read(rt, start + i).expect("in bounds"));
             }
-        } else if src.buffer == dst.buffer {
+        } else if rt.same_buffer_storage(src.buffer, dst.buffer) {
             // Slice reads and writes in order, even if its species aliases the source.
             let width = src.width();
             let from = src.offset + start * width;
-            let bytes = rt.buffer_bytes_mut(src.buffer).expect("buffer");
-            for i in 0..count * width {
-                bytes[dst.offset + i] = bytes[from + i];
-            }
+            rt.write_buffer(src.buffer, |bytes| {
+                for i in 0..count * width {
+                    bytes[dst.offset + i] = bytes[from + i];
+                }
+            });
         } else {
             copy(rt, src, start, dst, 0, count)?;
         }
@@ -700,7 +701,7 @@ fn search<const REVERSE: bool>(rt: &mut Realm, this: Value, args: &[Value]) -> R
         if from < 0.0 {
             return Ok(miss);
         }
-        (0, (from as usize).saturating_add(1).min(len).min(v.len().unwrap_or(0)))
+        (0, (from as usize).saturating_add(1).min(len).min(v.len(rt).unwrap_or(0)))
     } else {
         (relative(rt, arg(args, 1), len, 0)?, len)
     };
@@ -910,7 +911,7 @@ fn with(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let elem = src.elem.expect("element");
     let index = absolute_index(rt, arg(args, 0), len)?;
     let replacement = elem.convert(rt, arg(args, 1))?;
-    let current = src.len().unwrap_or(0);
+    let current = src.len(rt).unwrap_or(0);
     if index < 0.0 || index >= current as f64 {
         return range(rt, "typed array index is out of bounds");
     }
@@ -941,14 +942,15 @@ fn reverse<const COPY: bool>(rt: &mut Realm, this: Value, _args: &[Value]) -> R<
     };
     if len > 1 {
         let width = dst.width();
-        let bytes = rt.buffer_bytes_mut(dst.buffer).expect("buffer");
-        let bytes = &mut bytes[dst.offset..dst.offset + len * width];
-        for i in 0..len / 2 {
-            let low = i * width;
-            let high = (len - 1 - i) * width;
-            let (left, right) = bytes.split_at_mut(high);
-            left[low..low + width].swap_with_slice(&mut right[..width]);
-        }
+        rt.write_buffer(dst.buffer, |bytes| {
+            let bytes = &mut bytes[dst.offset..dst.offset + len * width];
+            for i in 0..len / 2 {
+                let low = i * width;
+                let high = (len - 1 - i) * width;
+                let (left, right) = bytes.split_at_mut(high);
+                left[low..low + width].swap_with_slice(&mut right[..width]);
+            }
+        });
     }
     Ok(result)
 }
@@ -1046,7 +1048,7 @@ pub(crate) fn iterator_next(rt: &mut Realm, this: Value, _args: &[Value]) -> R<V
     let index = i.as_f64().expect("index");
     let typed = View::of(src).filter(|v| v.elem.is_some());
     let len = if let Some(v) = typed {
-        v.len()
+        v.len(rt)
             .ok_or_else(|| rt.error(ErrKind::Type, "typed array is out of bounds"))? as f64
     } else {
         let length = rt.get_prop(source, Key::Name(rt.k_length))?;

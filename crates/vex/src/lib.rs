@@ -117,3 +117,6 @@ mod error_names_tests;
 #[cfg(test)]
 #[path = "error_stack_tests.rs"]
 mod error_stack_tests;
+
+mod bi_atomics;
+pub mod shared_memory;

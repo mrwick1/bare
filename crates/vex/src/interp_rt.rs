@@ -298,6 +298,7 @@ pub enum ErrKind {
 
 /// The execution state and heap for the active ECMAScript realm.
 pub struct Realm {
+    pub(crate) shared_memory: Option<Box<crate::shared_memory::SharedMemory>>,
     realms: Option<Box<realms::Realms>>,
     pub heap: Heap,
     pub shapes: Shapes,
@@ -619,6 +620,7 @@ impl Realm {
         let epoch = shapes.epoch();
         let mut rt = Realm {
             realms: None,
+            shared_memory: None,
             heap,
             shapes,
             atoms,
@@ -684,12 +686,14 @@ impl Realm {
     pub fn collect(&mut self, fbs: &mut [Feedback], walk_frames: impl FnOnce(&mut Marker)) {
         // A nested call holds the collector (`Realm::call_function`), so no machine is in use now: the idle ones keep their feedback.
         debug_assert!(self.nest == 0, "a collection inside a nested call");
-        let Realm { heap, shapes, atoms, consts, pins, state, pool, pr, api, rx, intl, realms, .. } = self;
+        let Realm { heap, shapes, atoms, consts, pins, state, pool, pr, api, rx, intl, realms, shared_memory, .. } = self;
+        let (shared_blocks, async_waits) = shared_memory.as_deref_mut()
+            .map_or((None, None), |shared| (Some(&mut shared.blocks), shared.waits.as_ref()));
         let mut walk_frames = Some(walk_frames);
         let stats = {
             // The promise state is marked in the walk; its weak list is cleared after the marking.
             struct Rr<'a, F: FnMut(&mut Marker)>(F, &'a mut crate::promise::Promises, &'a mut crate::api::ApiState,
-                &'a mut Option<Box<crate::bi_intl::State>>, &'a mut Option<Box<realms::Realms>>);
+                &'a mut Option<Box<crate::bi_intl::State>>, &'a mut Option<Box<realms::Realms>>, Option<&'a mut crate::shared_memory::SharedBlocks>);
             impl<F: FnMut(&mut Marker)> crate::gc::Roots for Rr<'_, F> {
                 fn walk(&mut self, m: &mut Marker) {
                     (self.0)(m);
@@ -704,6 +708,10 @@ impl Realm {
                     // SAFETY: the list holds cells of this heap that the last collection did not free: a dead one is dropped here.
                     self.1.weak_list().retain(|v| unsafe { live.value(*v) });
                     self.2.prune_owners(live);
+                    if let Some(blocks) = &mut self.5 {
+                        // SAFETY: the entries refer to wrapper objects from this heap.
+                        blocks.retain(|_, (object, _)| unsafe { live.value(*object) });
+                    }
                     if let Some(realms) = self.4 { realms.prune(live); }
                     if let Some(intl) = self.3 {
                         // SAFETY: each key is an object in this heap and is removed before it can be freed.
@@ -714,6 +722,7 @@ impl Realm {
             let roots = |m: &mut Marker| {
                 consts.iter().for_each(|v| m.value(*v));
                 state.mark_roots(m);
+                if let Some(waits) = async_waits { waits.mark(m); }
                 pins.iter().for_each(|s| m.shape(*s));
                 if let Some(rx) = rx {
                     rx.mark(m);
@@ -725,7 +734,7 @@ impl Realm {
                 }
             };
             pr.collected();
-            collect(heap, shapes, atoms, &mut Rr(roots, pr, api, intl, realms))
+            collect(heap, shapes, atoms, &mut Rr(roots, pr, api, intl, realms, shared_blocks))
         };
         self.last_gc = stats;
         self.collections += 1;

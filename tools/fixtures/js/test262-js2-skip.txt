@@ -3,16 +3,11 @@
 # allow:NAME permits a feature. An optional path prefix after a space limits that permission.
 # What the runner does not offer (the same as tools/fixtures/js/test262-skip.txt):
 IsHTMLDDA
-SharedArrayBuffer
-Atomics
-Atomics.waitAsync
 ShadowRealm
 Temporal
 tail-call-optimization
 host-gc-required
-include:atomicsHelper.js
 include:tcoHelper.js
-text:$262.agent
 text:$262.createRealm
 text:$262.evalScript
 text:$262.IsHTMLDDA
@@ -132,5 +127,15 @@ allow:DataView.prototype.setUint8
 
 # The Test262 host supports cross-realm execution in the pinned buffer groups.
 allow:cross-realm test/built-ins/ArrayBuffer/
+allow:cross-realm test/built-ins/Atomics/
 allow:cross-realm test/built-ins/DataView/
+allow:cross-realm test/built-ins/SharedArrayBuffer/
 allow:cross-realm test/built-ins/TypedArrayConstructors/
+
+allow:SharedArrayBuffer
+allow:Atomics
+allow:Atomics.pause
+allow:Atomics.waitAsync
+allow:Float32Array test/built-ins/Atomics/
+allow:Float64Array test/built-ins/Atomics/
+allow:growable-sharedarraybuffer
