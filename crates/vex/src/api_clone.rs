@@ -360,8 +360,7 @@ impl Read<'_> {
             Tag::View => {
                 let (ty, offset, len) = read!(self.input.view());
                 let elem = match ty {
-                    0..=8 => Some(Element::from_id(ty.into())),
-                    9 | 10 => return Err(Error::Abort(Abort::Unsupported("BigInt typed arrays"))),
+                    0..=10 => Some(Element::from_id(ty.into())),
                     11 => None,
                     _ => return Err(damaged()),
                 };

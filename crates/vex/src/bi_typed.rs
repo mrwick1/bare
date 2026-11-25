@@ -24,12 +24,14 @@ pub(crate) enum Element {
     U32,
     F32,
     F64,
+    BI64,
+    BU64,
 }
 
 impl Element {
     pub(crate) fn from_id(id: i32) -> Self {
         use Element::*;
-        [I8, U8, U8C, I16, U16, I32, U32, F32, F64][id as usize]
+        [I8, U8, U8C, I16, U16, I32, U32, F32, F64, BI64, BU64][id as usize]
     }
 
     pub(crate) fn name(self) -> &'static str {
@@ -43,6 +45,8 @@ impl Element {
             Self::U32 => "Uint32Array",
             Self::F32 => "Float32Array",
             Self::F64 => "Float64Array",
+            Self::BI64 => "BigInt64Array",
+            Self::BU64 => "BigUint64Array",
         }
     }
 
@@ -51,11 +55,44 @@ impl Element {
             Self::I8 | Self::U8 | Self::U8C => 1,
             Self::I16 | Self::U16 => 2,
             Self::I32 | Self::U32 | Self::F32 => 4,
-            Self::F64 => 8,
+            Self::F64 | Self::BI64 | Self::BU64 => 8,
         }
     }
 
-    pub(crate) fn read(self, bytes: &[u8], little: bool) -> f64 {
+    pub(crate) fn is_big(self) -> bool {
+        matches!(self, Self::BI64 | Self::BU64)
+    }
+
+    fn big_parts(self, bits: u64) -> (bool, u64) {
+        if self == Self::BI64 && (bits as i64) < 0 {
+            (true, bits.wrapping_neg())
+        } else {
+            (false, bits)
+        }
+    }
+
+    pub(crate) fn value(self, rt: &mut Realm, bits: u64) -> R<Value> {
+        if !self.is_big() {
+            return Ok(Realm::num(f64::from_bits(bits)));
+        }
+        let (neg, mag) = self.big_parts(bits);
+        let limb = [mag];
+        rt.make_bigint(crate::bigint::Sv { neg, mag: &limb[..usize::from(mag != 0)] })
+    }
+
+    pub(crate) fn convert(self, rt: &mut Realm, v: Value) -> R<u64> {
+        if !self.is_big() {
+            return rt.to_number(v).map(f64::to_bits);
+        }
+        let v = rt.to_bigint(v)?;
+        let b = Realm::big_of(v).expect("BigInt conversion");
+        let a = b.bigint();
+        let low = a.mag.first().copied().unwrap_or(0);
+        Ok(if a.neg { low.wrapping_neg() } else { low })
+    }
+
+    /// The Number bits or the full integer bits, according to the element type.
+    pub(crate) fn read(self, bytes: &[u8], little: bool) -> u64 {
         let mut word = [0; 8];
         let n = bytes.len();
         if little {
@@ -71,15 +108,16 @@ impl Element {
             Self::U16 | Self::U32 => bits as f64,
             Self::I32 => bits as i32 as f64,
             Self::F32 => f32::from_bits(bits as u32) as f64,
-            Self::F64 => f64::from_bits(bits),
-        }
+            Self::F64 | Self::BI64 | Self::BU64 => return bits,
+        }.to_bits()
     }
 
-    pub(crate) fn write(self, bytes: &mut [u8], n: f64, little: bool) {
+    pub(crate) fn write(self, bytes: &mut [u8], bits: u64, little: bool) {
+        let n = f64::from_bits(bits);
         let bits = match self {
             Self::U8C => n.clamp(0.0, 255.0).round_ties_even() as u64,
             Self::F32 => (n as f32).to_bits() as u64,
-            Self::F64 => n.to_bits(),
+            Self::F64 | Self::BI64 | Self::BU64 => bits,
             _ => Realm::to_int32(n) as u64,
         };
         let word = bits.to_le_bytes();
@@ -103,6 +141,8 @@ impl Element {
             Self::U32 => Elem::U32,
             Self::F32 => Elem::F32,
             Self::F64 => Elem::F64,
+            Self::BI64 => Elem::BI64,
+            Self::BU64 => Elem::BU64,
         }
     }
 
@@ -118,7 +158,9 @@ impl Element {
             Elem::U32 => Self::U32,
             Elem::F32 => Self::F32,
             Elem::F64 => Self::F64,
-            Elem::BI64 | Elem::BU64 | Elem::Data => return None,
+            Elem::BI64 => Self::BI64,
+            Elem::BU64 => Self::BU64,
+            Elem::Data => return None,
         })
     }
 }
@@ -204,13 +246,14 @@ pub(crate) fn numeric_key(key: Key) -> Option<Option<usize>> {
 }
 
 impl Realm {
-    pub(crate) fn typed_get(&self, o: Obj, i: usize) -> Option<Value> {
-        View::of(o)?.read(self, i).map(Realm::num)
+    pub(crate) fn typed_get(&mut self, o: Obj, i: usize) -> R<Option<Value>> {
+        let view = View::of(o).expect("typed array");
+        view.read(self, i).map(|bits| view.elem.expect("element").value(self, bits)).transpose()
     }
 
     pub(crate) fn typed_set(&mut self, o: Obj, i: Option<usize>, v: Value) -> R<()> {
         let view = View::of(o).expect("typed array");
-        let n = self.to_number(v)?;
+        let n = view.elem.expect("element").convert(self, v)?;
         if let Some(i) = i {
             view.write(self, i, n);
         }
@@ -341,11 +384,20 @@ fn for_species(rt: &mut Realm, this: Value, elem: Element, len: usize) -> R<(Val
         let o = rt.alloc_typed(proto, elem, len)?;
         return Ok((o.value(), View::of(o).expect("typed array")));
     }
-    make_len(rt, c, len)
+    let (result, view) = make_len(rt, c, len)?;
+    same_content(rt, elem, view.elem.expect("element"))?;
+    Ok((result, view))
+}
+
+fn same_content(rt: &mut Realm, src: Element, dst: Element) -> R<()> {
+    if src.is_big() != dst.is_big() {
+        return rt.type_error("cannot mix BigInt and Number typed arrays");
+    }
+    Ok(())
 }
 
 fn finish(rt: &mut Realm, dst: View, i: usize, value: Value) -> R<()> {
-    let n = rt.to_number(value)?;
+    let n = dst.elem.expect("element").convert(rt, value)?;
     dst.write(rt, i, n);
     Ok(())
 }
@@ -412,10 +464,13 @@ fn class_name(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
 }
 
 fn copy(rt: &mut Realm, src: View, start: usize, dst: View, at: usize, count: usize) -> R<()> {
+    let src_elem = src.elem.expect("element");
+    let dst_elem = dst.elem.expect("element");
+    same_content(rt, src_elem, dst_elem)?;
     if count == 0 {
         return Ok(());
     }
-    if src.elem == dst.elem {
+    if src_elem == dst_elem || src_elem.is_big() {
         let w = src.width();
         rt.copy_buffer_bytes(src.buffer, src.offset + start * w, dst.buffer, dst.offset + at * w, count * w);
     } else if src.buffer == dst.buffer {
@@ -488,7 +543,8 @@ fn subarray(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
         return rt.new_view(proto, v).map(Obj::value);
     }
     let v = construct(rt, c, &args[..if n.is_some() { 3 } else { 2 }])?;
-    validated(rt, v)?;
+    let (dst, _) = validated(rt, v)?;
+    same_content(rt, src.elem.expect("element"), dst.elem.expect("element"))?;
     Ok(v)
 }
 
@@ -522,7 +578,7 @@ fn slice(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
 
 fn fill(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let (v, len) = validated(rt, this)?;
-    let n = rt.to_number(arg(args, 0))?;
+    let n = v.elem.expect("element").convert(rt, arg(args, 0))?;
     let start = relative(rt, arg(args, 1), len, 0)?;
     let end = relative(rt, arg(args, 2), len, len)?;
     let (_, len) = validated(rt, this)?;
@@ -541,12 +597,23 @@ fn search(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
         return Ok(miss);
     }
     let start = relative(rt, arg(args, 1), len, 0)?;
+    let elem = v.elem.expect("element");
+    let big = Realm::big_of(target);
     for i in start..len {
         let n = v.read(rt, i);
-        let found = if let Some(n) = n {
-            target
-                .as_f64()
-                .is_some_and(|x| n == x || (includes && n.is_nan() && x.is_nan()))
+        let found = if let Some(bits) = n {
+            if elem.is_big() {
+                let (neg, mag) = elem.big_parts(bits);
+                big.is_some_and(|b| {
+                    let a = b.bigint();
+                    a.neg == neg && a.mag.len() <= 1 && a.mag.first().copied().unwrap_or(0) == mag
+                })
+            } else {
+                let n = f64::from_bits(bits);
+                target
+                    .as_f64()
+                    .is_some_and(|x| n == x || (includes && n.is_nan() && x.is_nan()))
+            }
         } else {
             includes && target.is_undefined()
         };
@@ -564,12 +631,18 @@ fn join(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let sep = rt.flat(sep);
     let units = sep.chars().expect("flat string");
     let mut out = Vec::new();
+    let elem = v.elem.expect("element");
     for i in 0..len {
         if i != 0 {
             out.extend(units.units());
         }
-        if let Some(n) = v.read(rt, i) {
-            out.extend(Realm::num_to_string(n).encode_utf16());
+        if let Some(bits) = v.read(rt, i) {
+            let text = match elem {
+                Element::BI64 => (bits as i64).to_string(),
+                Element::BU64 => bits.to_string(),
+                _ => Realm::num_to_string(f64::from_bits(bits)),
+            };
+            out.extend(text.encode_utf16());
         }
     }
     Ok(rt.make_units(&out))
@@ -582,8 +655,11 @@ fn callback(rt: &mut Realm, f: Value) -> R<()> {
     Ok(())
 }
 
-fn item(rt: &Realm, v: View, i: usize) -> Value {
-    v.read(rt, i).map_or(Value::UNDEFINED, Realm::num)
+fn item(rt: &mut Realm, v: View, i: usize) -> R<Value> {
+    match v.read(rt, i) {
+        Some(bits) => v.elem.expect("element").value(rt, bits),
+        None => Ok(Value::UNDEFINED),
+    }
 }
 
 fn map(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
@@ -592,7 +668,8 @@ fn map(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     callback(rt, cb)?;
     let (result, dst) = for_species(rt, this, src.elem.expect("typed array"), len)?;
     for i in 0..len {
-        let v = rt.call_function(cb, arg(args, 1), &[item(rt, src, i), Realm::num(i as f64), this])?;
+        let element = item(rt, src, i)?;
+        let v = rt.call_function(cb, arg(args, 1), &[element, Realm::num(i as f64), this])?;
         finish(rt, dst, i, v)?;
     }
     Ok(result)
@@ -603,7 +680,8 @@ fn for_each(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let cb = arg(args, 0);
     callback(rt, cb)?;
     for i in 0..len {
-        rt.call_function(cb, arg(args, 1), &[item(rt, src, i), Realm::num(i as f64), this])?;
+        let element = item(rt, src, i)?;
+        rt.call_function(cb, arg(args, 1), &[element, Realm::num(i as f64), this])?;
     }
     Ok(Value::UNDEFINED)
 }
@@ -614,11 +692,12 @@ fn reduce(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     callback(rt, cb)?;
     let (mut acc, start) = match args.get(1) {
         Some(&x) => (x, 0),
-        None if len != 0 => (item(rt, src, 0), 1),
+        None if len != 0 => (item(rt, src, 0)?, 1),
         None => return rt.type_error("reduce of an empty typed array with no initial value"),
     };
     for i in start..len {
-        acc = rt.call_function(cb, Value::UNDEFINED, &[acc, item(rt, src, i), Realm::num(i as f64), this])?;
+        let element = item(rt, src, i)?;
+        acc = rt.call_function(cb, Value::UNDEFINED, &[acc, element, Realm::num(i as f64), this])?;
     }
     Ok(acc)
 }
@@ -627,11 +706,11 @@ fn at(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let (v, len) = validated(rt, this)?;
     let i = integer(rt, arg(args, 0))?;
     let i = if i < 0.0 { i + len as f64 } else { i };
-    Ok(if 0.0 <= i && i < len as f64 {
+    if 0.0 <= i && i < len as f64 {
         item(rt, v, i as usize)
     } else {
-        Value::UNDEFINED
-    })
+        Ok(Value::UNDEFINED)
+    }
 }
 
 fn sort(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
@@ -640,16 +719,24 @@ fn sort(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
         callback(rt, cb)?;
     }
     let (v, len) = validated(rt, this)?;
+    let elem = v.elem.expect("element");
     let mut values = Vec::new();
     if values.try_reserve_exact(len).is_err() {
         return range(rt, "out of memory");
     }
     values.extend((0..len).map(|i| v.read(rt, i).expect("in bounds")));
     if cb.is_undefined() {
-        values.sort_unstable_by(|a, b| match (a.is_nan(), b.is_nan()) {
-            (false, false) => a.total_cmp(b),
-            (a, b) => a.cmp(&b),
-        });
+        match elem {
+            Element::BI64 => values.sort_unstable_by_key(|&bits| bits as i64),
+            Element::BU64 => values.sort_unstable(),
+            _ => values.sort_unstable_by(|&a, &b| {
+                let (a, b) = (f64::from_bits(a), f64::from_bits(b));
+                match (a.is_nan(), b.is_nan()) {
+                    (false, false) => a.total_cmp(&b),
+                    (a, b) => a.cmp(&b),
+                }
+            }),
+        }
     } else {
         // A comparator can throw or be inconsistent. Merge runs without asking
         // Rust's sort to impose an ordering that the callback may not provide.
@@ -664,7 +751,9 @@ fn sort(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
                 let (left, right) = pair.split_at(width.min(pair.len()));
                 let (mut i, mut j) = (0, 0);
                 while i < left.len() && j < right.len() {
-                    let order = rt.call_function(cb, Value::UNDEFINED, &[Realm::num(left[i]), Realm::num(right[j])])?;
+                    let a = elem.value(rt, left[i])?;
+                    let b = elem.value(rt, right[j])?;
+                    let order = rt.call_function(cb, Value::UNDEFINED, &[a, b])?;
                     if rt.to_number(order)? > 0.0 {
                         merged.push(right[j]);
                         j += 1;
@@ -727,7 +816,7 @@ pub(crate) fn iterator_next(rt: &mut Realm, this: Value, _args: &[Value]) -> R<V
         i
     } else {
         let element = if let Some(v) = typed {
-            item(rt, v, index as usize)
+            item(rt, v, index as usize)?
         } else {
             let key = rt.key_of(i)?;
             rt.get_prop(source, key)?
@@ -736,3 +825,7 @@ pub(crate) fn iterator_next(rt: &mut Realm, this: Value, _args: &[Value]) -> R<V
     };
     Ok(rt.iter_result(value, false))
 }
+
+#[cfg(test)]
+#[path = "bi_bigint_typed_tests.rs"]
+mod bigint_tests;
