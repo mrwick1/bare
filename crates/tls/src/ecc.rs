@@ -13,7 +13,7 @@
 //! One exception: `p256_public` and `p256_shared` do P-256 ECDH for a TLS 1.2 client. They multiply a SECRET
 //! scalar with the same variable-time code. The scalar is a fresh random value for one handshake and is dropped
 //! after it, so no attacker can measure many runs against one secret. That is the only reason this is acceptable.
-//! There is no signing.
+//! `sign` (ECDSA, for Web Crypto) and `public_from_scalar` use the same variable-time code with a long-lived secret: read their docs.
 //!
 //! What `verify` checks, in this order:
 //! 1. The digest is 32 bytes (SHA-256) or 48 bytes (SHA-384). Nothing else is accepted.
@@ -119,6 +119,33 @@ pub fn p256_shared(scalar: &[u8; 32], peer: &[u8]) -> Result<[u8; 32], Error> {
         out[8 * i..8 * i + 8].copy_from_slice(&limb.to_be_bytes());
     }
     Ok(out)
+}
+
+/// The public key `04 || X || Y` of the private scalar `d` (`curve.size()` bytes, `1 <= d < n`). Variable time, like `p256_public`.
+pub fn public_from_scalar(curve: Curve, d: &[u8]) -> Option<Vec<u8>> {
+    match curve {
+        Curve::P256 => P256.public(d),
+        Curve::P384 => P384.public(d),
+    }
+}
+
+/// An ECDSA signature `r || s` over `digest` of any length (the leftmost bits are used, as in `verify`), with the private scalar `d`
+/// and the nonce `k` (both `curve.size()` bytes, in `1..n`). The caller draws `k` from a secure random source and never reuses it.
+/// `None` if `d` or `k` is out of range, or `r` or `s` is 0 (then draw a new `k`). Variable time: a nonce that leaks through timing
+/// leaks the private key, so use this only where no attacker can time many signatures.
+pub fn sign(curve: Curve, d: &[u8], digest: &[u8], k: &[u8]) -> Option<Vec<u8>> {
+    match curve {
+        Curve::P256 => P256.sign(d, digest, k),
+        Curve::P384 => P384.sign(d, digest, k),
+    }
+}
+
+/// Is `d` a valid private scalar: `curve.size()` bytes, in `1..n`?
+pub fn valid_scalar(curve: Curve, d: &[u8]) -> bool {
+    match curve {
+        Curve::P256 => P256.scalar(d).is_some(),
+        Curve::P384 => P384.scalar(d).is_some(),
+    }
 }
 
 // ---------------------------------------------------------------------------------------
@@ -602,6 +629,48 @@ impl<const N: usize> Params<N> {
         if is_zero(&k) { None } else { Some(k) }
     }
 
+    /// A scalar of exactly `8 N` big-endian bytes in `1..n`.
+    fn scalar(&self, b: &[u8]) -> Option<Limbs<N>> {
+        let k = from_be::<N>(b);
+        (b.len() == 8 * N && !is_zero(&k) && !geq(&k, &self.n.m)).then_some(k)
+    }
+
+    /// The leftmost `8 N` bytes of the digest as a number mod n; a shorter digest is padded with zeros on the left. One
+    /// subtraction reduces it, because e < 2^(8 N) < 2n for both orders.
+    fn hash_scalar(&self, digest: &[u8]) -> Limbs<N> {
+        let size = 8 * N;
+        let used = &digest[..digest.len().min(size)];
+        let mut padded = [0u8; 48];
+        padded[size - used.len()..size].copy_from_slice(used);
+        let e = from_be::<N>(&padded[..size]);
+        if geq(&e, &self.n.m) { sub_raw(&e, &self.n.m).0 } else { e }
+    }
+
+    fn generator(&self) -> Point<N> {
+        Point { x: self.p.to_mont(&self.gx), y: self.p.to_mont(&self.gy), z: self.p.one }
+    }
+
+    fn public(&self, d: &[u8]) -> Option<Vec<u8>> {
+        let [x, y] = self.mul_affine(&self.scalar(d)?, &self.generator())?;
+        let mut out = vec![4u8];
+        out.extend(x.iter().rev().chain(y.iter().rev()).flat_map(|l| l.to_be_bytes()));
+        Some(out)
+    }
+
+    fn sign(&self, d: &[u8], digest: &[u8], k: &[u8]) -> Option<Vec<u8>> {
+        let (d, k) = (self.scalar(d)?, self.scalar(k)?);
+        let n = &self.n;
+        let [x, _] = self.mul_affine(&k, &self.generator())?;
+        let r = if geq(&x, &n.m) { sub_raw(&x, &n.m).0 } else { x };
+        // s = (e + r d) / k mod n. `mul(a, b)` is a b / R, so a Montgomery-form factor gives a plain product.
+        let rd = n.mul(&n.to_mont(&r), &d);
+        let s = n.mul(&n.add(&self.hash_scalar(digest), &rd), &n.inv(&n.to_mont(&k)));
+        if is_zero(&r) || is_zero(&s) {
+            return None;
+        }
+        Some(r.iter().rev().chain(s.iter().rev()).flat_map(|l| l.to_be_bytes()).collect())
+    }
+
     fn verify(&self, key: &[u8], digest: &[u8], sig: &[u8]) -> Result<(), Error> {
         let size = 8 * N;
         let f = &self.p;
@@ -618,17 +687,7 @@ impl<const N: usize> Params<N> {
             return Err(Error::BadSignature);
         }
 
-        // e = the leftmost `size` bytes of the digest as a number, reduced mod n. The
-        // digest is 32 or 48 bytes (checked by the caller) and `size` is 32 or 48. A shorter
-        // digest is padded with zeros on the left. One subtraction reduces it, because
-        // e < 2^(8*size) < 2n for both orders.
-        let used = &digest[..digest.len().min(size)];
-        let mut padded = [0u8; 48];
-        padded[size - used.len()..size].copy_from_slice(used);
-        let mut e = from_be::<N>(&padded[..size]);
-        if geq(&e, &n.m) {
-            e = sub_raw(&e, &n.m).0;
-        }
+        let e = self.hash_scalar(digest);
 
         // u1 = e/s and u2 = r/s mod n. `mul(e, w)` with w = (1/s) in Montgomery form
         // gives the plain product e*(1/s), so the scalars come out in plain form.
@@ -1107,5 +1166,33 @@ mod tests {
         // The shared secret of two fresh pairs agrees.
         let (a, b) = ([0x31u8; 32], [0x77u8; 32]);
         assert_eq!(p256_shared(&a, &p256_public(&b).unwrap()), p256_shared(&b, &p256_public(&a).unwrap()));
+    }
+}
+
+#[cfg(test)]
+mod sign_tests {
+    use super::*;
+
+    /// A signature made here verifies with `verify`, for both curves and for digests of 20 and 64 bytes cut or padded to the curve size.
+    #[test]
+    fn sign_then_verify() {
+        for curve in [Curve::P256, Curve::P384] {
+            let n = curve.size();
+            let d: Vec<u8> = (0..n).map(|i| i as u8 + 1).collect();
+            let k: Vec<u8> = (0..n).map(|i| 0x80 ^ i as u8).collect();
+            let q = public_from_scalar(curve, &d).unwrap();
+            assert_eq!(q.len(), 1 + 2 * n);
+            for len in [32, 48] {
+                let digest: Vec<u8> = (0..len).map(|i| i as u8 * 3).collect();
+                let sig = sign(curve, &d, &digest, &k).unwrap();
+                assert_eq!(verify(curve, &q, &digest, &sig), Ok(()));
+                let mut bad = digest.clone();
+                bad[0] ^= 1;
+                assert_eq!(verify(curve, &q, &bad, &sig), Err(Error::BadSignature));
+            }
+            assert!(sign(curve, &vec![0; n], &[1; 32], &k).is_none());
+            assert!(sign(curve, &d, &[1; 32], &vec![0xff; n]).is_none());
+            assert!(!valid_scalar(curve, &d[1..]));
+        }
     }
 }
