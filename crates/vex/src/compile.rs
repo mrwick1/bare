@@ -953,8 +953,7 @@ impl<'a> Fc<'a> {
         code.eval_scopes = self.eval_scopes.into_boxed_slice();
         code.fn_len = self.fn_len;
         if let Some(id) = self.fn_id {
-            let f = self.facts.get(id);
-            code.span = (f.start, f.end);
+            code.span = text_span(self.facts.get(id));
         }
         code.strict = self.strict;
         code.noctor = self.noctor;
@@ -1025,6 +1024,12 @@ pub struct ScriptMode {
     pub eval: bool,
     /// The code of an event handler (`Input::scoped`), for the functions inside it too.
     pub scoped: bool,
+}
+
+/// The span of a function's source text for `Function.prototype.toString`. The pre-parser starts a method, a getter, a setter and a
+/// class constructor at its `(`, not at its name, so they get `(0, 0)`: their text stays `[native code]`.
+pub(crate) fn text_span(f: &facts::FnFacts) -> (u32, u32) {
+    if matches!(f.kind, FuncKind::Normal | FuncKind::Arrow) { (f.start, f.end) } else { (0, 0) }
 }
 
 /// Compile the top level of a script (`parse_script_lazy`). Its `var`, `let`, `const` and functions are globals.

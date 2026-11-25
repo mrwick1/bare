@@ -23,6 +23,25 @@ fn script_functions_give_their_source_text() {
 }
 
 #[test]
+fn dynamic_functions_are_named_anonymous() {
+    check(&[
+        ("var r = new Function('a', 'b', 'return a + b').toString();", "r", "function anonymous(a,b\n) {\nreturn a + b\n}"),
+        ("var r = Function('return 1') + '';", "r", "function anonymous(\n) {\nreturn 1\n}"),
+    ]);
+}
+
+#[test]
+fn methods_and_prelude_built_ins_keep_the_native_text() {
+    // The pre-parser starts a method at its `(`, so a method has no source text yet. A built-in that the prelude writes in
+    // JavaScript (`forEach`) is native code to the page.
+    check(&[
+        ("var o = { m(x) { return x; }, get g() { return 1; } }; var r = String(o.m) + '|' + String(Object.getOwnPropertyDescriptor(o, 'g').get);", "r",
+         "function m() { [native code] }|function get g() { [native code] }"),
+        ("class K { constructor() {} } var r = String(K) + '|' + String([].forEach);", "r", "function K() { [native code] }|function forEach() { [native code] }"),
+    ]);
+}
+
+#[test]
 fn natives_and_bound_functions_keep_the_native_text() {
     check(&[
         ("var t = Function.prototype.toString; var r = [t.call(Object), t.call(Math.max), t.call((function B() {}).bind(null))].join('|');", "r",

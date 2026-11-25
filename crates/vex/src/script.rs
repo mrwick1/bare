@@ -46,7 +46,7 @@ fn stub(atoms: &SharedAtoms, f: &FnFacts, name: Option<&str>) -> Result<Code, St
     c.words = vec![w[!kept as usize]];
     c.flags = if kept { 0 } else { CF_ARGS };
     c.fn_len = f.length.min(u16::MAX as u32) as u16;
-    c.span = (f.start, f.end);
+    c.span = crate::compile::text_span(f);
     c.noctor = matches!(f.kind, crate::ast::FuncKind::Arrow | crate::ast::FuncKind::Method | crate::ast::FuncKind::Getter | crate::ast::FuncKind::Setter);
     // `prototype` of a generator function inherits the generator prototype, and `new` on it throws: both are read before the first call.
     if f.mode == crate::ast::FuncMode::Generator {
@@ -122,6 +122,14 @@ impl Lazy {
         self.wait(u, pending);
     }
 
+    /// The unit of the code `ci`: its stub's unit, else the last span at or before it.
+    fn unit_of(&self, ci: usize) -> Option<usize> {
+        match self.pending.binary_search_by_key(&ci, |w| w.ci) {
+            Ok(at) => Some(self.pending[at].unit),
+            Err(_) => Some(self.spans.get(self.spans.partition_point(|&(b, _)| b <= ci).checked_sub(1)?)?.1),
+        }
+    }
+
     fn wait(&mut self, unit: usize, pending: impl IntoIterator<Item = (usize, Child)>) {
         self.pending.extend(pending.into_iter().map(|(ci, ch)| Wait { ci, unit, child: Some(ch) }));
         debug_assert!(self.pending.windows(2).all(|w| w[0].ci < w[1].ci), "the stubs are added in the order of their indexes");
@@ -167,11 +175,13 @@ impl LazyCompile for Lazy {
     }
 
     fn source_of(&self, ci: usize) -> Option<&str> {
-        let u = match self.pending.binary_search_by_key(&ci, |w| w.ci) {
-            Ok(at) => self.pending[at].unit,
-            Err(_) => self.spans.get(self.spans.partition_point(|&(b, _)| b <= ci).checked_sub(1)?)?.1,
-        };
+        let u = self.unit_of(ci)?;
         Some(self.units[u].source.as_deref().unwrap_or(PRELUDE))
+    }
+
+    fn page_source_of(&self, ci: usize) -> Option<&str> {
+        let u = &self.units[self.unit_of(ci)?];
+        if u.pre { None } else { u.source.as_deref() }
     }
 
     /// A stub for the top-level function `top` of `prelude.js`, added at the end of `codes`. The unit of the prelude is made here, at the first
