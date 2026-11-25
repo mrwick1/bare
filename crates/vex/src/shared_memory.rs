@@ -75,7 +75,7 @@ impl SharedBuffer {
         state.waiters.entry(offset).or_default().push_back(ticket.clone());
         let start = Instant::now();
         let result = loop {
-            if control.is_some_and(Test262AgentControl::stopped) { break None; }
+            if control.is_some_and(Test262AgentControl::is_stopped) { break None; }
             if ticket.ready.load(Ordering::Relaxed) { break Some("ok"); }
             if let Some(timeout) = timeout {
                 let Some(left) = timeout.checked_sub(start.elapsed()) else { break Some("timed-out") };
@@ -133,7 +133,7 @@ impl Test262AgentControl {
         }
     }
 
-    fn stopped(&self) -> bool {
+    pub fn is_stopped(&self) -> bool {
         self.0.stopped.load(Ordering::Acquire)
     }
 }

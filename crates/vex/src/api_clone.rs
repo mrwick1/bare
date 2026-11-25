@@ -497,6 +497,19 @@ impl Read<'_> {
 }
 
 pub(super) fn load<'s>(rt: &mut Realm, c: &mut Cloned, host: &mut dyn CloneHost<Realm>) -> R<'s, CloneIn<'s>> {
+    let refused = c.moved().iter().any(|part| {
+        let Moved::Data(data) = part else { return false };
+        data.downcast_ref::<SharedRecord>().is_some_and(|record| {
+            host.shared_buffer_cluster() != Some(&record.cluster) || rt.shared_memory.is_none()
+        })
+    });
+    if refused {
+        // Keep the record intact so the receiver can release transferred ports.
+        return Err(enter(rt, |s| match host.data_clone_error(s, Refused::Object) {
+            Error::Throw(l) => Ok(s.engine().a_at(l)),
+            Error::Abort(a) => Err(a),
+        }).map_or_else(Error::Abort, |v| Error::Throw(rt.a_push(v))));
+    }
     let mut payloads = Vec::new();
     let mut data = Vec::new();
     let slots: Vec<_> = c.take_moved().into_iter().map(|item| match item {
@@ -509,16 +522,6 @@ pub(super) fn load<'s>(rt: &mut Realm, c: &mut Cloned, host: &mut dyn CloneHost<
         Vec::new()
     } else {
         enter(rt, |s| {
-            for d in &data {
-                if let Some(record) = d.downcast_ref::<SharedRecord>()
-                    && (host.shared_buffer_cluster() != Some(&record.cluster) || s.engine().shared_memory.is_none())
-                {
-                    return Err(match host.data_clone_error(s, Refused::Object) {
-                        Error::Throw(l) => Ok(s.engine().a_at(l)),
-                        Error::Abort(a) => Err(a),
-                    });
-                }
-            }
             let mut out = Vec::with_capacity(data.len());
             for d in &data {
                 let value = if let Some(record) = d.downcast_ref::<SharedRecord>() {

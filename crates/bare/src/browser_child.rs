@@ -91,10 +91,10 @@ use crate::js_limits::HeapLimits;
 use bare_net::http::Client;
 use bare_net::parallel::Task;
 use bare_url::Url;
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, atomic::{AtomicUsize, Ordering::Relaxed}};
 
 /// The index of a child page in its parent.
 pub(crate) type FrameId = u32;
@@ -123,7 +123,7 @@ pub(crate) struct Cfg {
     fetch: FetchLimits,
     browser: BrowserLimits,
     /// Child pages that are live in the top page (all depths).
-    total: Rc<Cell<usize>>,
+    total: Arc<AtomicUsize>,
     /// 0 for the top page.
     depth: u8,
     /// The site of the top page: the site for the cookies of a frame load.
@@ -131,6 +131,28 @@ pub(crate) struct Cfg {
     /// The messages of the ports that are split across the pages of this top page (`browser_port_hub.rs`).
     hub: Arc<PortHub>,
 }
+
+impl Cfg {
+    fn fork(&self) -> Self {
+        Self {
+            env: self.env.clone(), client: self.client.fork(), page: self.page.clone(),
+            fetch: self.fetch, browser: self.browser, total: self.total.clone(),
+            depth: self.depth, top_site: self.top_site.clone(), hub: self.hub.clone(),
+        }
+    }
+
+    fn release(&self, n: usize) {
+        let _ = self.total.fetch_update(Relaxed, Relaxed, |live| Some(live.saturating_sub(n)));
+    }
+
+    fn reserve(&self, limit: usize) -> bool {
+        self.total.fetch_update(Relaxed, Relaxed, |n| (n < limit).then(|| n + 1)).is_ok()
+    }
+}
+
+#[path = "browser_child_thread.rs"]
+mod threaded;
+use threaded::{Mailbox, ThreadWorker};
 
 /// What a slot loads: the document of an iframe element, or the script of a dedicated worker (`browser_worker.rs`).
 #[derive(Clone, Copy, PartialEq)]
@@ -157,6 +179,7 @@ enum State<E: Eng> {
     /// A worker: its document is made here, and its script loads in it.
     Start,
     Run(Box<Browser<E>>),
+    Threaded(ThreadWorker),
     /// The load failed, the child stopped, or the download was saved. Nothing runs.
     Empty,
 }
@@ -199,6 +222,7 @@ pub(crate) struct Kids<E: Eng> {
     common_held: RefCell<Vec<bare_js_api::Persistent>>,
     /// Messages to other pages, in post order.
     outbox: RefCell<Vec<Out>>,
+    worker_parent: OnceCell<Arc<Mailbox>>,
     pub(crate) common: Cell<Option<Common<E>>>,
     /// The number of this page in the port hub (0: the top page).
     pub(crate) page: Cell<u32>,
@@ -214,7 +238,7 @@ impl<E: Eng> Drop for Kids<E> {
     fn drop(&mut self) {
         if let Some(cfg) = self.cfg.get_mut() {
             let live = self.slots.get_mut().iter().flatten().count();
-            cfg.total.set(cfg.total.get().saturating_sub(live));
+            cfg.release(live);
             // The page ends: its ends go, and the ports of the messages that never left it.
             cfg.hub.drop_page(self.page.get());
             for m in self.outbox.get_mut().drain(..) {
@@ -280,7 +304,9 @@ impl<E: Eng> Kids<E> {
     /// Does a wire wait in the port hub?
     #[inline]
     fn hub_busy(&self) -> bool {
-        self.cfg.borrow().as_ref().is_some_and(|c| c.hub.busy())
+        self.cfg.borrow().as_ref().is_some_and(|c| {
+            c.hub.busy() && (self.worker_parent.get().is_none() || c.hub.has_pending_for(self.page.get()))
+        })
     }
 
     pub(crate) fn hub(&self) -> Option<Arc<PortHub>> {
@@ -319,11 +345,16 @@ impl<E: Eng> Kids<E> {
     }
 
     pub(crate) fn send(&self, m: Out) {
-        self.outbox.borrow_mut().push(m);
+        if m.to == Side::Parent && let Some(parent) = self.worker_parent.get() {
+            parent.push(m);
+            bare_net::parallel::wake();
+        } else {
+            self.outbox.borrow_mut().push(m);
+        }
     }
 
     pub(crate) fn outbox_len(&self) -> usize {
-        self.outbox.borrow().len()
+        self.outbox.borrow().len() + self.worker_parent.get().map_or(0, |m| m.len())
     }
 
     /// Take the messages of the outbox for which `f` is true, in order.
@@ -364,6 +395,14 @@ impl<E: Eng> Kids<E> {
         self.slots.borrow().iter().position(|s| s.as_ref().is_some_and(|s| s.of == Of::Frame(n))).map(|i| i as FrameId)
     }
 
+    #[cfg(test)]
+    pub(crate) fn threaded_status(&self) -> Option<Arc<std::sync::atomic::AtomicU8>> {
+        self.kids.borrow().iter().flatten().find_map(|child| match &child.state {
+            State::Threaded(worker) => Some(worker.status_handle()),
+            _ => None,
+        })
+    }
+
     /// The child page of the `Worker` object `o`.
     pub(crate) fn worker_id(&self, o: E::Obj) -> Option<FrameId> {
         self.slots.borrow().iter().position(|s| s.as_ref().is_some_and(|s| matches!(s.of, Of::Worker(w, _) if w == o))).map(|i| i as FrameId)
@@ -386,10 +425,9 @@ impl<E: Eng> Kids<E> {
     pub(crate) fn add_worker(&self, o: E::Obj, url: String, module: bool) -> Option<FrameId> {
         let cfg = self.cfg()?;
         let lim = cfg.browser;
-        if cfg.depth as usize >= lim.max_child_depth || cfg.total.get() >= lim.max_child_pages {
+        if cfg.depth as usize >= lim.max_child_depth || !cfg.reserve(lim.max_child_pages) {
             return None;
         }
-        cfg.total.set(cfg.total.get() + 1);
         let mut slots = self.slots.borrow_mut();
         slots.push(Some(Slot { of: Of::Worker(o, module), url, dirty: true, win: None }));
         Some((slots.len() - 1) as FrameId)
@@ -400,8 +438,13 @@ impl<E: Eng> Kids<E> {
         let Some(cfg) = self.cfg() else { return };
         if let Some(s) = self.slots.borrow_mut().get_mut(id as usize) {
             if s.take().is_some() {
-                cfg.total.set(cfg.total.get().saturating_sub(1));
+                cfg.release(1);
             }
+        }
+        if let Some(child) = self.kids.borrow_mut().get_mut(id as usize)
+            && child.as_ref().is_some_and(|child| matches!(child.state, State::Threaded(_)))
+        {
+            *child = None;
         }
     }
 
@@ -411,7 +454,7 @@ impl<E: Eng> Kids<E> {
             return;
         }
         let env = self.env.borrow_mut().take().unwrap_or_default();
-        *self.cfg.borrow_mut() = Some(Rc::new(Cfg { env, client, page, fetch, browser: dom_lim, total: Rc::new(Cell::new(0)), depth: 0, top_site, hub: Arc::default() }));
+        *self.cfg.borrow_mut() = Some(Rc::new(Cfg { env, client, page, fetch, browser: dom_lim, total: Arc::new(AtomicUsize::new(0)), depth: 0, top_site, hub: Arc::default() }));
     }
 
     pub(crate) fn set_env(&self, env: KidEnv) {
@@ -432,15 +475,14 @@ impl<E: Eng> Kids<E> {
             }
             (Some(i), None) => {
                 slots[i] = None;
-                cfg.total.set(cfg.total.get().saturating_sub(1));
+                cfg.release(1);
             }
             (None, Some(url)) => {
                 let lim = cfg.browser;
-                if cfg.depth as usize >= lim.max_child_depth || cfg.total.get() >= lim.max_child_pages {
+                if cfg.depth as usize >= lim.max_child_depth || !cfg.reserve(lim.max_child_pages) {
                     crate::browser_console::push_text(d, it, ConsoleLevel::Warn, "An iframe was not loaded: the limit of child pages or of their nesting depth is reached");
                     return;
                 }
-                cfg.total.set(cfg.total.get() + 1);
                 slots.push(Some(Slot { of: Of::Frame(n), url, dirty: true, win: None }));
             }
             (None, None) => {}
@@ -471,7 +513,7 @@ impl<E: Eng> Kids<E> {
         for i in 0..slots.len() {
             if !slots[i].as_ref().is_some_and(|s| live(&doc, s)) {
                 if slots[i].take().is_some() {
-                    cfg.total.set(cfg.total.get().saturating_sub(1));
+                    cfg.release(1);
                 }
                 kids[i] = None;
                 self.wins.borrow_mut().retain(|_, e| e.0.side != Side::Child(i as FrameId));
@@ -525,6 +567,7 @@ impl<E: Eng> Kids<E> {
             live && match k.as_ref().map(|k| (&k.state, k.delta)) {
                 Some((State::Loading(_) | State::Start, _)) => true,
                 Some((State::Run(b), delta)) => b.blocks_settle(limit - delta),
+                Some((State::Threaded(worker), _)) => worker.ready(),
                 _ => false,
             }
         })
@@ -561,6 +604,7 @@ impl<E: Eng> Kids<E> {
                 // A page that has not had its first turn: that turn runs its scripts.
                 State::Run(_) if !k.started => Some(true),
                 State::Run(b) => b.live_work_of(streams),
+                State::Threaded(worker) => worker.ready().then_some(true),
                 State::Empty => None,
             };
             match w {
@@ -661,6 +705,33 @@ impl<E: Eng> Browser<E> {
             };
             ch.state = match std::mem::replace(&mut ch.state, State::Empty) {
                 State::Loading(task) if !block && !task.done() => State::Loading(task),
+                State::Start if self.dom.agent_cluster.get().is_some() => {
+                    match ThreadWorker::start::<E>(&cfg, &self.dom, &slot_url, of, &from) {
+                        Ok(worker) => {
+                            t.work += 1;
+                            State::Threaded(worker)
+                        }
+                        Err(why) => fail(&mut ch, &mut t, why),
+                    }
+                }
+                State::Threaded(worker) => {
+                    for m in std::mem::take(&mut down) {
+                        worker.post(m);
+                    }
+                    let finished = worker.finished();
+                    for m in worker.take() {
+                        t.work += 1;
+                        self.route_up(&cfg, i as FrameId, m, &mut t);
+                    }
+                    match finished {
+                        Some(true) => fail(&mut ch, &mut t, "the worker failed".into()),
+                        Some(false) => {
+                            ended.push(i as FrameId);
+                            State::Empty
+                        }
+                        None => State::Threaded(worker),
+                    }
+                }
                 st @ (State::Loading(_) | State::Start) => {
                     t.work += 1;
                     let got = match st {
@@ -778,6 +849,7 @@ impl<E: Eng> Browser<E> {
             for m in down {
                 match (of, &ch.state) {
                     (Of::Worker(..), State::Loading(_) | State::Start | State::Run(_)) => self.dom.kids.send(m),
+                    (Of::Worker(..), State::Threaded(worker)) => worker.post(m),
                     _ => cfg.hub.release(m.cloned.moved()),
                 }
             }
@@ -852,7 +924,7 @@ impl<E: Eng> Browser<E> {
 impl<E: Eng> Dom<E> {
     /// A message from another page reaches this page: drop it if the target origin does not match, else queue a `message` event for the
     /// window. `source` is the window of the sender in this heap.
-    fn deliver(&self, it: &mut E::Vm, mut m: Out, source: Option<E::Obj>) -> R<E, ()> {
+    pub(crate) fn deliver(&self, it: &mut E::Vm, mut m: Out, source: Option<E::Obj>) -> R<E, ()> {
         if m.target_origin != "*" && m.target_origin != self.window_origin() {
             if let Some(h) = self.kids.hub() {
                 h.release(m.cloned.moved());
@@ -860,21 +932,16 @@ impl<E: Eng> Dom<E> {
             return Ok(());
         }
         let bytes = 16usize.saturating_add(m.cloned.cost());
-        let (data, ports) = run::<E, _>(it, |s| {
-            let (data, ports) = crate::browser_navigation_state::materialize_with(self, s, &mut m.cloned)?;
-            Ok((s.engine().raw(data), ports))
-        })?;
-        self.queue_window(data, ports.into_boxed_slice(), bytes, Some(Box::new(Sender { origin: m.origin, source })))
+        let (data, ports, error) = run::<E, _>(it, |s| self.receive_clone(s, &mut m.cloned))?;
+        let global = *self.global.get().expect("installed");
+        self.queue_delivered(global, data, ports.into_boxed_slice(), bytes, Some(Box::new(Sender { origin: m.origin, source })), error)
     }
 
     /// A message from a worker page reaches its `Worker` object `o`: a `message` event with no origin and no source.
     fn deliver_at(&self, it: &mut E::Vm, mut m: Out, o: E::Obj) -> R<E, ()> {
         let bytes = 16usize.saturating_add(m.cloned.cost());
-        let (data, ports) = run::<E, _>(it, |s| {
-            let (data, ports) = crate::browser_navigation_state::materialize_with(self, s, &mut m.cloned)?;
-            Ok((s.engine().raw(data), ports))
-        })?;
-        self.queue_port(o, data, ports.into_boxed_slice(), bytes, None)
+        let (data, ports, error) = run::<E, _>(it, |s| self.receive_clone(s, &mut m.cloned))?;
+        self.queue_delivered(o, data, ports.into_boxed_slice(), bytes, None, error)
     }
 
     /// The size of the layout box of `n` in the last layout of this page, if there is one. It never makes a layout.

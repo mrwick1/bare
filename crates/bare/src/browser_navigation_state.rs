@@ -166,3 +166,19 @@ pub(crate) fn materialize_with<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, c: &mu
     let ports = ci.hosts.iter().filter_map(|&l| obj_id::<E>(s, l)).collect();
     Ok((ci.value, ports))
 }
+
+impl<E: Eng> Dom<E> {
+    /// Decode an arriving message. A clone exception produces a messageerror.
+    pub(crate) fn receive_clone<'s>(&self, s: &mut Sc<'s, E>, c: &mut Cloned) -> Res<'s, (E::Raw, Vec<E::Obj>, bool)> {
+        match materialize_with(self, s, c) {
+            Ok((data, ports)) => Ok((s.engine().raw(data), ports, false)),
+            Err(bare_js_api::Error::Throw(_)) => {
+                if let Some(hub) = self.kids.hub() {
+                    hub.release(c.moved());
+                }
+                Ok((E::null(), Vec::new(), true))
+            }
+            Err(error) => Err(error),
+        }
+    }
+}

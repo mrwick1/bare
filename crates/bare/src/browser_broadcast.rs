@@ -168,7 +168,7 @@ fn post_message<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: A
             }
             let cloned = crate::browser_navigation_state::clone_state_with(d, s, v, &[])?;
             let bytes = 16usize.saturating_add(cloned.cost());
-            let wire = crate::browser_port_hub::Wire { cloned, bytes, origin: Some(from.clone()) };
+            let wire = crate::browser_port_hub::Wire { cloned, error: false, bytes, origin: Some(from.clone()) };
             if let Err((_, Some(limit))) = hub.push(end, wire, d.max_messages(), d.sched_max_message_bytes()) {
                 return Err(d.lim_s(s, limit));
             }

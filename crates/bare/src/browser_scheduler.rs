@@ -223,6 +223,7 @@ struct Port<E: Eng> {
 
 /// A queued message: the clone, its byte cost and the new ports of its transfer list (`MessageEvent.ports`).
 struct Msg<E: Eng> {
+    error: bool,
     data: E::Raw,
     bytes: usize,
     ports: Box<[E::Obj]>,
@@ -352,7 +353,7 @@ pub struct SchedStats {
 enum Run<E: Eng> {
     /// `call` is taken from a timeout; an interval keeps it in its `Timer`.
     Timer { id: u64, call: Option<TimerCall<E>>, nesting: u32, repeat: bool },
-    Deliver { port: E::Obj, data: E::Raw, ports: Box<[E::Obj]>, from: Option<Box<Sender<E>>> },
+    Deliver { port: E::Obj, error: bool, data: E::Raw, ports: Box<[E::Obj]>, from: Option<Box<Sender<E>>> },
     Select(NodeId),
     SelectionChange(NodeId),
     DocSelectionChange,
@@ -719,10 +720,10 @@ impl<E: Eng> Dom<E> {
                 Some(p) if p.keys.front() == Some(&key) => {
                     p.keys.pop_front();
                     match p.inbox.pop_front() {
-                        Some(Msg { data, bytes, ports, from }) => {
+                        Some(Msg { error, data, bytes, ports, from }) => {
                             s.queued -= 1;
                             s.queued_bytes -= bytes;
-                            Run::Deliver { port, data, ports, from }
+                            Run::Deliver { port, error, data, ports, from }
                         }
                         None => Run::Nothing,
                     }
@@ -862,14 +863,15 @@ impl<E: Eng> Dom<E> {
                 self.worker_failed(it, o)?;
                 it.host_checkpoint().map(|_| ())
             }),
-            Run::Deliver { port, data, ports, from } => {
+            Run::Deliver { port, error, data, ports, from } => {
                 let mark = self.settle_mark();
                 it.host_scope_o(|it| {
                     it.charge_o(1)?;
                     let win = self.global.get() == Some(&port);
                     let target = if win { Target::Window } else { Target::Obj(port) };
-                    if self.has_message_listener(target) {
-                        let ev = self.new_msg_event(it, data, win, ports, from)?;
+                    let ty = if error { "messageerror" } else { "message" };
+                    if self.st.borrow().listeners.get(&target).is_some_and(|v| v.iter().any(|l| &*l.ty == ty)) {
+                        let ev = self.new_msg_event(it, ty, data, win, ports, from)?;
                         self.dispatch(it, target, ev)?;
                     }
                     it.host_checkpoint().map(|_| ())
@@ -878,10 +880,6 @@ impl<E: Eng> Dom<E> {
                 Ok(())
             }
         }
-    }
-
-    fn has_message_listener(&self, target: Target<E>) -> bool {
-        self.st.borrow().listeners.get(&target).is_some_and(|v| v.iter().any(|l| &*l.ty == "message"))
     }
 
     fn requeue_interval(&self, id: u64, nesting: u32) -> R<E, ()> {
@@ -967,6 +965,10 @@ impl<E: Eng> Dom<E> {
 
     /// Queue a message at the port `g`, which has no peer: the window or a `BroadcastChannel` (`browser_broadcast.rs`).
     pub(crate) fn queue_port(&self, g: E::Obj, data: E::Raw, ports: Box<[E::Obj]>, cost: usize, from: Option<Box<Sender<E>>>) -> R<E, ()> {
+        self.queue_delivered(g, data, ports, cost, from, false)
+    }
+
+    pub(crate) fn queue_delivered(&self, g: E::Obj, data: E::Raw, ports: Box<[E::Obj]>, cost: usize, from: Option<Box<Sender<E>>>, error: bool) -> R<E, ()> {
         {
             let s = self.sched.borrow();
             if s.queued >= s.limits.max_queued_messages {
@@ -981,14 +983,14 @@ impl<E: Eng> Dom<E> {
         s.queued += 1;
         s.queued_bytes += cost;
         let p = s.ports.entry(g).or_insert(Port::new(None, true));
-        p.inbox.push_back(Msg { data, bytes: cost, ports, from });
+        p.inbox.push_back(Msg { error, data, bytes: cost, ports, from });
         p.keys.push_back(key);
         Ok(())
     }
 
-    fn new_msg_event(&self, it: &mut E::Vm, data: E::Raw, win: bool, moved: Box<[E::Obj]>, from: Option<Box<Sender<E>>>) -> R<E, E::Obj> {
+    fn new_msg_event(&self, it: &mut E::Vm, ty: &str, data: E::Raw, win: bool, moved: Box<[E::Obj]>, from: Option<Box<Sender<E>>>) -> R<E, E::Obj> {
         let proto = self.sched.borrow().protos.expect("installed").event;
-        let e = self.new_event_proto(it, "message", false, false, false, proto)?;
+        let e = self.new_event_proto(it, ty, false, false, false, proto)?;
         self.sched.borrow_mut().msg_events.insert(e, MsgEvent { data, moved, ports: None, win, from });
         Ok(e)
     }
@@ -1352,7 +1354,7 @@ impl<E: Eng> Dom<E> {
                 let data = s.engine().raw_local(&m.data);
                 let cloned = crate::browser_navigation_state::clone_state_with(self, s, data, &[])?;
                 s.engine().stack_truncate(base);
-                ws.push(Wire { cloned, bytes: m.bytes, origin: None });
+                ws.push(Wire { cloned, bytes: m.bytes, origin: None, error: m.error });
             }
             waiting.push(ws);
         }
@@ -1456,8 +1458,8 @@ impl<E: Eng> Dom<E> {
             }
             let bytes = w.bytes;
             let base = s.engine().stack_len();
-            let (data, ports) = crate::browser_navigation_state::materialize_with(self, s, &mut w.cloned)?;
-            let data = s.engine().raw(data);
+            let (data, ports, failed) = self.receive_clone(s, &mut w.cloned)?;
+            let error = failed || w.error;
             s.engine().stack_truncate(base);
             let enabled = self.sched.borrow().ports.get(&obj).is_some_and(|p| p.enabled);
             let key = if enabled { Some(lift::<E, _>(s, self.schedule(self.now_ms(), Task::Deliver(obj)))?) } else { None };
@@ -1466,7 +1468,7 @@ impl<E: Eng> Dom<E> {
             s.queued_bytes += bytes;
             if let Some(p) = s.ports.get_mut(&obj) {
                 let from = w.origin.take().map(|o| Box::new(Sender { origin: o.to_string(), source: None }));
-                p.inbox.push_back(Msg { data, bytes, ports: ports.into_boxed_slice(), from });
+                p.inbox.push_back(Msg { error, data, bytes, ports: ports.into_boxed_slice(), from });
                 p.keys.extend(key);
             }
         }
@@ -1540,7 +1542,7 @@ fn port_post_message<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>,
     sc.queued += 1;
     sc.queued_bytes += bytes;
     let t = sc.ports.get_mut(&target).expect("checked");
-    t.inbox.push_back(Msg { data, bytes, ports: moved, from: None });
+    t.inbox.push_back(Msg { error: false, data, bytes, ports: moved, from: None });
     t.keys.extend(key);
     Ok(s.undefined())
 }
@@ -1555,7 +1557,7 @@ fn post_remote<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>, list: &[
     d.export_ports(s, &mut cloned)?;
     let bytes = 16usize.saturating_add(cloned.cost());
     let max_bytes = d.sched.borrow().limits.max_queued_message_bytes;
-    if let Err((w, limit)) = hub.push(end, Wire { cloned, bytes, origin: None }, d.max_messages(), max_bytes) {
+    if let Err((w, limit)) = hub.push(end, Wire { cloned, bytes, origin: None, error: false }, d.max_messages(), max_bytes) {
         hub.release(w.cloned.moved());
         if let Some(limit) = limit {
             return Err(d.lim_s(s, limit));

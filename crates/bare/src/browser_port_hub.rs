@@ -22,11 +22,12 @@
 use crate::browser_navigation_state::Transfer;
 use bare_js_api::{Cloned, Moved};
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex, atomic::{AtomicUsize, Ordering::Relaxed}};
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed}};
 
 /// A message for an end, as data.
 pub(crate) struct Wire {
     pub cloned: Cloned,
+    pub error: bool,
     /// The byte cost in the queue of a port (`16 + cloned.cost()`).
     pub bytes: usize,
     /// The origin of the sender of a `BroadcastChannel` message. `None` for a port.
@@ -48,6 +49,7 @@ struct Ends {
 
 #[derive(Default)]
 pub(crate) struct PortHub {
+    threaded: AtomicBool,
     /// The wires that wait in all the ends.
     wires: AtomicUsize,
     bytes: AtomicUsize,
@@ -67,6 +69,14 @@ fn ends_of(xf: &[Moved]) -> impl Iterator<Item = u64> + '_ {
 }
 
 impl PortHub {
+    pub(crate) fn enable_thread_wake(&self) {
+        self.threaded.store(true, Relaxed);
+    }
+
+    pub(crate) fn has_pending_for(&self, page: u32) -> bool {
+        self.st.lock().unwrap().ends.values().any(|end| end.owner == Some(page) && !end.queue.is_empty())
+    }
+
     /// Does a wire wait?
     #[inline]
     pub(crate) fn busy(&self) -> bool {
@@ -119,6 +129,10 @@ impl PortHub {
         self.wires.fetch_add(1, Relaxed);
         self.bytes.fetch_add(w.bytes, Relaxed);
         e.queue.push_back(w);
+        drop(s);
+        if self.threaded.load(Relaxed) {
+            bare_net::parallel::wake();
+        }
         Ok(())
     }
 

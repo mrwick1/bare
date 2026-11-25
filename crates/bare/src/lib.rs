@@ -421,3 +421,6 @@ mod browser_transition_tests;
 
 #[cfg(test)]
 mod browser_shared_wait_tests;
+
+#[cfg(test)]
+mod browser_threaded_worker_tests;
