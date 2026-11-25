@@ -48,7 +48,7 @@ fn a_script_and_a_picture_send_the_url_of_the_document() {
     let doc = u(&format!("http://127.0.0.1:{}/page", srv.port));
     let target = Target { expect: Expect::Script, url: u(&format!("http://127.0.0.1:{}/s.js", srv.port)) };
     resources::fetch(&mut bare_net::http::Client::new(), &target, &Limits::default(), Instant::now() + Duration::from_secs(5), 0, Some(&doc)).unwrap();
-    let _ = crate::images::load(&mut bare_net::http::Client::new(), &format!("http://127.0.0.1:{}/i.png", srv.port), &AtomicUsize::new(0), Some(&doc));
+    let _ = crate::images::load(&mut bare_net::http::Client::new(), &format!("http://127.0.0.1:{}/i.png", srv.port), None, &AtomicUsize::new(0), Some(&doc));
     for path in ["/s.js", "/i.png"] {
         let r = srv.recs().into_iter().find(|r| r.path == path).expect(path);
         assert_eq!(r.header("referer"), vec![doc.to_string()], "{path}");

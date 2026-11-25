@@ -31,6 +31,7 @@
 //! store of this document and returns the URL. `URL.revokeObjectURL(url)` removes it. A URL that is not in the store (never made,
 //! revoked, or made by another document) cannot be read. The store holds its Blobs alive and at most `MAX_URLS` entries. The readers are
 //! `blob_url_read` callers: `fetch` and `XMLHttpRequest` (`browser_fetch.rs`, `browser_xhr.rs`) and a script element made by a script (`browser_loader.rs`).
+//! `blob_url_bytes` callers: pictures (`browser_img.rs`, `images.rs`).
 //! A bytes copy is made at each read. `MediaSource` is not supported, so `createObjectURL` takes a Blob or a File only.
 //!
 //! `FormData`: `append`, `set`, `get`, `getAll`, `has`, `delete`, `entries`, `keys`, `values`, `forEach` and
@@ -905,6 +906,12 @@ pub(crate) fn blob_url_read<E: Eng>(d: &Dom<E>, url: &str) -> Option<(Vec<u8>, S
     let s = d.web.s.borrow();
     let b = s.blobs.get(s.urls.get(url.trim_matches(|c: char| c <= ' ').split('#').next()?)?)?;
     Some((b.bytes.to_vec(), b.ty.clone()))
+}
+
+/// The shared bytes of the Blob under the `blob:` URL `url` (no copy). For a picture (`browser_img.rs`, `images.rs`).
+pub(crate) fn blob_url_bytes<E: Eng>(d: &Dom<E>, url: &str) -> Option<std::sync::Arc<[u8]>> {
+    let s = d.web.s.borrow();
+    Some(s.blobs.get(s.urls.get(url.trim_matches(|c: char| c <= ' ').split('#').next()?)?)?.bytes.clone())
 }
 
 // ------------------------------------------------------------------------------------------ Blob and File

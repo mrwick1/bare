@@ -138,6 +138,8 @@ fwd! {
     (&) fn img_requests() -> Vec<NodeId>;
     (&) fn img_settled(n: NodeId, ok: bool);
     (&) fn img_started(n: NodeId);
+    (&) fn img_blob(n: NodeId, url: &str) -> Option<std::sync::Arc<[u8]>>;
+    (&) fn blob_bytes(url: &str) -> Option<std::sync::Arc<[u8]>>;
     (&) fn navigation_stats() -> crate::browser_navigation::NavigationStats;
     (&) fn listened(types: &[&str]) -> std::collections::HashSet<NodeId>;
     (&) fn sched_stats() -> crate::browser_scheduler::SchedStats;

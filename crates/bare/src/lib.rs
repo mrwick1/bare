@@ -51,6 +51,10 @@ mod control_tests;
 #[cfg(test)]
 mod page_tests;
 #[cfg(test)]
+mod page_pseudo_style_tests;
+#[cfg(test)]
+mod browser_rects_pseudo_tests;
+#[cfg(test)]
 mod page_live_events_tests;
 #[cfg(test)]
 mod page_live_iframe_tests;
@@ -352,6 +356,8 @@ mod browser_media;
 mod browser_img;
 #[cfg(test)]
 mod browser_img_tests;
+#[cfg(test)]
+mod images_blob_url_tests;
 #[cfg(test)]
 mod browser_media_tests;
 #[cfg(test)]

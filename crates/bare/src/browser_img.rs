@@ -38,6 +38,8 @@ pub(crate) struct Img<E: Eng> {
     pub(crate) made: Cell<Option<<E as Eng>::Obj>>,
     /// Elements whose `src` was set by a script and that the page has not taken yet.
     requests: RefCell<Vec<NodeId>>,
+    /// The Blob of a request with a `blob:` URL, read when `src` was set: the page can revoke the URL before the load starts.
+    blobs: RefCell<HashMap<NodeId, std::sync::Arc<[u8]>>>,
     /// Elements with a download on the way (asked for, not settled), so `complete` is false.
     pub(crate) pending: RefCell<std::collections::HashSet<NodeId>>,
     /// The promises of `decode()` for each element.
@@ -151,11 +153,15 @@ fn image_ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'
 
 /// A script set the `src` of `n`: the page loads the picture.
 pub(crate) fn request<E: Eng>(d: &Dom<E>, n: NodeId) {
-    let has = attr_of(d, n, "src").is_some_and(|s| !s.trim().is_empty());
-    if !has {
+    let src = attr_of(d, n, "src").filter(|s| !s.trim().is_empty());
+    let Some(src) = src else {
         d.img.pending.borrow_mut().remove(&n);
         return;
-    }
+    };
+    match crate::browser_web::is_blob_url(&src).then(|| crate::browser_web::blob_url_bytes(d, &src)).flatten() {
+        Some(bytes) => d.img.blobs.borrow_mut().insert(n, bytes),
+        None => d.img.blobs.borrow_mut().remove(&n),
+    };
     let mut r = d.img.requests.borrow_mut();
     if r.len() < MAX_REQUESTS && !r.contains(&n) {
         r.push(n);
@@ -192,6 +198,16 @@ impl<E: Eng> Browser<E> {
     /// Take the elements that scripts asked a picture for.
     pub(crate) fn img_requests(&self) -> Vec<NodeId> {
         std::mem::take(&mut *self.dom.img.requests.borrow_mut())
+    }
+
+    /// The bytes of the `blob:` URL `url` that `n` loads: the Blob read when a script set `src`, else the Blob in the store now.
+    pub(crate) fn img_blob(&self, n: NodeId, url: &str) -> Option<std::sync::Arc<[u8]>> {
+        self.dom.img.blobs.borrow_mut().remove(&n).or_else(|| crate::browser_web::blob_url_bytes(&self.dom, url))
+    }
+
+    /// The bytes of the Blob under the `blob:` URL `url` (a CSS picture).
+    pub(crate) fn blob_bytes(&self, url: &str) -> Option<std::sync::Arc<[u8]>> {
+        crate::browser_web::blob_url_bytes(&self.dom, url)
     }
 
     /// Is a request waiting?
