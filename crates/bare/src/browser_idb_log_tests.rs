@@ -1,8 +1,6 @@
 //! The IndexedDB log of a profile (`browser_idb_log.rs`): a new process opens the data of the last one. A cut last frame loses
 //! only the last commit. An abort and a read-only transaction write nothing. A long log becomes a snapshot.
-//!
-//! Binary keys are not here: `shims/idb.js` refuses them today (`valid`). The log writes key bytes as they are, so a binary key
-//! takes the same path as a string key.
+
 
 use crate::browser::*;
 use crate::browser_navigation::WebStorage;
@@ -74,6 +72,7 @@ fn a_new_process_reads_the_saved_rows_and_index() {
         s.put({ n: 3, d: new Date(5) }, new Date(7));
         s.put({ n: 4, b: new Blob(['blob!'], { type: 'text/x' }), u: new Uint8Array([1, 2]) }, 'blob');
         s.put({ n: 5, k: k }, [1, 'a']);
+        s.put({ n: 6 }, new Uint8Array([1, 2]).buffer);
         tx.oncomplete = function () { out.push('ok') };
       };";
     assert_eq!(session(&d, put), "ok");
@@ -82,12 +81,13 @@ fn a_new_process_reads_the_saved_rows_and_index() {
       r.onsuccess = function () {
         var s = r.result.transaction('s').objectStore('s');
         s.getAllKeys().onsuccess = function (e) {
-          out.push(e.target.result.map(function (k) { return k instanceof Date ? 'D' + +k : Array.isArray(k) ? '[' + k + ']' : String(k) }).join(' '));
+          out.push(e.target.result.map(function (k) { return k instanceof Date ? 'D' + +k : k instanceof ArrayBuffer ? 'B' + new Uint8Array(k).join('.') : Array.isArray(k) ? '[' + k + ']' : String(k) }).join(' '));
         };
         s.get('str').onsuccess = function (e) { out.push(e.target.result.t) };
         s.get(42).onsuccess = function (e) { out.push(e.target.result.x) };
         s.get(new Date(7)).onsuccess = function (e) { out.push(+e.target.result.d) };
         s.index('n').getKey(4).onsuccess = function (e) { out.push(e.target.result) };
+        s.index('n').getKey(6).onsuccess = function (e) { out.push(new Uint8Array(e.target.result).join('.')) };
         s.index('n').count().onsuccess = function (e) { out.push(e.target.result) };
         s.get('blob').onsuccess = function (e) {
           var b = e.target.result.b;
@@ -96,7 +96,7 @@ fn a_new_process_reads_the_saved_rows_and_index() {
         };
         s.get([1, 'a']).onsuccess = function (e) { var k = e.target.result.k; out.push(k.type, k.algorithm.name, k.extractable, k.usages.join()) };
       };";
-    assert_eq!(session(&d, get), "42 D7 blob str [1,a]|h\u{e9}llo \u{1f600}|-0.5|5|blob|5|text/x|5|1.2|blob!|secret|AES-GCM|false|encrypt");
+    assert_eq!(session(&d, get), "42 D7 blob str B1.2 [1,a]|h\u{e9}llo \u{1f600}|-0.5|5|blob|1.2|6|text/x|5|1.2|blob!|secret|AES-GCM|false|encrypt");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

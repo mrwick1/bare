@@ -5,6 +5,9 @@
 //! Keys are encoded into bytes that sort in IndexedDB key order: a type tag (number < date < string < binary < array), then the
 //! value. Values are structured clone records (`Cloned`). An object store is a `BTreeMap` from key bytes to its row; an index is a
 //! set of (index key bytes, primary key bytes). A transaction keeps an undo list in the store; `abort` plays it backward.
+//!
+//! With a profile, the store of an origin is read from its log on disk at the first open in the process, and each commit appends
+//! the ops of its transaction to the log (`browser_idb_log.rs`).
 
 use crate::browser::Dom;
 use crate::browser_scoped::*;

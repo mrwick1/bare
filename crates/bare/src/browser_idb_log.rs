@@ -296,9 +296,9 @@ fn frame(out: &mut Vec<u8>, payload: &[u8]) {
 /// About the bytes of a snapshot of `dbs`: keys, records, index keys. It walks the rows; it copies nothing.
 fn live(dbs: &HashMap<String, Db>) -> u64 {
     let mut n = 0;
-    for st in dbs.values().flat_map(|d| d.stores.values()) {
+    for (dn, st) in dbs.iter().flat_map(|(dn, d)| d.stores.iter().map(move |(sn, st)| (dn.len() + sn.len(), st))) {
         for (k, r) in &st.rows {
-            n += 32 + k.len() + r.value.bytes().len() + r.ix.iter().map(|(_, k)| 8 + k.len()).sum::<usize>();
+            n += 33 + dn + k.len() + r.value.bytes().len() + r.ix.iter().map(|(_, k)| 8 + k.len()).sum::<usize>();
             for m in r.value.moved() {
                 if let bare_js_api::clone::Moved::Data(d) = m {
                     n += match d.downcast_ref::<crate::browser_web::WebClone>() {
