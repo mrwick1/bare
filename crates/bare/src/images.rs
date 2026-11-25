@@ -142,11 +142,15 @@ pub(crate) fn data_url(url: &str) -> Option<Vec<u8>> {
     }
 }
 
-/// The body of `url`, with the cache of the client. At most `bare_image::MAX_BYTES`.
-fn download(client: &mut Client, url: &str) -> Option<Vec<u8>> {
+/// The body of `url`, with the cache of the client. At most `bare_image::MAX_BYTES`. `doc` is the document URL, for `Referer`.
+fn download(client: &mut Client, url: &str, doc: Option<&Url>) -> Option<Vec<u8>> {
     let mut url = Url::parse(url).ok()?;
     for _ in 0..5 {
-        let mut s = client.send_stream_cached(&Request::get(&url)).ok()?;
+        let referer = doc.and_then(|d| crate::resources::referrer(d, &url));
+        let headers: Vec<(&str, &str)> = referer.iter().map(|r| ("referer", r.as_str())).collect();
+        let mut req = Request::get(&url);
+        req.headers = &headers;
+        let mut s = client.send_stream_cached(&req).ok()?;
         if matches!(s.response.status, 301 | 302 | 303 | 307 | 308) {
             let next = url.join(s.response.header("location")?).ok()?;
             if url.scheme == bare_url::Scheme::Https && next.scheme == bare_url::Scheme::Http {
@@ -174,8 +178,8 @@ fn download(client: &mut Client, url: &str) -> Option<Vec<u8>> {
 }
 
 /// Download (or read) and decode one picture. Runs on a worker thread.
-fn load(client: &mut Client, url: &str, used: &AtomicUsize) -> Option<Bitmap> {
-    let bytes = if url.starts_with("data:") { data_url(url)? } else { download(client, url)? };
+pub(crate) fn load(client: &mut Client, url: &str, used: &AtomicUsize, doc: Option<&Url>) -> Option<Bitmap> {
+    let bytes = if url.starts_with("data:") { data_url(url)? } else { download(client, url, doc)? };
     // An SVG file is drawn by the painter of an inline `<svg>`, at its own size.
     if bare_image::kind(&bytes).is_none() {
         let text = std::str::from_utf8(&bytes).ok().filter(|t| t.contains("<svg"))?;
@@ -349,6 +353,8 @@ impl Page {
             }
         }
         self.css_scan();
+        // The document URL, for the `Referer` of each picture.
+        let doc = self.source.browser().and_then(|b| b.document_url());
         while self.images.jobs.len() + self.images.css_jobs.len() < INFLIGHT {
             // The pictures of the tree first, then the ones of the styles (`id` is 0 for the first kind).
             let Some((url, nodes, id)) = self.images.queue.pop_front().map(|(u, n)| (u, n, 0)).or_else(|| self.images.css_queue.pop_front().map(|(i, u)| (u, Vec::new(), i))) else { break };
@@ -358,7 +364,8 @@ impl Page {
                 Source::Browser(_) => Client::new(),
             };
             let (shown, now) = (url.clone(), std::time::Instant::now());
-            let task = client.spawn(move |c| load(c, &url, &used));
+            let doc = doc.clone();
+            let task = client.spawn(move |c| load(c, &url, &used, doc.as_deref().and_then(|d| Url::parse(d).ok()).as_ref()));
             if id == 0 {
                 self.images.jobs.push((nodes, task, shown, now));
             } else {
@@ -463,10 +470,10 @@ mod tests {
     #[test]
     fn an_svg_picture_has_its_size_and_no_raster_until_its_pixels_are_read() {
         let svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"12\"><rect width=\"12\" height=\"12\" fill=\"#f00\"/></svg>";
-        let (w, h, px) = load(&mut Client::new(), &format!("data:image/svg+xml,{svg}"), &AtomicUsize::new(0)).expect("a picture");
+        let (w, h, px) = load(&mut Client::new(), &format!("data:image/svg+xml,{svg}"), &AtomicUsize::new(0), None).expect("a picture");
         assert_eq!((w, h, px.is_ready()), (24, 12, false));
         assert_eq!((px.len(), px[5 * 24 + 3], px[5 * 24 + 20] >> 24, px.is_ready()), (288, 0xffff_0000, 0, true));
         // A file that is not an SVG picture fails at once, as it did when the raster was made at the load.
-        assert!(load(&mut Client::new(), "data:image/svg+xml,<svg width=\"5000\" height=\"5\"></svg>", &AtomicUsize::new(0)).is_none());
+        assert!(load(&mut Client::new(), "data:image/svg+xml,<svg width=\"5000\" height=\"5\"></svg>", &AtomicUsize::new(0), None).is_none());
     }
 }
