@@ -13,14 +13,14 @@
 //! - Each gather measures the page once: one cascade and one bounded layout (`Dom::layout_now`), for all targets. A broadcast uses
 //!   these sizes, so a callback that changes the page is seen by the next gather, not by a later observer in the same broadcast.
 //! - Sizes are in CSS pixels, not rounded (`f32` layout units). Border box: the union of the element's border-box fragments. Content
-//!   box: the border box minus borders and padding. `contentRect` is the content box at (padding-left, padding-top). An element with
+//!   box: the border box minus borders and padding. Device pixel content box: the content box with its edges rounded to whole device
+//!   pixels (`devicePixelRatio` is 1, so a device pixel is a CSS pixel), as Chrome snaps it. Every entry has all three sizes. `contentRect` is the content box at (padding-left, padding-top). An element with
 //!   no box (not connected, inside `display: none`) and a non-replaced inline element report 0 x 0, as the standard says for inline.
 //!   Only horizontal writing is modelled: inline size is the width, block size the height.
 //! - Callbacks run in one host scope for the frame, each with `(entries, observer)` and `this` the observer, then a microtask
 //!   checkpoint. A throw is reported (`Browser::take_reports`) and the frame goes on. A limit, `Unsupported` or heap fault ends it.
 //!
-//! Gates (`Unsupported`, never a guess): `box: 'device-pixel-content-box'` and the entry's `devicePixelContentBoxSize` (no device pixel
-//! ratio), a padding that is not an absolute length (a percent needs the containing block), and every gate of `layout_now`.
+//! Gates (`Unsupported`, never a guess): a padding that is not an absolute length (a percent needs the containing block), and every gate of `layout_now`.
 //!
 //! Deviations: entry and size fields are own read-only data properties, not prototype getters. The size arrays are ordinary arrays,
 //! not frozen. `DOMRectReadOnly` is a plain object with the eight fields, not that interface. Subclassing `ResizeObserver` keeps the
@@ -59,6 +59,7 @@ impl Default for ResizeLimits {
 enum Boxes {
     Content,
     Border,
+    Device,
 }
 
 struct Observation<E: Eng> {
@@ -110,11 +111,12 @@ pub(crate) struct Resize<E: Eng> {
 struct Sizes {
     border: (f32, f32),
     content: (f32, f32),
+    /// The content box snapped to whole device pixels.
+    device: (f32, f32),
     /// padding-left and padding-top: the place of `contentRect`.
     at: (f32, f32),
 }
 
-const DEVICE: &str = "ResizeObserver device-pixel-content-box (the device pixel ratio is not modelled)";
 const PADDING: &str = "ResizeObserver content box with a padding that is not an absolute length (it needs the containing block)";
 const LOOP: &str = "ResizeObserver loop completed with undelivered notifications.";
 
@@ -134,8 +136,7 @@ pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> 
         Row::method(1, "disconnect", 0, disconnect),
     ]);
     let targets = [d.obj_local(s, observer)];
-    d.install_rows(s, &targets, &rows1::T::<E>::V)?;
-    d.def_get_at(s, entry, "devicePixelContentBoxSize", device_sizes, None)
+    d.install_rows(s, &targets, &rows1::T::<E>::V)
 }
 
 fn illegal_ctor<'s, E: Eng>(_: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
@@ -204,7 +205,7 @@ fn observe<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'
             match d.string_arg_s(s, b)?.as_str() {
                 "content-box" => Boxes::Content,
                 "border-box" => Boxes::Border,
-                "device-pixel-content-box" => return Err(lift_err::<E>(s, Dom::<E>::gate(DEVICE))),
+                "device-pixel-content-box" => Boxes::Device,
                 other => {
                     let m = format!("Failed to execute 'observe' on 'ResizeObserver': The provided value '{other}' is not a valid enum value of type ResizeObserverBoxOptions.");
                     return Err(s.type_error(&m));
@@ -249,8 +250,14 @@ fn disconnect<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Arg
     Ok(s.undefined())
 }
 
-fn device_sizes<'s, E: Eng>(_: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
-    Err(lift_err::<E>(s, Dom::<E>::gate(DEVICE)))
+impl Sizes {
+    fn of(&self, b: Boxes) -> (f32, f32) {
+        match b {
+            Boxes::Content => self.content,
+            Boxes::Border => self.border,
+            Boxes::Device => self.device,
+        }
+    }
 }
 
 /// A padding side in px. Only an absolute length is known without the containing block.
@@ -272,7 +279,9 @@ fn sizes_of<E: Eng>(tree: &Tree, styles: &Styles, border: Option<Rect>, el: Node
     let b = |p| style.px(p).max(0.0);
     let w = (r.w - b(Property::BorderLeftWidth) - b(Property::BorderRightWidth) - pl - pr).max(0.0);
     let h = (r.h - b(Property::BorderTopWidth) - b(Property::BorderBottomWidth) - pt - pb).max(0.0);
-    Ok(Sizes { border: (r.w, r.h), content: (w, h), at: (pl, pt) })
+    let (x, y) = (r.x + b(Property::BorderLeftWidth) + pl, r.y + b(Property::BorderTopWidth) + pt);
+    let device = ((x + w).round() - x.round(), (y + h).round() - y.round());
+    Ok(Sizes { border: (r.w, r.h), content: (w, h), device, at: (pl, pt) })
 }
 
 /// The number of nodes on the flat-tree path from `n` to its root.
@@ -351,7 +360,7 @@ impl<E: Eng> Dom<E> {
             ob.skipped = false;
             for (i, x) in ob.obs.iter().enumerate() {
                 let z = sizes[&x.target];
-                let now = if x.observed == Boxes::Border { z.border } else { z.content };
+                let now = z.of(x.observed);
                 if now != x.last {
                     if depth(&doc, x.target) > at {
                         ob.active.push(i);
@@ -383,7 +392,9 @@ impl<E: Eng> Dom<E> {
         let border = it.array_from(&[border])?;
         let content = self.size_obj(it, p.size, z.content)?;
         let content = it.array_from(&[content])?;
-        for (name, v) in [("target", E::obj_raw(wrapper)), ("contentRect", rect), ("borderBoxSize", border), ("contentBoxSize", content)] {
+        let device = self.size_obj(it, p.size, z.device)?;
+        let device = it.array_from(&[device])?;
+        for (name, v) in [("target", E::obj_raw(wrapper)), ("contentRect", rect), ("borderBoxSize", border), ("contentBoxSize", content), ("devicePixelContentBoxSize", device)] {
             let k = self.key(it, name)?;
             it.define_data(e, k, v, false, true, true)?;
         }
@@ -408,7 +419,7 @@ impl<E: Eng> Dom<E> {
                 for &i in &std::mem::take(&mut ob.active) {
                     let x = &mut ob.obs[i];
                     let z = sizes[&x.target];
-                    x.last = if x.observed == Boxes::Border { z.border } else { z.content };
+                    x.last = z.of(x.observed);
                     shallowest = shallowest.min(depth(&doc, x.target));
                     picked.push((x.wrapper, z));
                 }
