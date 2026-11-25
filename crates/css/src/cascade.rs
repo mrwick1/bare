@@ -2784,13 +2784,14 @@ impl Styles {
     }
 
     /// The style of an element. `None` for a node that is not an element, and for an element that is not shown
-    /// (`display: none`, or inside one), unless it was asked for with `RuleSet::compute_for`.
+    /// (`display: none`, or inside one), unless it was asked for with `RuleSet::compute_for`. A `::before` or `::after` node made
+    /// before these styles has an entry of `NONE`: the cascade does not style it. Its style comes from `generated::sync` then too.
     #[inline]
     pub fn style(&self, node: NodeId) -> Option<&ComputedStyle> {
         match self.of_node.get(node.index()) {
-            Some(&NONE) => None,
+            Some(&NONE) if self.generated.is_empty() => None,
+            Some(&NONE) | None => self.pseudo_style(node),
             Some(&i) => Some(&self.styles[i as usize]),
-            None => self.pseudo_style(node),
         }
     }
 

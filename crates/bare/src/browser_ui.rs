@@ -1246,6 +1246,8 @@ impl<E: Eng> Browser<E> {
     /// The window frame `f` keeps `styles` (a new `restyle`), with the same layout: the new styles differ from the old ones only in
     /// what layout does not read. `refresh` can update it after this.
     pub fn restyle_frame(&mut self, f: &mut Frame, styles: std::rc::Rc<bare_css::cascade::Styles>) {
+        // The kept layout has the `::before` and `::after` nodes: the new styles must give their styles too.
+        bare_css::generated::sync(&mut self.dom.doc.borrow_mut(), &styles);
         f.styles = styles;
         f.since = Some((self.dom.rule_builds(), chains(&self.dom.doc.borrow())));
     }
@@ -1317,6 +1319,9 @@ impl<E: Eng> Browser<E> {
                 }
             }
             if dirty.is_empty() {
+                drop(doc);
+                // The `::before` and `::after` styles can have new numbers, and no layout runs to give them to their nodes.
+                bare_css::generated::sync(&mut dom.doc.borrow_mut(), &f.styles);
                 return Ok(Some(out));
             }
             drop(doc);
