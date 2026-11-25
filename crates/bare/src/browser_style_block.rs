@@ -193,7 +193,7 @@ fn written(property: Property, value: &Value, side: &Side) -> Option<String> {
         Value::Color(c) => format!("rgba({}, {}, {}, {})", c.r, c.g, c.b, (c.a as f32 / 255.0 * 1000.0).round() / 1000.0),
         Value::Grid(i) => match side.grids.get(i as usize)? {
             bare_css::grid::Grid::Motion(m) => bare_css::motion::text(property, m),
-            _ => return None,
+            g => bare_css::grid::text(g)?,
         },
         Value::ColorExpr(i) => match side.deferred.get(i as usize)? {
             bare_css::values::Deferred::Color(expr) => expr.text().to_owned(),
