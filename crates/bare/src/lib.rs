@@ -188,6 +188,7 @@ mod browser_platform_class;
 mod browser_platform_query;
 mod browser_scheduler;
 mod browser_worker;
+mod browser_notification;
 mod browser_wasm;
 #[cfg(test)]
 mod browser_wasm_tests;
@@ -424,6 +425,8 @@ mod browser_cssom_owned_tests;
 mod browser_domparser_move_tests;
 #[cfg(test)]
 mod browser_domparser_xhtml_tests;
+#[cfg(test)]
+mod browser_notification_tests;
 
 mod browser_frames;
 mod browser_child;
