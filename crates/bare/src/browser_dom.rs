@@ -831,6 +831,21 @@ pub(crate) fn owner_document<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Lo
     if let Some(o) = crate::browser_frames::owner_of(d, n) {
         return d.wrap_s(s, o);
     }
+    // A node in the tree of another document (`DOMParser`, `createHTMLDocument`) belongs to that document. A detached node that such a
+    // document made is not known here: it gets the page.
+    let other = {
+        let doc = d.doc.borrow();
+        doc.has_more_documents().then(|| {
+            let mut top = n;
+            while let Some(p) = doc.parent(top) {
+                top = p;
+            }
+            top
+        }).filter(|&t| t != doc.root() && matches!(doc.data(t), NodeData::Document))
+    };
+    if let Some(o) = other {
+        return d.wrap_s(s, o);
+    }
     let root = if d.in_inert(n) { crate::browser_custom::template_document(d) } else { d.doc.borrow().root() };
     d.wrap_s(s, root)
 }
