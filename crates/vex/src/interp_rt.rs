@@ -298,6 +298,7 @@ pub enum ErrKind {
 
 /// The execution state and heap for the active ECMAScript realm.
 pub struct Realm {
+    realms: Option<Box<realms::Realms>>,
     pub heap: Heap,
     pub shapes: Shapes,
     pub atoms: Atoms,
@@ -318,6 +319,7 @@ pub struct Realm {
     pub(crate) pr: crate::promise::Promises,
     /// The module records and the `import()` calls that wait for the host (`module.rs`).
     pub(crate) md: crate::module::Modules,
+    pub(crate) unscopables: Option<Str>,
     pub(crate) wk: [Str; crate::bi_symbol::WK],
     /// The registry of `Symbol.for`: an object with no prototype, made at the first call. It is a root.
     pub(crate) registry: Option<Obj>,
@@ -410,7 +412,7 @@ pub struct RealmState {
     pub symbol_ctor: Option<Obj>,
     /// The lazy tables of the built-in objects (`lazy.rs`).
     pub(crate) ltab: crate::lazy::Lazy,
-    pub(crate) unscopables: Option<Str>,
+    pub(crate) intl_locale_proto: Option<Obj>,
     /// `TypeError.prototype` and the others, by `ErrKind`.
     pub error_protos: [Obj; 7],
     pub(crate) date_proto: Obj,
@@ -451,6 +453,16 @@ struct RealmBootstrap {
 }
 
 impl RealmState {
+    fn mark_roots(&self, m: &mut Marker) {
+        if let Some(proto) = self.intl_locale_proto {
+            m.value(proto.value());
+        }
+        for (key, context, _, _) in self.lex.values() {
+            m.value(key.value());
+            m.value(*context);
+        }
+    }
+
     fn allocate(heap: &mut Heap, shapes: &mut Shapes, keys: RealmBootstrapKeys) -> RealmBootstrap {
         let RealmBootstrapKeys { k_code, k_ctx, k_home, k_fields, k_link, k_prim, k_then, k_pstate, k_presult, hidden, k_value, k_done, gkeys, empty } = keys;
         let root = shapes.root(Layout::Object, None, 4);
@@ -523,7 +535,7 @@ impl RealmState {
                 bigint_intrinsics: None,
                 symbol_ctor: None,
                 ltab: Default::default(),
-                unscopables: None,
+                intl_locale_proto: None,
                 error_protos,
                 date_proto: object_proto,
                 s_native,
@@ -606,6 +618,7 @@ impl Realm {
         consts.extend(wk.iter().map(|s| s.key_value()));
         let epoch = shapes.epoch();
         let mut rt = Realm {
+            realms: None,
             heap,
             shapes,
             atoms,
@@ -623,6 +636,7 @@ impl Realm {
             pr,
             md: Default::default(),
             wk,
+            unscopables: None,
             registry: None,
             proxy_natives: None,
             proxy_depth: 0,
@@ -670,17 +684,18 @@ impl Realm {
     pub fn collect(&mut self, fbs: &mut [Feedback], walk_frames: impl FnOnce(&mut Marker)) {
         // A nested call holds the collector (`Realm::call_function`), so no machine is in use now: the idle ones keep their feedback.
         debug_assert!(self.nest == 0, "a collection inside a nested call");
-        let Realm { heap, shapes, atoms, consts, pins, state, pool, pr, api, rx, intl, .. } = self;
+        let Realm { heap, shapes, atoms, consts, pins, state, pool, pr, api, rx, intl, realms, .. } = self;
         let mut walk_frames = Some(walk_frames);
         let stats = {
             // The promise state is marked in the walk; its weak list is cleared after the marking.
             struct Rr<'a, F: FnMut(&mut Marker)>(F, &'a mut crate::promise::Promises, &'a mut crate::api::ApiState,
-                &'a mut Option<Box<crate::bi_intl::State>>);
+                &'a mut Option<Box<crate::bi_intl::State>>, &'a mut Option<Box<realms::Realms>>);
             impl<F: FnMut(&mut Marker)> crate::gc::Roots for Rr<'_, F> {
                 fn walk(&mut self, m: &mut Marker) {
                     (self.0)(m);
                     self.1.walk(m);
                     self.2.mark(m);
+                    if let Some(realms) = self.4 { realms.mark(m); }
                 }
                 fn owners(&mut self, live: &crate::gc::Live, round: u32, out: &mut Vec<Value>) -> usize {
                     self.2.trace_owners(live, round, out)
@@ -689,6 +704,7 @@ impl Realm {
                     // SAFETY: the list holds cells of this heap that the last collection did not free: a dead one is dropped here.
                     self.1.weak_list().retain(|v| unsafe { live.value(*v) });
                     self.2.prune_owners(live);
+                    if let Some(realms) = self.4 { realms.prune(live); }
                     if let Some(intl) = self.3 {
                         // SAFETY: each key is an object in this heap and is removed before it can be freed.
                         intl.retain_live(|v| unsafe { live.value(v) });
@@ -697,10 +713,7 @@ impl Realm {
             }
             let roots = |m: &mut Marker| {
                 consts.iter().for_each(|v| m.value(*v));
-                state.lex.values().for_each(|(k, c, _, _)| {
-                    m.value(k.value());
-                    m.value(*c);
-                });
+                state.mark_roots(m);
                 pins.iter().for_each(|s| m.shape(*s));
                 if let Some(rx) = rx {
                     rx.mark(m);
@@ -712,7 +725,7 @@ impl Realm {
                 }
             };
             pr.collected();
-            collect(heap, shapes, atoms, &mut Rr(roots, pr, api, intl))
+            collect(heap, shapes, atoms, &mut Rr(roots, pr, api, intl, realms))
         };
         self.last_gc = stats;
         self.collections += 1;
@@ -2082,6 +2095,7 @@ impl Realm {
         f.set_slot(&self.shapes, 1, ctx);
         f.set_callable();
         f.set_flag(F_LAZY);
+        self.note_home(f);
         f.value()
     }
 
@@ -2096,6 +2110,11 @@ impl Realm {
 
     #[cold]
     fn fn_props_slow(&mut self, o: Obj) {
+        let home = self.home_realm(o.value());
+        self.in_realm(home, |rt| rt.materialize_fn_props(o));
+    }
+
+    fn materialize_fn_props(&mut self, o: Obj) {
         // The flag also marks `Symbol` and `Symbol.prototype`, which make their members at the first read (`bi_symbol.rs`).
         if o == self.symbol_proto || Some(o) == self.symbol_ctor {
             return self.symbol_members();
@@ -2165,7 +2184,10 @@ impl Realm {
         let proto = Realm::obj(f).and_then(|fo| self.lookup(fo, self.k_prototype).ok().flatten()).and_then(Realm::obj);
         let shape = match proto {
             Some(p) => self.shapes.root(Layout::Object, Some(p.cell()), 4),
-            None => self.s_object,
+            None => {
+                let home = self.function_realm(f)?;
+                self.in_realm(home, |rt| rt.s_object)
+            }
         };
         Ok(Obj::new(&mut self.heap, &self.shapes, shape).expect("memory").value())
     }
@@ -2184,3 +2206,6 @@ mod index_atom_tests;
 #[cfg(test)]
 #[path = "interp_rt_realm_bootstrap_tests.rs"]
 mod realm_bootstrap_tests;
+
+#[path = "realms.rs"]
+mod realms;

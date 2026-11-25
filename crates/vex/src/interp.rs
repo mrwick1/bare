@@ -315,6 +315,7 @@ fn unwind(realm: &mut Realm, prog: &Codes, stack: &mut [Value], ci: &mut usize, 
         *pc = int_at(stack, *fp, 3) as usize;
         *ci = caller as usize;
         *fp -= REC + prog[*ci].nregs as usize;
+        realm.activate_function(record(stack, *fp, 0));
     }
 }
 
@@ -451,6 +452,7 @@ fn gen_resume(realm: &mut Realm, stack: &mut Vec<Value>, prog: &Codes, ci: usize
     }
     let nf = fp + prog[ci].nregs as usize + REC;
     let (nci, rpc) = realm.gen_enter(stack, prog, nf, ci as i32, dstw, pc, next, g)?;
+    realm.activate_function(record(stack, nf, 0));
     Ok((nci, nf, rpc))
 }
 
@@ -519,6 +521,7 @@ impl Vm {
 
     #[inline(always)]
     fn start_at(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, (f, ci, ctx): (Value, usize, Value), this: Value, (nt, dstw): (Value, i32), args: &[Value]) -> Result<Value, Exit> {
+        let previous = realm.activate_function(f);
         let prog = realm.prog.clone();
         let code = &prog[ci];
         let fp = REC;
@@ -537,6 +540,7 @@ impl Vm {
             stack[fp + i] = args.get(i).copied().unwrap_or(Value::UNDEFINED);
         }
         let r = Vm::run(realm, stack, fbs, &prog, ci, fp, 0);
+        realm.activate_realm(previous);
         Vm::finish(realm, prog, r)
     }
 
@@ -563,7 +567,9 @@ impl Vm {
             Ok(x) => x,
             Err(e) => return Err(Exit::Throw(e)),
         };
+        let previous = realm.activate_function(record(stack, REC, 0));
         let r = Vm::run(realm, stack, fbs, &prog, ci, REC, pc);
+        realm.activate_realm(previous);
         Vm::finish(realm, prog, r)
     }
 
@@ -594,30 +600,38 @@ impl Vm {
         realm.collect(fbs, |_| {});
     }
 
-    fn run(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, prog: &Codes, mut ci: usize, mut fp: usize, mut pc: usize) -> Result<Value, Exit> {
+    fn run(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, prog: &Codes, ci: usize, fp: usize, pc: usize) -> Result<Value, Exit> {
         // The stack and the entry frame for the errors of natives that the loop did not publish for (`error_stack.rs`); the run above gets
         // its own back when this one ends.
         let saved = (realm.es.top, realm.es.pc, realm.es.base);
         (realm.es.top, realm.es.base) = (Default::default(), stack.as_ptr() as usize);
-        let r = loop {
-            match Vm::exec::<Hot>(realm, stack, fbs, prog, ci, fp, pc) {
-                Flow::Done(r) => break r,
-                Flow::Go(c, f, p) => (ci, fp, pc) = (c, f, p),
-            }
+        let r = if realm.cross_realm_enabled() {
+            Self::run_loop::<true>(realm, stack, fbs, prog, ci, fp, pc)
+        } else {
+            Self::run_loop::<false>(realm, stack, fbs, prog, ci, fp, pc)
         };
         (realm.es.top, realm.es.pc, realm.es.base) = saved;
         r
+    }
+
+    fn run_loop<const REALMS: bool>(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, prog: &Codes, mut ci: usize, mut fp: usize, mut pc: usize) -> Result<Value, Exit> {
+        loop {
+            match Vm::exec::<Hot, REALMS>(realm, stack, fbs, prog, ci, fp, pc) {
+                Flow::Done(r) => return r,
+                Flow::Go(c, f, p) => (ci, fp, pc) = (c, f, p),
+            }
+        }
     }
 
     /// The call of the hot loop to the cold function. `#[cold]` makes LLVM treat the call as unlikely, so the spills around it stay out of
     /// the hot arms.
     #[cold]
     #[inline(never)]
-    fn run_cold(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, prog: &Codes, ci: usize, fp: usize, pc: usize) -> Flow {
-        Vm::exec::<Cold>(realm, stack, fbs, prog, ci, fp, pc)
+    fn run_cold<const REALMS: bool>(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, prog: &Codes, ci: usize, fp: usize, pc: usize) -> Flow {
+        Vm::exec::<Cold, REALMS>(realm, stack, fbs, prog, ci, fp, pc)
     }
 
-    /// The interpreter loop, in two copies. `exec::<Hot>` is the hot loop: it runs from `pc` of the frame `(ci, fp)` (0, or the resume point of a generator) until the entry
+    /// Separate single-realm and realm-aware loops, each with a hot and cold part. `exec::<Hot>` is the hot loop: it runs from `pc` of the frame `(ci, fp)` (0, or the resume point of a generator) until the entry
     /// frame returns. `exec::<Cold>` is the cold function: it runs the one instruction at `pc` of a cold op (`cold_ops!`) or a global cache miss and returns
     /// `Flow::Go` with the new `(ci, fp, pc)`. The macros below serve both, so an arm has one text. `M::COLD` is a constant: each copy has
     /// only its own `match`.
@@ -639,7 +653,7 @@ impl Vm {
     /// `reload!()` after it (`regs`, `code`, `words` and `fb`). `ret!` moves `fp` first, then calls `reload!`.
     #[allow(unused_assignments, clippy::ptr_arg)]
     #[inline(never)]
-    fn exec<M: Mode>(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, prog: &Codes, mut ci: usize, mut fp: usize, pc0: usize) -> M::Out {
+    fn exec<M: Mode, const REALMS: bool>(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, prog: &Codes, mut ci: usize, mut fp: usize, pc0: usize) -> M::Out {
         let mut code: &Code = &prog[ci];
         let mut words: &[u32] = &code.words;
         let mut fb: &mut Feedback = if ci < fbs.len() {
@@ -683,7 +697,7 @@ impl Vm {
         }
         macro_rules! run_cold {
             () => {{
-                let flow = Vm::run_cold(realm, stack, fbs, prog, ci, fp, pc);
+                let flow = Vm::run_cold::<REALMS>(realm, stack, fbs, prog, ci, fp, pc);
                 let (nci, nfp, npc) = match flow {
                     Flow::Go(c, f, p) => (c, f, p),
                     Flow::Done(r) => return M::done(r),
@@ -1011,13 +1025,14 @@ impl Vm {
                 let new_fp = fp + code.nregs as usize + REC;
                 ensure!(new_fp + ncode.nregs as usize + 8);
                 let (np, argc, ab) = (ncode.nparams as usize, $argc as usize, $ab as usize);
+                let (callee, this, nt): (Value, Value, Value) = ($callee, $this, $nt);
+                if REALMS { realm.activate_function(callee); }
                 let argsw = if ncode.flags & CF_ARGS != 0 {
                     realm.new_args(&stack[ab..ab + argc])
                 } else {
                     undef
                 };
                 let given = np.min(argc);
-                let (callee, this, nt): (Value, Value, Value) = ($callee, $this, $nt);
                 // SAFETY: `ensure!` made the stack hold `new_fp + nregs + 8` words, so the record, the `np` parameters and the registers
                 // are inside it. The arguments are at `ab..ab + given`, which ends below `new_fp - REC` (the registers of the caller) or
                 // is at `new_fp` itself (staged); a forward copy is right in both cases.
@@ -1194,7 +1209,7 @@ impl Vm {
         }
         macro_rules! run_cold {
             () => {{
-                let flow = Vm::run_cold(realm, stack, fbs, prog, ci, fp, pc);
+                let flow = Vm::run_cold::<REALMS>(realm, stack, fbs, prog, ci, fp, pc);
                 let (nci, nfp, npc) = match flow {
                     Flow::Go(c, f, p) => (c, f, p),
                     Flow::Done(r) => return M::done(r),
@@ -1240,6 +1255,7 @@ impl Vm {
                 // SAFETY: as in `reload!`: `ci` is a frame that the stack holds. `fp` moves before the reload, which sets `regs` from it.
                 let ccode = unsafe { prog.at(ci) };
                 fp -= REC + ccode.nregs as usize;
+                if REALMS { realm.activate_function(record(stack, fp, 0)); }
                 reload!(ccode);
                 r!(dst & 0xffff) = v;
                 continue;
@@ -1496,6 +1512,7 @@ impl Vm {
                             match gen_op(realm, stack, fbs, prog, ci, fp, pc, opv, a!(), bx!() as u32, c!() as u32, next) {
                                 Ok(GenExit::Back(nci, nfp, npc)) => {
                                     (ci, fp, pc) = (nci, nfp, npc);
+                                    if REALMS { realm.activate_function(record(stack, fp, 0)); }
                                     reload!();
                                     continue;
                                 }
@@ -1508,6 +1525,7 @@ impl Vm {
                             match async_op(realm, stack, fbs, prog, ci, fp, pc, opv, a!(), bx!() as u32, c!() as u32, next) {
                                 Ok(GenExit::Back(nci, nfp, npc)) => {
                                     (ci, fp, pc) = (nci, nfp, npc);
+                                    if REALMS { realm.activate_function(record(stack, fp, 0)); }
                                     reload!();
                                     continue;
                                 }
