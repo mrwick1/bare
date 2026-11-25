@@ -721,7 +721,14 @@ pub(crate) type Between<'a> = &'a mut dyn FnMut(&mut Realm) -> Result<(), DrainS
 impl Realm {
     /// Run the jobs at the top (no native on the Rust stack) until the queue is empty. Each job is its own entry on a pooled machine, with
     /// no hold, so the collector may run inside it. `n` counts the jobs of the checkpoint across calls. Any stop is sticky.
-    pub(crate) fn drain_jobs(&mut self, n: &mut u32, mut between: Option<Between>, on_error: &mut dyn FnMut(&mut Realm, Value)) -> Result<(), DrainStop> {
+    pub(crate) fn drain_jobs(&mut self, n: &mut u32, between: Option<Between>, on_error: &mut dyn FnMut(&mut Realm, Value)) -> Result<(), DrainStop> {
+        let r = self.drain_loop(n, between, on_error);
+        // The end of a microtask checkpoint is the end of the job: `WeakRef` targets are not kept any longer (`bi_weakref.rs`).
+        self.end_job();
+        r
+    }
+
+    fn drain_loop(&mut self, n: &mut u32, mut between: Option<Between>, on_error: &mut dyn FnMut(&mut Realm, Value)) -> Result<(), DrainStop> {
         if let Some(f) = self.pr.failed {
             return Err(f);
         }
@@ -753,7 +760,7 @@ impl Realm {
 
     /// Call the handler `f` of a job from the top. A script function (the usual one) starts on a pooled machine at once, with one read of
     /// the function; a built-in or a bound function goes through `call_held`.
-    fn job_call(&mut self, f: Value, this: Value, args: &[Value]) -> R<Value> {
+    pub(crate) fn job_call(&mut self, f: Value, this: Value, args: &[Value]) -> R<Value> {
         if self.native_id(f).is_some() {
             return self.call_held(f, this, args);
         }

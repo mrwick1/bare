@@ -434,6 +434,12 @@ impl Ops<New> for Realm {
     fn gc_due(&self) -> bool {
         self.raw_gc_due()
     }
+    fn finalizers_due_o(&self) -> bool {
+        self.finalizers_due()
+    }
+    fn run_finalizers_o(&mut self) -> Result<usize, Fault<New>> {
+        run(self, |r| r.run_finalizers_host())
+    }
     fn api_err<'s>(&mut self, e: Fault<New>) -> bare_js_api::Error<'s> {
         error(self, e)
     }

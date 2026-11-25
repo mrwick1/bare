@@ -84,6 +84,7 @@ impl Realm {
     /// Collect now. The host is between tasks: no script runs and no host call is on the stack. `extra` are values that the caller still holds.
     pub fn raw_collect(&mut self, extra: &[Value]) -> RawCollected {
         self.api.freed = Some(RawCollected::default());
+        self.end_job();
         self.collect(&mut [], |m| extra.iter().for_each(|v| m.value(*v)));
         self.api.external_since = 0;
         self.api.freed.take().expect("explicit collection")

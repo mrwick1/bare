@@ -1881,6 +1881,10 @@ impl<E: Eng> Browser<E> {
                 capped = dom.next_due().is_some_and(|d| d <= upto);
                 break;
             }
+            // A cleanup callback of `FinalizationRegistry` is a task of its own (`HostEnqueueFinalizationRegistryCleanupJob`): a collection only marks it due.
+            if self.it.finalizers_due_o() {
+                self.it.run_finalizers_o()?;
+            }
             let Some((due, run)) = dom.pop_due(upto) else { break };
             if target.is_some() {
                 dom.move_clock(due);

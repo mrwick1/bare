@@ -61,6 +61,28 @@ impl WeakTab {
         Some(WeakTab(p))
     }
 
+    /// A table of one entry for a `WeakRef` (`bi_weakref.rs`): the key is the target, the value is `undefined`. The collector clears the key when the
+    /// target is not marked. The table has no hole, so only [`WeakTab::target`] and [`WeakTab::set_target`] may be used on it. `None` when out of memory.
+    pub fn one(heap: &mut Heap, target: Value) -> Option<WeakTab> {
+        let p = heap.alloc(ENTRIES_AT + 16)?;
+        // SAFETY: the new cell has room for the header, the two counters and one entry; all of them are written here.
+        unsafe {
+            p.cast::<CellHeader>().write(CellHeader::new(Layout::WeakTable, 0));
+            p.as_ptr().add(CAP_AT).cast::<u32>().write(1);
+            p.as_ptr().add(USED_AT).cast::<u32>().write(1);
+            let e = p.as_ptr().add(ENTRIES_AT).cast::<Value>();
+            e.write(target);
+            e.add(1).write(Value::UNDEFINED);
+        }
+        Some(WeakTab(p))
+    }
+
+    /// The target of a table made by [`WeakTab::one`]: `undefined` once the collector cleared it.
+    #[inline]
+    pub fn target(self) -> Value {
+        self.key(0)
+    }
+
     /// The table of a value that [`WeakTab::value`] made.
     ///
     /// # Safety

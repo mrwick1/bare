@@ -571,6 +571,7 @@ impl Vm {
     /// Collect now, as the gate does (for tests and the host between tasks: the stack must be empty or stopped at a safepoint).
     pub fn collect_idle(&mut self) {
         let Vm { realm, fbs, .. } = self;
+        realm.end_job();
         realm.collect(fbs, |_| {});
     }
 

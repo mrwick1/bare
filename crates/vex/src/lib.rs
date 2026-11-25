@@ -83,6 +83,7 @@ mod module;
 mod promise_statics;
 mod bi_symbol;
 mod bi_collections;
+mod bi_weakref;
 mod bi_reflect;
 mod bi_proxy;
 mod bi_string_more;
@@ -107,3 +108,6 @@ mod compile_delete_chain_tests;
 #[cfg(test)]
 #[path = "builtins_function_ctor_tests.rs"]
 mod builtins_function_ctor_tests;
+#[cfg(test)]
+#[path = "bi_weakref_tests.rs"]
+mod bi_weakref_tests;

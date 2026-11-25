@@ -504,7 +504,7 @@ pub(crate) fn add_pair(rt: &mut Realm, o: Obj, kind: u32, k: Value, v: Value) ->
     }
 }
 
-fn require_new(rt: &mut Realm, name: &str) -> R<()> {
+pub(crate) fn require_new(rt: &mut Realm, name: &str) -> R<()> {
     if Realm::obj(rt.nt).is_none() {
         return rt.type_error(&format!("Constructor {name} requires 'new'"));
     }

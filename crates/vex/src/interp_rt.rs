@@ -411,6 +411,8 @@ pub struct Realm {
     /// `Map`, `Set`, `WeakMap` and `WeakSet` (`bi_collections.rs`).
     pub(crate) coll: Option<Box<crate::bi_collections::Colls>>,
     pub(crate) intl: Option<Box<crate::bi_intl::State>>,
+    /// `WeakRef` and `FinalizationRegistry` (`bi_weakref.rs`).
+    pub(crate) wr: Option<Box<crate::bi_weakref::WeakRefs>>,
 }
 
 const TYPEOF: [&str; 8] = ["undefined", "object", "boolean", "number", "string", "function", "symbol", "bigint"];
@@ -583,6 +585,7 @@ impl Realm {
             rx: None,
             coll: None,
             intl: None,
+            wr: None,
         };
         rt.install_builtins();
         rt
@@ -598,25 +601,34 @@ impl Realm {
     pub fn collect(&mut self, fbs: &mut [Feedback], walk_frames: impl FnOnce(&mut Marker)) {
         // A nested call holds the collector (`Realm::call_function`), so no machine is in use now: the idle ones keep their feedback.
         debug_assert!(self.nest == 0, "a collection inside a nested call");
-        let Realm { heap, shapes, atoms, consts, pins, lex, pool, pr, api, rx, intl, .. } = self;
+        let Realm { heap, shapes, atoms, consts, pins, lex, pool, pr, api, rx, intl, wr, .. } = self;
         let mut walk_frames = Some(walk_frames);
         let stats = {
             // The promise state is marked in the walk; its weak list is cleared after the marking.
             struct Rr<'a, F: FnMut(&mut Marker)>(F, &'a mut crate::promise::Promises, &'a mut crate::api::ApiState,
-                &'a mut Option<Box<crate::bi_intl::State>>);
+                &'a mut Option<Box<crate::bi_intl::State>>, &'a mut Option<Box<crate::bi_weakref::WeakRefs>>);
             impl<F: FnMut(&mut Marker)> crate::gc::Roots for Rr<'_, F> {
                 fn walk(&mut self, m: &mut Marker) {
                     (self.0)(m);
                     self.1.walk(m);
                     self.2.mark(m);
+                    if let Some(w) = self.4 {
+                        w.mark(m);
+                    }
                 }
                 fn owners(&mut self, live: &crate::gc::Live, round: u32, out: &mut Vec<Value>) -> usize {
                     self.2.trace_owners(live, round, out)
+                        // SAFETY: the values in the records of `WeakRefs` are cells of this heap that the last collection did not free.
+                        + self.4.as_mut().map_or(0, |w| w.trace_owners(|v| unsafe { live.value(v) }, round, out))
                 }
                 fn weak(&mut self, live: &crate::gc::Live) {
                     // SAFETY: the list holds cells of this heap that the last collection did not free: a dead one is dropped here.
                     self.1.weak_list().retain(|v| unsafe { live.value(*v) });
                     self.2.prune_owners(live);
+                    if let Some(w) = self.4 {
+                        // SAFETY: as in `owners`.
+                        w.weak(|v| unsafe { live.value(v) });
+                    }
                     if let Some(intl) = self.3 {
                         // SAFETY: each key is an object in this heap and is removed before it can be freed.
                         intl.retain_live(|v| unsafe { live.value(v) });
@@ -640,7 +652,7 @@ impl Realm {
                 }
             };
             pr.collected();
-            collect(heap, shapes, atoms, &mut Rr(roots, pr, api, intl))
+            collect(heap, shapes, atoms, &mut Rr(roots, pr, api, intl, wr))
         };
         self.last_gc = stats;
         self.collections += 1;

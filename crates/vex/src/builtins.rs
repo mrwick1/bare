@@ -385,6 +385,7 @@ impl Realm {
         self.install_array();
         self.lazy_table(g, crate::bi_buffer::GLOBALS);
         self.install_collections();
+        self.install_weakrefs();
         self.install_date();
         self.install_generator();
         self.install_json();

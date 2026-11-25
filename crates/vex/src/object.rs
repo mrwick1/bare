@@ -155,7 +155,11 @@ pub(crate) const K_PROXY: u32 = 18;
 /// The largest kind.
 pub(crate) const K_TEXT_ENCODER: u32 = 19;
 pub(crate) const K_TEXT_DECODER: u32 = 20;
-const K_LAST: u32 = K_TEXT_DECODER;
+/// A `WeakRef` (`bi_weakref.rs`): its slot 0 is a one-entry `WeakTable` that holds the target.
+pub(crate) const K_WEAKREF: u32 = 21;
+/// A `FinalizationRegistry` (`bi_weakref.rs`): its slot 0 is the index of its record in `WeakRefs::regs`.
+pub(crate) const K_FINREG: u32 = 22;
+const K_LAST: u32 = K_FINREG;
 const ALL_FLAGS: [u32; 18] = [
     F_OVER, F_CALLABLE, F_CLASS, F_DERIVED, F_NATIVE, F_NOEXT, F_FNPROPS, F_ELEMS_RO, F_ELEMS_FIXED, F_LEN_RO, F_SLOWIDX, F_LAZY, F_KIND, F_HOST,
     F_LAZYM, F_LAZYTAB, F_ARGS, F_PROTO,

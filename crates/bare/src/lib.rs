@@ -162,6 +162,8 @@ mod browser_tests;
 mod browser_new_tests;
 #[cfg(test)]
 mod browser_events_gc_tests;
+#[cfg(test)]
+mod browser_finalization_tests;
 pub mod browser_platform;
 mod browser_platform_class;
 mod browser_platform_query;

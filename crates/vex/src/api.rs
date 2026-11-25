@@ -427,6 +427,22 @@ impl Realm {
         r
     }
 
+    /// The cleanup callbacks of `FinalizationRegistry` that are due (`bi_weakref.rs`), as one task of the host: a throw goes to `Host::report_exception`.
+    /// Gives the number of callbacks that ran. Like `drain_microtasks`, it is `Unsupported` with a script on the stack.
+    pub fn run_finalizers_host<'s>(&mut self) -> Result<usize, Error<'s>> {
+        if self.a_nested() {
+            return Err(self.a_unsup("run_finalizers during a call"));
+        }
+        if self.api.tasks == 0 {
+            self.fuel = self.api.budget;
+        }
+        let host = self.api.host.clone();
+        match self.run_finalizers(&mut |rt, v| host.as_deref().iter().for_each(|h| rt.a_report(*h, v))) {
+            Ok(n) => Ok(n as usize),
+            Err(e) => Err(self.a_err(e)),
+        }
+    }
+
     /// `Host::report_exception` for a throw of a `queueMicrotask` callback. The hook runs as a host call of the checkpoint: one task
     /// level, so a script that it runs shares the budget.
     fn a_report(&mut self, h: &dyn Host<Realm>, v: Value) {

@@ -213,6 +213,8 @@ pub trait Ops<E: Eng>: Sized {
     fn set_external_live(&mut self, n: usize) -> ();
     fn add_external(&mut self, n: usize) -> ();
     fn gc_due(& self) -> bool;
+    fn finalizers_due_o(& self) -> bool;
+    fn run_finalizers_o(&mut self) -> Result<usize, Fault<E>>;
     fn api_err<'s>(&mut self, e: Fault<E>) -> bare_js_api::Error<'s>;
     fn api_unerr(&mut self, e: bare_js_api::Error<'_>) -> Fault<E>;
     fn h_set_proto(&mut self, o: E::Obj, proto: Option<E::Obj>) -> Result<bool, Fault<E>>;
