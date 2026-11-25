@@ -309,7 +309,7 @@ impl Realm {
         self.proxy_op(proxy, "defineProperty", |rt, target, handler, trap| {
             let Some(trap) = trap else { return rt.define_own(target, key, d) };
             let k = rt.proxy_key(key);
-            let obj = Obj::new(&mut rt.heap, &rt.shapes, rt.s_object).expect("memory");
+            let obj = Obj::new(&mut rt.heap, &rt.shapes, rt.state.s_object).expect("memory");
             for (name, value) in [("value", d.value), ("writable", d.w.map(Value::bool)), ("get", d.get), ("set", d.set),
                 ("enumerable", d.e.map(Value::bool)), ("configurable", d.c.map(Value::bool))]
             {
@@ -432,7 +432,7 @@ fn revocable(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let id = rt.proxy_native_ids() + 2;
     let revoke = rt.native_cell(id);
     revoke.set_slot(&rt.shapes, 1, p.value());
-    let result = Obj::new(&mut rt.heap, &rt.shapes, rt.s_object).expect("memory");
+    let result = Obj::new(&mut rt.heap, &rt.shapes, rt.state.s_object).expect("memory");
     for (name, value) in [("proxy", p.value()), ("revoke", revoke.value())] {
         let key = Key::Name(rt.intern(name));
         rt.define(result, key, value)?;

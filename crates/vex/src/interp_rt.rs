@@ -296,35 +296,16 @@ pub enum ErrKind {
     Plain,
 }
 
-/// The realm: heap, tables, global object and prototypes.
+/// The execution state and heap for the active ECMAScript realm.
 pub struct Realm {
     pub heap: Heap,
     pub shapes: Shapes,
     pub atoms: Atoms,
-    pub global: Obj,
-    pub object_proto: Obj,
-    pub function_proto: Obj,
-    pub array_proto: Obj,
-    /// The prototype epoch and the proof that the stock array chain has no named indices.
-    array_push_proof: (u64, bool),
-    pub(crate) array_ctor: Value,
-    pub error_proto: Obj,
-    pub s_object: ShapeId,
-    pub s_array: ShapeId,
-    pub s_func: ShapeId,
-    /// The shape of an arguments object: an array with the prototype of `Object`.
-    s_args: Option<ShapeId>,
-    /// `%Array.prototype.values%`, the value of `Symbol.iterator` of each arguments object; made at the first one (`Realm::new_args`).
-    pub(crate) args_iter: Value,
+    pub(crate) state: RealmState,
     pub k_constructor: Str,
     pub k_raw: Str,
     /// Counter of the private names (`NewPrivateName`).
     pub private_n: u32,
-    /// The raw id of `s_func` and the places of its two hidden slots (the code index and the context): the call reads them with no
-    /// shape lookup.
-    func_shape: u32,
-    loc_code: u32,
-    loc_ctx: u32,
     pub k_prototype: Str,
     /// The hidden property that holds the `[[PrimitiveValue]]` of a wrapper object (`bi_wrap.rs`).
     pub k_prim: Str,
@@ -337,38 +318,17 @@ pub struct Realm {
     pub(crate) pr: crate::promise::Promises,
     /// The module records and the `import()` calls that wait for the host (`module.rs`).
     pub(crate) md: crate::module::Modules,
-    pub string_proto: Obj,
-    pub number_proto: Obj,
-    pub boolean_proto: Obj,
-    /// `Symbol.prototype`, and the well-known symbols in the order of `bi_symbol::WK` (`bi_symbol.rs`). The members of `Symbol` and of
-    /// the prototype are made at the first use of either (`Realm::fn_props`).
-    pub symbol_proto: Obj,
-    pub(crate) bigint_intrinsics: Option<(Obj, Obj)>,
-    pub symbol_ctor: Option<Obj>,
-    /// The lazy tables of the built-in objects (`lazy.rs`).
-    pub(crate) ltab: crate::lazy::Lazy,
     pub(crate) wk: [Str; crate::bi_symbol::WK],
-    pub(crate) unscopables: Option<Str>,
     /// The registry of `Symbol.for`: an object with no prototype, made at the first call. It is a root.
     pub(crate) registry: Option<Obj>,
-    /// `TypeError.prototype` and the others, by `ErrKind`.
-    pub error_protos: [Obj; 7],
-    pub(crate) date_proto: Obj,
-    /// The shape of a built-in function cell: slot 0 is the index in `natives`, slots 1 to 3 are free for the function (a bound function).
-    pub s_native: ShapeId,
     pub(crate) proxy_natives: Option<usize>,
     pub(crate) proxy_depth: u32,
     /// The built-ins written in Rust (`builtins.rs`).
     pub natives: Vec<Native>,
     /// The shared atom of the `name` and the `length` of each code (`Code::fn_name`, `Code::fn_len`), for `Realm::fn_props`.
     pub fn_info: Vec<(Option<Str>, u16)>,
-    /// The generator prototype, the shape of an iterator result and the names of the hidden slots of a generator (`gen.rs`).
-    pub(crate) genr: crate::generator::GenRealm,
     /// The index of the native that runs a bound function.
     pub(crate) bound_id: i32,
-    /// The slots of the prelude (`prelude_pre.rs`): `undefined` until the first read. The first slots are the helpers that natives call
-    /// through the tail channel (`bi_object.rs`).
-    pub(crate) pre: [Value; crate::prelude_pre::NPRE],
     /// While a native runs: the function cell that was called, and `new.target` (`undefined` for a plain call).
     pub callee: Value,
     pub nt: Value,
@@ -384,9 +344,6 @@ pub struct Realm {
     tnames: [Str; 8],
     /// Every value that the realm keeps and the collector must mark.
     pub(crate) consts: Vec<Value>,
-    /// The global lexical environment: the top-level `let`, `const` and `class` names of the scripts that ran, each with its context
-    /// and slot (`DeclLex`). A global read that the global object does not answer looks here. The collector marks the names and contexts.
-    pub(crate) lex: HashMap<u64, (Str, Value, u32, bool)>,
     /// Shapes that no object may have yet.
     pub(crate) pins: Vec<ShapeId>,
     /// The top frame when a collection runs: code index, frame pointer, `pc` of the safepoint.
@@ -419,6 +376,180 @@ pub struct Realm {
     /// `Map`, `Set`, `WeakMap` and `WeakSet` (`bi_collections.rs`).
     pub(crate) coll: Option<Box<crate::bi_collections::Colls>>,
     pub(crate) intl: Option<Box<crate::bi_intl::State>>,
+}
+
+/// The global environment and intrinsic state of one realm.
+pub struct RealmState {
+    pub global: Obj,
+    pub object_proto: Obj,
+    pub function_proto: Obj,
+    pub array_proto: Obj,
+    /// The prototype epoch and the proof that the stock array chain has no named indices.
+    array_push_proof: (u64, bool),
+    pub(crate) array_ctor: Value,
+    pub error_proto: Obj,
+    pub s_object: ShapeId,
+    pub s_array: ShapeId,
+    pub s_func: ShapeId,
+    /// The shape of an arguments object: an array with the prototype of `Object`.
+    s_args: Option<ShapeId>,
+    /// `%Array.prototype.values%`, the value of `Symbol.iterator` of each arguments object; made at the first one (`Realm::new_args`).
+    pub(crate) args_iter: Value,
+    /// The raw id of `s_func` and the places of its two hidden slots (the code index and the context): the call reads them with no
+    /// shape lookup.
+    func_shape: u32,
+    loc_code: u32,
+    loc_ctx: u32,
+    pub string_proto: Obj,
+    pub number_proto: Obj,
+    pub boolean_proto: Obj,
+    /// `Symbol.prototype`, and the well-known symbols in the order of `bi_symbol::WK` (`bi_symbol.rs`). The members of `Symbol` and of
+    /// the prototype are made at the first use of either (`Realm::fn_props`).
+    pub symbol_proto: Obj,
+    pub(crate) bigint_intrinsics: Option<(Obj, Obj)>,
+    pub symbol_ctor: Option<Obj>,
+    /// The lazy tables of the built-in objects (`lazy.rs`).
+    pub(crate) ltab: crate::lazy::Lazy,
+    pub(crate) unscopables: Option<Str>,
+    /// `TypeError.prototype` and the others, by `ErrKind`.
+    pub error_protos: [Obj; 7],
+    pub(crate) date_proto: Obj,
+    /// The shape of a built-in function cell: slot 0 is the index in `natives`, slots 1 to 3 are free for the function (a bound function).
+    pub s_native: ShapeId,
+    /// The generator prototype, the shape of an iterator result and the names of the hidden slots of a generator (`gen.rs`).
+    pub(crate) genr: crate::generator::GenRealm,
+    /// The slots of the prelude (`prelude_pre.rs`): `undefined` until the first read. The first slots are the helpers that natives call
+    /// through the tail channel (`bi_object.rs`).
+    pub(crate) pre: [Value; crate::prelude_pre::NPRE],
+    /// The global lexical environment: the top-level `let`, `const` and `class` names of the scripts that ran, each with its context
+    /// and slot (`DeclLex`). A global read that the global object does not answer looks here. The collector marks the names and contexts.
+    pub(crate) lex: HashMap<u64, (Str, Value, u32, bool)>,
+}
+
+struct RealmBootstrapKeys {
+    k_code: Str,
+    k_ctx: Str,
+    k_home: Str,
+    k_fields: Str,
+    k_link: Str,
+    k_prim: Str,
+    k_then: Str,
+    k_pstate: Str,
+    k_presult: Str,
+    hidden: [Str; 4],
+    k_value: Str,
+    k_done: Str,
+    gkeys: [Str; 6],
+    empty: Str,
+}
+
+struct RealmBootstrap {
+    state: RealmState,
+    pr: crate::promise::Promises,
+    consts: Vec<Value>,
+    pins: Vec<ShapeId>,
+}
+
+impl RealmState {
+    fn allocate(heap: &mut Heap, shapes: &mut Shapes, keys: RealmBootstrapKeys) -> RealmBootstrap {
+        let RealmBootstrapKeys { k_code, k_ctx, k_home, k_fields, k_link, k_prim, k_then, k_pstate, k_presult, hidden, k_value, k_done, gkeys, empty } = keys;
+        let root = shapes.root(Layout::Object, None, 4);
+        let object_proto = Obj::new(heap, shapes, root).expect("memory");
+        let proto = Some(object_proto.cell());
+        let s_object = shapes.root(Layout::Object, proto, 4);
+        let function_proto_shape = shapes.add(s_object, hidden[0], 0).expect("shape");
+        let function_proto = Obj::new(heap, shapes, function_proto_shape).expect("memory");
+        let array_proto_shape = shapes.root(Layout::Indexed, proto, 2);
+        let array_proto = Obj::new(heap, shapes, array_proto_shape).expect("memory");
+        let error_proto = Obj::new(heap, shapes, s_object).expect("memory");
+        let global = Obj::new(heap, shapes, s_object).expect("memory");
+        let s_array = shapes.root(Layout::Indexed, Some(array_proto.cell()), 0);
+        let f = shapes.root(Layout::Object, Some(function_proto.cell()), 4);
+        let f = shapes.add(f, k_code, 0).expect("shape");
+        let f = shapes.add(f, k_ctx, 0).expect("shape");
+        let f = shapes.add(f, k_home, 0).expect("shape");
+        let f = shapes.add(f, k_fields, 0).expect("shape");
+        let s_func = shapes.add(f, k_link, 0).expect("shape");
+        let wrapper = shapes.add(s_object, k_prim, 0).expect("shape");
+        let [string_proto, number_proto, boolean_proto] =
+            [empty.value(), Value::int(0), Value::bool(false)].map(|v| Obj::new_wrapper(heap, shapes, wrapper, v));
+        let symbol_proto = Obj::new(heap, shapes, s_object).expect("memory");
+        let pr = crate::promise::Promises::new(heap, shapes, s_object, k_then, k_pstate, k_presult);
+        // The prototypes of `TypeError` and the others inherit from `Error.prototype`.
+        let eshape = shapes.root(Layout::Object, Some(error_proto.cell()), 4);
+        let mut error_protos = [error_proto; 7];
+        for (i, p) in error_protos.iter_mut().enumerate() {
+            if i != 4 {
+                *p = Obj::new(heap, shapes, eshape).expect("memory");
+            }
+        }
+        let s_native = hidden.iter().fold(shapes.root(Layout::Object, Some(function_proto.cell()), 4), |f, k| shapes.add(f, *k, 0).expect("shape"));
+        let gen_proto = Obj::new(heap, shapes, s_object).expect("memory");
+        let s_iter = {
+            let s = shapes.root(Layout::Object, proto, 2);
+            let s = shapes.add(s, k_value, A_W | A_E | A_C).expect("shape");
+            shapes.add(s, k_done, A_W | A_E | A_C).expect("shape")
+        };
+        let mut consts: Vec<Value> = [object_proto, function_proto, array_proto, error_proto, global, string_proto, number_proto, boolean_proto, symbol_proto].iter().map(|o| o.value()).collect();
+        consts.extend(error_protos.iter().map(|o| o.value()));
+        consts.extend(hidden.iter().chain(&gkeys).chain([&k_value, &k_done]).map(|s| s.value()));
+        consts.push(gen_proto.value());
+        let pins = vec![s_object, s_array, s_func, s_native, s_iter, pr.shape];
+        let probe = Obj::new(heap, shapes, s_func).expect("memory");
+        let (func_shape, loc_code, loc_ctx) = (s_func.raw(), probe.loc(shapes, 0), probe.loc(shapes, 1));
+        assert!(loc_code >> 9 == 0 && loc_ctx >> 9 == 0, "the code and the context of a function are inline slots");
+
+        RealmBootstrap {
+            state: Self {
+                global,
+                object_proto,
+                function_proto,
+                array_proto,
+                array_push_proof: (0, false),
+                array_ctor: Value::UNDEFINED,
+                error_proto,
+                s_object,
+                s_array,
+                s_func,
+                s_args: None,
+                args_iter: Value::UNDEFINED,
+                func_shape,
+                loc_code,
+                loc_ctx,
+                string_proto,
+                number_proto,
+                boolean_proto,
+                symbol_proto,
+                bigint_intrinsics: None,
+                symbol_ctor: None,
+                ltab: Default::default(),
+                unscopables: None,
+                error_protos,
+                date_proto: object_proto,
+                s_native,
+                genr: crate::generator::GenRealm { proto: gen_proto, s_iter, keys: gkeys, func_proto: None, async_proto: None, async_shape: None, ag: Default::default() },
+                pre: [Value::UNDEFINED; crate::prelude_pre::NPRE],
+                lex: HashMap::new(),
+            },
+            pr,
+            consts,
+            pins,
+        }
+    }
+}
+
+impl std::ops::Deref for Realm {
+    type Target = RealmState;
+
+    fn deref(&self) -> &RealmState {
+        &self.state
+    }
+}
+
+impl std::ops::DerefMut for Realm {
+    fn deref_mut(&mut self) -> &mut RealmState {
+        &mut self.state
+    }
 }
 
 const TYPEOF: [&str; 8] = ["undefined", "object", "boolean", "number", "string", "function", "symbol", "bigint"];
@@ -465,79 +596,23 @@ impl Realm {
         let (k_value, k_done) = (atom("value"), atom("done"));
         let gkeys = ["\0gstate", "\0gframe", "\0gsent", "\0gmode", "\0gpromise", "\0gentry"].map(&mut atom);
         let empty = atom("");
-        let root = shapes.root(Layout::Object, None, 4);
-        let object_proto = Obj::new(&mut heap, &shapes, root).expect("memory");
-        let proto = Some(object_proto.cell());
-        let s_object = shapes.root(Layout::Object, proto, 4);
-        let function_proto_shape = shapes.add(s_object, hidden[0], 0).expect("shape");
-        let function_proto = Obj::new(&mut heap, &shapes, function_proto_shape).expect("memory");
-        let array_proto_shape = shapes.root(Layout::Indexed, proto, 2);
-        let array_proto = Obj::new(&mut heap, &shapes, array_proto_shape).expect("memory");
-        let error_proto = Obj::new(&mut heap, &shapes, s_object).expect("memory");
-        let global = Obj::new(&mut heap, &shapes, s_object).expect("memory");
-        shapes.watch(global.cell().as_ptr() as usize);
-        let s_array = shapes.root(Layout::Indexed, Some(array_proto.cell()), 0);
-        let f = shapes.root(Layout::Object, Some(function_proto.cell()), 4);
-        let f = shapes.add(f, k_code, 0).expect("shape");
-        let f = shapes.add(f, k_ctx, 0).expect("shape");
-        let f = shapes.add(f, k_home, 0).expect("shape");
-        let f = shapes.add(f, k_fields, 0).expect("shape");
-        let s_func = shapes.add(f, k_link, 0).expect("shape");
-        let wrapper = shapes.add(s_object, k_prim, 0).expect("shape");
-        let [string_proto, number_proto, boolean_proto] =
-            [empty.value(), Value::int(0), Value::bool(false)].map(|v| Obj::new_wrapper(&mut heap, &shapes, wrapper, v));
-        let symbol_proto = Obj::new(&mut heap, &shapes, s_object).expect("memory");
+        let RealmBootstrap { state, pr, mut consts, pins } = RealmState::allocate(&mut heap, &mut shapes, RealmBootstrapKeys {
+            k_code, k_ctx, k_home, k_fields, k_link, k_prim, k_then, k_pstate, k_presult, hidden, k_value, k_done, gkeys, empty,
+        });
+        shapes.watch(state.global.cell().as_ptr() as usize);
         let wk = crate::bi_symbol::well_known(&mut heap);
-        let pr = crate::promise::Promises::new(&mut heap, &mut shapes, s_object, k_then, k_pstate, k_presult);
-        // The prototypes of `TypeError` and the others inherit from `Error.prototype`.
-        let eshape = shapes.root(Layout::Object, Some(error_proto.cell()), 4);
-        let mut error_protos = [error_proto; 7];
-        for (i, p) in error_protos.iter_mut().enumerate() {
-            if i != 4 {
-                *p = Obj::new(&mut heap, &shapes, eshape).expect("memory");
-            }
-        }
-        let s_native = hidden.iter().fold(shapes.root(Layout::Object, Some(function_proto.cell()), 4), |f, k| shapes.add(f, *k, 0).expect("shape"));
-        let gen_proto = Obj::new(&mut heap, &shapes, s_object).expect("memory");
-        let s_iter = {
-            let s = shapes.root(Layout::Object, proto, 2);
-            let s = shapes.add(s, k_value, A_W | A_E | A_C).expect("shape");
-            shapes.add(s, k_done, A_W | A_E | A_C).expect("shape")
-        };
-        let mut consts: Vec<Value> = [object_proto, function_proto, array_proto, error_proto, global, string_proto, number_proto, boolean_proto, symbol_proto].iter().map(|o| o.value()).collect();
-        consts.extend(error_protos.iter().map(|o| o.value()));
-        consts.extend(hidden.iter().chain(&gkeys).chain([&k_value, &k_done]).map(|s| s.value()));
-        consts.push(gen_proto.value());
         consts.extend([k_prim, k_code, k_ctx, k_prototype, k_length, k_name, k_message, k_home, k_fields, k_link, k_constructor, k_raw, k_value_of, k_to_string].iter().map(|s| s.value()));
         consts.extend(tnames.iter().map(|s| s.value()));
         consts.extend(wk.iter().map(|s| s.key_value()));
-        let pins = vec![s_object, s_array, s_func, s_native, s_iter, pr.shape];
         let epoch = shapes.epoch();
-        let probe = Obj::new(&mut heap, &shapes, s_func).expect("memory");
-        let (func_shape, loc_code, loc_ctx) = (s_func.raw(), probe.loc(&shapes, 0), probe.loc(&shapes, 1));
-        assert!(loc_code >> 9 == 0 && loc_ctx >> 9 == 0, "the code and the context of a function are inline slots");
         let mut rt = Realm {
             heap,
             shapes,
             atoms,
-            global,
-            object_proto,
-            function_proto,
-            array_proto,
-            array_push_proof: (0, false),
-            array_ctor: Value::UNDEFINED,
-            error_proto,
-            s_object,
-            s_array,
-            s_func,
-            s_args: None,
-            args_iter: Value::UNDEFINED,
+            state,
             k_constructor,
             k_raw,
             private_n: 0,
-            func_shape,
-            loc_code,
-            loc_ctx,
             k_prototype,
             k_prim,
             k_length,
@@ -547,26 +622,13 @@ impl Realm {
             k_to_string,
             pr,
             md: Default::default(),
-            string_proto,
-            number_proto,
-            boolean_proto,
-            symbol_proto,
-            bigint_intrinsics: None,
-            symbol_ctor: None,
-            ltab: Default::default(),
             wk,
-            unscopables: None,
             registry: None,
-            error_protos,
-            date_proto: object_proto,
-            s_native,
             proxy_natives: None,
             proxy_depth: 0,
-            genr: crate::generator::GenRealm { proto: gen_proto, s_iter, keys: gkeys, func_proto: None, async_proto: None, async_shape: None, ag: Default::default() },
             natives: Vec::new(),
             fn_info: Vec::new(),
             bound_id: 0,
-            pre: [Value::UNDEFINED; crate::prelude_pre::NPRE],
             callee: Value::UNDEFINED,
             nt: Value::UNDEFINED,
             tail: None,
@@ -575,7 +637,6 @@ impl Realm {
             rng: 0,
             tnames,
             consts,
-            lex: HashMap::new(),
             pins,
             cur: (0, 0, 0),
             es: Default::default(),
@@ -609,7 +670,7 @@ impl Realm {
     pub fn collect(&mut self, fbs: &mut [Feedback], walk_frames: impl FnOnce(&mut Marker)) {
         // A nested call holds the collector (`Realm::call_function`), so no machine is in use now: the idle ones keep their feedback.
         debug_assert!(self.nest == 0, "a collection inside a nested call");
-        let Realm { heap, shapes, atoms, consts, pins, lex, pool, pr, api, rx, intl, .. } = self;
+        let Realm { heap, shapes, atoms, consts, pins, state, pool, pr, api, rx, intl, .. } = self;
         let mut walk_frames = Some(walk_frames);
         let stats = {
             // The promise state is marked in the walk; its weak list is cleared after the marking.
@@ -636,7 +697,7 @@ impl Realm {
             }
             let roots = |m: &mut Marker| {
                 consts.iter().for_each(|v| m.value(*v));
-                lex.values().for_each(|(k, c, _, _)| {
+                state.lex.values().for_each(|(k, c, _, _)| {
                     m.value(k.value());
                     m.value(*c);
                 });
@@ -2009,14 +2070,14 @@ impl Realm {
             // `for (k in undefined)` has no keys.
             Vec::new()
         };
-        Ok(Obj::array(&mut self.heap, &self.shapes, self.s_array, &keys).expect("memory").value())
+        Ok(Obj::array(&mut self.heap, &self.shapes, self.state.s_array, &keys).expect("memory").value())
     }
 
     // ---- function cells ----
 
     /// A function cell for code `code` in context `ctx` (`undefined` for none).
     pub fn new_function(&mut self, code: usize, ctx: Value) -> Value {
-        let f = Obj::new(&mut self.heap, &self.shapes, self.s_func).expect("memory");
+        let f = Obj::new(&mut self.heap, &self.shapes, self.state.s_func).expect("memory");
         f.set_slot(&self.shapes, 0, Value::int(code as i32));
         f.set_slot(&self.shapes, 1, ctx);
         f.set_callable();
@@ -2119,3 +2180,7 @@ impl Realm {
 #[cfg(test)]
 #[path = "interp_rt_index_atom_tests.rs"]
 mod index_atom_tests;
+
+#[cfg(test)]
+#[path = "interp_rt_realm_bootstrap_tests.rs"]
+mod realm_bootstrap_tests;

@@ -259,7 +259,7 @@ impl<'a, U: Unit> Parser<'a, U> {
             return Err(rt.error(ErrKind::Range, "JSON is nested too deeply"));
         }
         self.i += 1;
-        let a = Obj::array(&mut rt.heap, &rt.shapes, rt.s_array, &[]).expect("memory");
+        let a = Obj::array(&mut rt.heap, &rt.shapes, rt.state.s_array, &[]).expect("memory");
         self.ws();
         if self.peek() == Some(0x5d) {
             self.i += 1;

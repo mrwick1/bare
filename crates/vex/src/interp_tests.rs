@@ -53,7 +53,7 @@ fn prop(vm: &mut Vm, o: Value, name: &str) -> Value {
 
 /// An object of the realm with the integer properties `props`, added in order (so the same list gives the same shape).
 fn mk(vm: &mut Vm, props: &[(&str, i32)]) -> Value {
-    let o = Obj::new(&mut vm.realm.heap, &vm.realm.shapes, vm.realm.s_object).expect("memory");
+    let o = Obj::new(&mut vm.realm.heap, &vm.realm.shapes, vm.realm.state.s_object).expect("memory");
     for (k, v) in props {
         vm.realm.set_own(o, k, Value::int(*v));
     }
@@ -563,7 +563,7 @@ fn get_field_on_primitives_and_on_undefined() {
     let f = vm.function(0);
     let s = vm.realm.string("abc");
     assert_eq!(call1(&mut vm, f, s), n(3));
-    let a = Obj::array(&mut vm.realm.heap, &vm.realm.shapes, vm.realm.s_array, &[n(1), n(2)]).unwrap().value();
+    let a = Obj::array(&mut vm.realm.heap, &vm.realm.shapes, vm.realm.state.s_array, &[n(1), n(2)]).unwrap().value();
     assert_eq!(call1(&mut vm, f, a), n(2));
     assert_eq!(call1(&mut vm, f, n(5)), Value::UNDEFINED);
     match vm.call(f, Value::UNDEFINED, &[Value::UNDEFINED]) {

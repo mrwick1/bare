@@ -671,7 +671,7 @@ impl Engine for Realm {
     }
 
     fn new_object<'s>(&mut self) -> Result<Local<'s>, Error<'s>> {
-        let o = Obj::new(&mut self.heap, &self.shapes, self.s_object).expect("memory");
+        let o = Obj::new(&mut self.heap, &self.shapes, self.state.s_object).expect("memory");
         Ok(self.a_push(o.value()))
     }
 

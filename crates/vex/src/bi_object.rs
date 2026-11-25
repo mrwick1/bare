@@ -820,7 +820,7 @@ impl Realm {
 
     /// The descriptor object of an own property.
     pub(crate) fn from_own(&mut self, p: Own) -> Value {
-        let d = Obj::new(&mut self.heap, &self.shapes, self.s_object).expect("memory");
+        let d = Obj::new(&mut self.heap, &self.shapes, self.state.s_object).expect("memory");
         let at = p.attrs();
         match p {
             Own::Data(v, _) => {
@@ -1187,7 +1187,7 @@ pub(crate) fn object_own_descriptor(rt: &mut Realm, _this: Value, args: &[Value]
 
 fn object_own_descriptors(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     let o = rt.to_object(arg(args, 0))?;
-    let out = Obj::new(&mut rt.heap, &rt.shapes, rt.s_object).expect("memory");
+    let out = Obj::new(&mut rt.heap, &rt.shapes, rt.state.s_object).expect("memory");
     let keys = rt.all_own_keys(o)?;
     for k in keys {
         let key = rt.key_of(k)?;
@@ -1259,7 +1259,7 @@ fn object_has_own(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
 }
 
 fn object_from_entries(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
-    let out = Obj::new(&mut rt.heap, &rt.shapes, rt.s_object).expect("memory");
+    let out = Obj::new(&mut rt.heap, &rt.shapes, rt.state.s_object).expect("memory");
     let (it, next) = rt.iter_open_generic(arg(args, 0))?;
     while let Some(entry) = rt.iter_step(it, next)? {
         rt.fuel = rt.fuel.checked_sub(1).ok_or(crate::interp::STOP)?;
