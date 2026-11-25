@@ -16,6 +16,7 @@ Use `read` for the text of the page or of one element (`ref`), and `links` for U
 
 - A **live session** is a running page. The name is `session` (default `main`). Sessions run side by side: `open {"url": ..., "session": "other"}`. A new `open` of the same name ends the old page. `close {"session": "other"}` ends one. `sessions` lists them.
 - A **saved login** is a name for cookies and storage. `save_state {"name": "shop"}` stores it in memory (add `file` to also write a private file that holds live credentials). `open {"url": ..., "state": "shop"}` starts a new live session from it. Memory ends with the server.
+- A **profile** keeps the cookies and `localStorage` on disk between server runs. `open` uses the profile `default`, or `"profile": "NAME"` (a name or a path). When another process holds `default`, the session is in memory and the receipt says so. A `state` wins for its open; the page then saves to the profile.
 - A public page needs only `open`. Use `ensure_session` for an authenticated journey: it restores the saved name, runs `check`, and runs `login` only when the check fails. The page stays open for `step`.
 - `open` shares the HTTP cache with earlier opens. Add `"fresh": true` for a clean network client.
 

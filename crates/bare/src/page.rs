@@ -139,6 +139,8 @@ pub struct Page {
     pub quiet: bool,
     /// The hook of `wake_on_done`: a wake tells the loop that a job ended.
     woken: Option<bare_net::parallel::EndHook>,
+    /// Saves the cookies and `localStorage` of the session to a profile (`open_in_with`): in `tick`, and when the page drops.
+    pub(crate) saver: Option<crate::profile::Saver>,
     pub(crate) started: Instant,
     pub first_frame: Option<Duration>,
     /// The rounds of the window loop that hosts this page for a driver (`control::Remote`), since a job last took them.
@@ -330,6 +332,7 @@ impl Page {
             errors: Vec::new(),
             quiet: false,
             woken: None,
+            saver: None,
             started: bare_net::vclock::instant(),
             first_frame: None,
             ticks: Default::default(),
@@ -353,37 +356,48 @@ impl Page {
     /// `open` in a new session with empty storage that shares the connections and the HTTP cache of `net`, as a new tab of one browser
     /// does. A driver that opens many pages pays no new TLS handshake and no new download of the immutable scripts of an app.
     pub fn open_in(url: &str, viewport: (u32, u32), net: &bare_net::http::Client) -> Result<Page, String> {
-        Page::open_in_with(url, viewport, net, None, None)
+        Page::open_in_with(url, viewport, net, None, None, None)
     }
 
     /// `open_in` that starts from a saved state (`None`: empty storage). The state is plain data, so it can go to a window thread.
-    pub fn open_in_with(url: &str, viewport: (u32, u32), net: &bare_net::http::Client, state: Option<&StorageState>, downloads: Option<crate::Downloads>) -> Result<Page, String> {
-        Page::open_cfg(Page::config_in(url, net, state, downloads)?, viewport)
+    /// `profile`: save the cookies and `localStorage` there (`Saver`): at most once a second (`tick`), and when the page drops or
+    /// opens another URL. `state` must be what the profile holds (`Profile::load`) or a state that replaces it: the page writes only
+    /// what changes after the import.
+    pub fn open_in_with(url: &str, viewport: (u32, u32), net: &bare_net::http::Client, state: Option<&StorageState>, downloads: Option<crate::Downloads>, profile: Option<crate::profile::Profile>) -> Result<Page, String> {
+        let (cfg, saver) = Page::config_in(url, net, state, downloads, profile)?;
+        let mut page = Page::open_cfg(cfg, viewport)?;
+        page.saver = saver;
+        Ok(page)
     }
 
-    fn config_in(url: &str, net: &bare_net::http::Client, state: Option<&StorageState>, downloads: Option<crate::Downloads>) -> Result<SessionConfig, String> {
+    fn config_in(url: &str, net: &bare_net::http::Client, state: Option<&StorageState>, downloads: Option<crate::Downloads>, profile: Option<crate::profile::Profile>) -> Result<(SessionConfig, Option<crate::profile::Saver>), String> {
         let mut cfg = SessionConfig::new(url);
         cfg.downloads = downloads;
-        if let Some(st) = state {
+        let mut saver = None;
+        if state.is_some() || profile.is_some() {
             let store = crate::browser_navigation::WebStorage::default();
-            store.import(st).map_err(|e| format!("session state: {e:?}"))?;
+            if let Some(st) = state {
+                store.import(st).map_err(|e| format!("session state: {e:?}"))?;
+            }
+            // The saver starts here, before the first request: a reply can set a cookie on a network thread at any time after.
+            saver = profile.map(|p| crate::profile::Saver::new(p, store.clone()));
             cfg.storage = Some(store);
         }
         let net = net.fork();
         cfg.client = Box::new(move || net.fork());
-        Ok(cfg)
+        Ok((cfg, saver))
     }
 
     /// `open_in` in this window, as the `open` of a driver: the old document ends first, and the call returns at once. The window (or the
     /// canvas of a headless page) keeps the pixels of the old page until the first frame of the new one. If the new session
     /// cannot start, no document is left.
     pub fn reopen_in(&mut self, url: &str, net: &bare_net::http::Client) -> Result<(), String> {
-        self.reopen_in_with(url, net, None, None)
+        self.reopen_in_with(url, net, None, None, None)
     }
 
     /// `reopen_in` that starts from a saved state (`None`: empty storage).
-    pub fn reopen_in_with(&mut self, url: &str, net: &bare_net::http::Client, state: Option<&StorageState>, downloads: Option<crate::Downloads>) -> Result<(), String> {
-        let cfg = Page::config_in(url, net, state, downloads)?;
+    pub fn reopen_in_with(&mut self, url: &str, net: &bare_net::http::Client, state: Option<&StorageState>, downloads: Option<crate::Downloads>, profile: Option<crate::profile::Profile>) -> Result<(), String> {
+        let (cfg, saver) = Page::config_in(url, net, state, downloads, profile)?;
         self.release_frame();
         if let Source::Session(s) = &mut self.source {
             s.end_document();
@@ -393,6 +407,7 @@ impl Page {
         let (ticks, woken, quiet, windowed) = (self.ticks, self.woken.take(), self.quiet, self.windowed);
         *self = Page::with_canvas(Source::Session(Box::new(s)), self.size, canvas);
         (self.ticks, self.woken, self.quiet, self.windowed) = (ticks, woken, quiet, windowed);
+        self.saver = saver;
         Ok(())
     }
 
@@ -711,7 +726,17 @@ impl Page {
             }
         }
         let (now, next) = self.work();
-        (ran || finished, if now || finished { Some(bare_net::vclock::instant()) } else { next })
+        let next = if now || finished { Some(bare_net::vclock::instant()) } else { next };
+        // A change of the profile that waits for its second is due work too, so an idle loop calls again.
+        let due = self.saver.as_mut().and_then(|s| s.tick(bare_net::vclock::instant()));
+        (ran || finished, if let (Some(n), Some(d)) = (next, due) { Some(n.min(d)) } else { next.or(due) })
+    }
+
+    /// Write the changes of the profile now (`open_in_with`).
+    pub fn save_profile(&mut self) {
+        if let Some(s) = &mut self.saver {
+            s.flush();
+        }
     }
 
     /// Can a tick do something now, and when is the next task due (or the next look at the network)?
