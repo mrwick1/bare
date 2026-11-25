@@ -13,6 +13,16 @@
     return e;
   }
   function later(f) { P.resolve().then(f); }
+  // A new task. The standard runs each request in its own task; here a run of up to `BATCH` requests shares one microtask chain,
+  // then the next one waits for a task. Between tasks the host can collect, so the events of a long transaction do not pile up
+  // (`BrowserLimits::max_events`). A `MessageChannel` message has no 4 ms clamp, unlike a nested `setTimeout`.
+  var BATCH = 64, mc = null, tasks = [];
+  function task(f) {
+    if (typeof MessageChannel !== 'function') { setTimeout(f, 0); return; }
+    if (!mc) { mc = new MessageChannel(); mc.port1.onmessage = function () { tasks.shift()(); }; }
+    tasks.push(f);
+    mc.port2.postMessage(0);
+  }
   function def(o, k, v) { Object.defineProperty(o, k, { value: v, writable: true, configurable: true }); }
   function names(list) {
     var a = list.slice().sort();
@@ -170,6 +180,7 @@
     var t = TS.get(tx);
     if (t.on) return;
     t.on = true;
+    var n = 0;
     later(function step() {
       if (t.dead) { t.on = false; return; }
       var o = t.q.shift();
@@ -193,9 +204,10 @@
         return;
       }
       var v;
-      try { v = o[0](); } catch (e) { fail(o[1], e, tx); later(step); return; }
+      var next = ++n % BATCH ? later : task;
+      try { v = o[0](); } catch (e) { fail(o[1], e, tx); next(step); return; }
       ok(o[1], v);
-      later(step);
+      next(step);
     });
   }
   function newTx(db, mode, list) {
