@@ -93,6 +93,8 @@ mod browser_subtle_hmac_hash_tests;
 #[cfg(test)]
 mod browser_subtle_ctr_hmac_tests;
 #[cfg(test)]
+mod browser_subtle_hkdf_hmac_tests;
+#[cfg(test)]
 mod browser_web_tests;
 #[cfg(test)]
 mod browser_web_filelist_tests;
