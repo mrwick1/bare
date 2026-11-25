@@ -447,6 +447,8 @@ mod browser_domparser_xhtml_tests;
 mod browser_notification_tests;
 #[cfg(test)]
 mod browser_create_document_tests;
+#[cfg(test)]
+mod browser_input_target_ranges_tests;
 
 mod browser_frames;
 mod browser_child;

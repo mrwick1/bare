@@ -6,6 +6,8 @@
 //! - `Range` (also `new Range()`): `startContainer`, `startOffset`, `endContainer`, `endOffset`, `collapsed`, `commonAncestorContainer`,
 //!   `setStart`, `setEnd`, `setStartBefore`, `setStartAfter`, `setEndBefore`, `setEndAfter`, `selectNode`, `selectNodeContents`, `collapse`,
 //!   `cloneRange`, `detach` (no effect, as the standard says) and `toString` (the text of the Text nodes in the range, not rendered text).
+//! - `StaticRange` (`new StaticRange(init)`, and the target ranges of a `beforeinput`): the getters of `AbstractRange` only. It does not
+//!   follow the tree, and its points are not checked against the tree (the standard).
 //!   Offsets are UTF-16 units in a Text or Comment, and child indexes in any other node. The boundary rules are the standard's: a start after
 //!   the end (or in another tree) moves the end, and the other way round.
 //! - `Selection` (one per realm): `rangeCount`, `addRange`, `removeAllRanges`, `empty`, `removeRange`, `getRangeAt`, `collapse`,
@@ -49,7 +51,7 @@ use crate::browser_lazy::lazy_global;
 use bare_html::dom::{Change, Document, NodeData, NodeId};
 use crate::browser_scoped::*;
 use crate::js_num::to_uint32;
-use bare_js_api::{Args, HostFn, Local};
+use bare_js_api::{Args, HostFn, Local, Type};
 use std::cell::{OnceCell, RefCell};
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -69,9 +71,11 @@ struct Rng {
 
 #[derive(Default)]
 pub(crate) struct State<E: Eng> {
-    /// Range, Selection and AbstractRange: prototype and constructor of each, once made.
-    made: Option<[<E as Eng>::Obj; 6]>,
+    /// Range, Selection, AbstractRange and StaticRange: prototype and constructor of each, once made.
+    made: Option<[<E as Eng>::Obj; 8]>,
     ranges: HashMap<<E as Eng>::Obj, Rng>,
+    /// The `StaticRange` objects. They do not follow the tree.
+    statics: HashMap<<E as Eng>::Obj, Rng>,
     /// The selection object and its range.
     sel: Option<(<E as Eng>::Obj, Option<<E as Eng>::Obj>)>,
     /// The focus of the selection is before its anchor (Selection API "direction" is backwards).
@@ -281,6 +285,17 @@ fn range_of<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'
     Err(s.type_error("Illegal invocation"))
 }
 
+/// A `Range` or a `StaticRange`, for the getters of `AbstractRange`.
+fn abstract_of<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, Rng> {
+    if let Some(o) = obj_id::<E>(s, this) {
+        let st = state(d).borrow();
+        if let Some(&r) = st.ranges.get(&o).or_else(|| st.statics.get(&o)) {
+            return Ok(r);
+        }
+    }
+    Err(s.type_error("Illegal invocation"))
+}
+
 fn offset_arg<'s, E: Eng>(s: &mut Sc<'s, E>, v: Local<'s>) -> Res<'s, u32> {
     Ok(to_uint32(s.to_number(v)?))
 }
@@ -359,6 +374,69 @@ fn new_range<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, r: Rng) -> Res<'s, Local
 fn construct<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let root = d.doc.borrow().root();
     new_range(d, s, Rng { sc: root, so: 0, ec: root, eo: 0 })
+}
+
+/// A new `StaticRange` with the points `r`. No check: a static range may name points that do not exist (DOM Standard).
+fn new_static<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, r: Rng) -> Res<'s, Local<'s>> {
+    made_s(d, s)?;
+    if state(d).borrow().statics.len() >= MAX_RANGES {
+        return Err(d.lim_s(s, "ranges"));
+    }
+    let proto = state(d).borrow().made.expect("made")[6];
+    let o = d.obj_s(s, proto)?;
+    state(d).borrow_mut().statics.insert(o, r);
+    d.own_obj(s.engine(), o, crate::browser::Owner::Range(o));
+    Ok(d.obj_local(s, o))
+}
+
+/// `new StaticRange(init)`. The members are read in the order of their names, as the IDL dictionary rules say.
+fn construct_static<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    const WHO: &str = "Failed to construct 'StaticRange'";
+    if a.is_empty() {
+        return Err(s.type_error(&format!("{WHO}: 1 argument required, but only 0 present.")));
+    }
+    let init = arg_s::<E>(s, a, 0);
+    if !is_object::<E>(s, init) {
+        return Err(s.type_error(&format!("{WHO}: The provided value is not of type 'StaticRangeInit'.")));
+    }
+    let node = |s: &mut Sc<'s, E>, name: &str| -> Res<'s, NodeId> {
+        let v = s.get_str(init, name)?;
+        if s.type_of(v) == Type::Undefined {
+            return Err(s.type_error(&format!("{WHO}: Failed to read the '{name}' property from 'StaticRangeInit': Required member is undefined.")));
+        }
+        d.node_of_s(s, v).ok_or_else(|| s.type_error(&format!("{WHO}: Failed to read the '{name}' property from 'StaticRangeInit': Failed to convert value to 'Node'.")))
+    };
+    let offset = |s: &mut Sc<'s, E>, name: &str| -> Res<'s, u32> {
+        let v = s.get_str(init, name)?;
+        if s.type_of(v) == Type::Undefined {
+            return Err(s.type_error(&format!("{WHO}: Failed to read the '{name}' property from 'StaticRangeInit': Required member is undefined.")));
+        }
+        offset_arg::<E>(s, v)
+    };
+    let ec = node(s, "endContainer")?;
+    let eo = offset(s, "endOffset")?;
+    let sc = node(s, "startContainer")?;
+    let so = offset(s, "startOffset")?;
+    if is_doctype(d, sc) || is_doctype(d, ec) {
+        return Err(d.dom_err_s(s, "InvalidNodeTypeError", &format!("{WHO}: Neither startContainer nor endContainer can be a DocumentType or Attr.")));
+    }
+    new_static(d, s, Rng { sc, so, ec, eo })
+}
+
+/// The target ranges of an input event: one `StaticRange` for the points `r`, or none.
+pub(crate) fn static_ranges<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, r: Option<(NodeId, u32, NodeId, u32)>) -> Res<'s, Local<'s>> {
+    match r {
+        Some((sc, so, ec, eo)) => {
+            let o = new_static(d, s, Rng { sc, so, ec, eo })?;
+            s.new_array(&[o])
+        }
+        None => s.new_array(&[]),
+    }
+}
+
+/// The points of the range of the selection, if it has one.
+pub(crate) fn sel_points<E: Eng>(d: &Dom<E>) -> Option<(NodeId, u32, NodeId, u32)> {
+    d.range.st.get()?.borrow().sel_rng().map(|r| (r.sc, r.so, r.ec, r.eo))
 }
 
 fn create_range<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
@@ -510,23 +588,23 @@ fn detach<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s
 }
 
 fn start_container<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
-    let (_, r) = range_of(d, s, this)?;
+    let r = abstract_of(d, s, this)?;
     d.wrap_s(s, r.sc)
 }
 fn end_container<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
-    let (_, r) = range_of(d, s, this)?;
+    let r = abstract_of(d, s, this)?;
     d.wrap_s(s, r.ec)
 }
 fn start_offset<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
-    let r = range_of(d, s, this)?.1;
+    let r = abstract_of(d, s, this)?;
     Ok(s.number(r.so as f64))
 }
 fn end_offset<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
-    let r = range_of(d, s, this)?.1;
+    let r = abstract_of(d, s, this)?;
     Ok(s.number(r.eo as f64))
 }
 fn collapsed<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
-    let r = range_of(d, s, this)?.1;
+    let r = abstract_of(d, s, this)?;
     Ok(s.boolean(r.start() == r.end()))
 }
 
@@ -1459,13 +1537,15 @@ fn ensure<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, ()> {
     }
     let op = it.object_prototype();
     let (ap, sp) = (d.obj(it, op)?, d.obj(it, op)?);
-    let rp = d.obj(it, ap)?;
+    let (rp, stp) = (d.obj(it, ap)?, d.obj(it, ap)?);
     let (kc, kp) = (d.key(it, "constructor")?, d.key(it, "prototype")?);
     let rc = d.add_fn_s_obj(it, construct, "Range", 0, HostFn::Ctor)?;
     let sc = d.add_fn_s_obj(it, illegal_selection, "Selection", 0, HostFn::Ctor)?;
     let ac = d.add_fn_s_obj(it, illegal_abstract, "AbstractRange", 0, HostFn::Ctor)?;
+    let stc = d.add_fn_s_obj(it, construct_static, "StaticRange", 1, HostFn::Ctor)?;
     it.h_set_proto(rc, Some(ac))?;
-    for (f, proto, tag) in [(rc, rp, "Range"), (sc, sp, "Selection"), (ac, ap, "AbstractRange")] {
+    it.h_set_proto(stc, Some(ac))?;
+    for (f, proto, tag) in [(rc, rp, "Range"), (sc, sp, "Selection"), (ac, ap, "AbstractRange"), (stc, stp, "StaticRange")] {
         it.define_data(f, kp, E::obj_raw(proto), false, false, false)?;
         it.define_data(proto, kc, E::obj_raw(f), true, false, true)?;
         crate::browser_lazy::tag(d, it, proto, tag)?;
@@ -1535,12 +1615,13 @@ fn ensure<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, ()> {
     for (n, l, h) in methods {
         d.def_method_s(it, sp, n, l, h)?;
     }
-    state(d).borrow_mut().made = Some([rp, rc, sp, sc, ap, ac]);
+    state(d).borrow_mut().made = Some([rp, rc, sp, sc, ap, ac, stp, stc]);
     Ok(())
 }
 
 lazy_global!(lazy_range, "Range", ensure, |d| state(d).borrow().made.expect("made")[1]);
 lazy_global!(lazy_abstract, "AbstractRange", ensure, |d| state(d).borrow().made.expect("made")[5]);
+lazy_global!(lazy_static, "StaticRange", ensure, |d| state(d).borrow().made.expect("made")[7]);
 lazy_global!(lazy_selection, "Selection", ensure, |d| state(d).borrow().made.expect("made")[3]);
 
 pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> {
@@ -1556,6 +1637,7 @@ pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> 
         Row::both(1, "Range", lazy_range),
         Row::both(1, "Selection", lazy_selection),
         Row::both(1, "AbstractRange", lazy_abstract),
+        Row::both(1, "StaticRange", lazy_static),
     ]);
     let g = s.global();
     d.install_rows(s, &[g], &lazy::T::<E>::V)
@@ -1603,6 +1685,7 @@ impl<E: Eng> Dom<E> {
             let had = !s.ranges.is_empty();
             for o in dead {
                 s.ranges.remove(o);
+                s.statics.remove(o);
             }
             let gone = had && s.ranges.is_empty();
             drop(s);
@@ -1697,5 +1780,6 @@ impl<E: Eng> Dom<E> {
 /// The nodes that the ends of live ranges name.
 pub(crate) fn held<E: Eng>(d: &Dom<E>, out: &mut Vec<NodeId>) {
     let Some(st) = d.range.st.get() else { return };
-    out.extend(st.borrow().ranges.values().flat_map(|r| [r.sc, r.ec]));
+    let st = st.borrow();
+    out.extend(st.ranges.values().chain(st.statics.values()).flat_map(|r| [r.sc, r.ec]));
 }
