@@ -113,7 +113,7 @@ impl Realm {
 
     /// `{ value, done }`.
     pub fn iter_result(&mut self, value: Value, done: bool) -> Value {
-        let o = Obj::new(&mut self.heap, &self.shapes, self.genr.s_iter).expect("memory");
+        let o = Obj::new(&mut self.heap, &self.shapes, self.state.genr.s_iter).expect("memory");
         o.set_inline_slot(0, value);
         o.set_inline_slot(1, Value::bool(done));
         o.value()
@@ -132,7 +132,7 @@ impl Realm {
         // An async generator has two more hidden slots: the queue of requests and the promise of the call that entered the frame.
         let n = if ag { 6 } else { 4 };
         let mut shape = self.shapes.root(crate::cell::Layout::Object, Some(proto.cell()), n as u16);
-        for k in self.genr.keys[..n].iter().copied() {
+        for k in self.state.genr.keys[..n].iter().copied() {
             shape = self.shapes.add(shape, k, 0).expect("shape");
         }
         let act = Obj::new(&mut self.heap, &self.shapes, shape).expect("memory");
@@ -178,7 +178,7 @@ impl Realm {
             Some(s) => s,
             None => {
                 let mut s = self.shapes.root(crate::cell::Layout::Object, None, 5);
-                for k in self.genr.keys[..5].iter().copied() {
+                for k in self.state.genr.keys[..5].iter().copied() {
                     s = self.shapes.add(s, k, 0).expect("shape");
                 }
                 // The collector frees a shape that nothing holds: pin it.

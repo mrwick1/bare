@@ -161,7 +161,7 @@ fn array_create(rt: &mut Realm, n: f64) -> R<Obj> {
     if n > u32::MAX as f64 {
         return Err(rt.error(ErrKind::Range, "invalid array length"));
     }
-    let a = Obj::array(&mut rt.heap, &rt.shapes, rt.s_array, &[]).expect("memory");
+    let a = Obj::array(&mut rt.heap, &rt.shapes, rt.state.s_array, &[]).expect("memory");
     a.set_len(&mut rt.heap, n as u32).expect("memory");
     Ok(a)
 }

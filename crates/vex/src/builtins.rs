@@ -83,7 +83,7 @@ impl Realm {
 
     /// A cell for the native `id`.
     pub(crate) fn native_cell(&mut self, id: usize) -> Obj {
-        let o = Obj::new(&mut self.heap, &self.shapes, self.s_native).expect("memory");
+        let o = Obj::new(&mut self.heap, &self.shapes, self.state.s_native).expect("memory");
         o.set_slot(&self.shapes, 0, Value::int(id as i32));
         o.set_flag(F_CALLABLE | F_NATIVE);
         o
@@ -255,7 +255,7 @@ impl Realm {
     }
 
     pub(crate) fn new_array(&mut self, vals: &[Value]) -> Value {
-        Obj::array(&mut self.heap, &self.shapes, self.s_array, vals).expect("memory").value()
+        Obj::array(&mut self.heap, &self.shapes, self.state.s_array, vals).expect("memory").value()
     }
 
     pub(crate) fn get_named(&mut self, v: Value, name: &str) -> R<Value> {
@@ -292,7 +292,7 @@ impl Realm {
             self.define_attrs(f, Key::Name(self.k_prototype), A_W, p.value())?;
             return Ok(p.value());
         }
-        let p = Obj::new(&mut self.heap, &self.shapes, self.s_object).expect("memory");
+        let p = Obj::new(&mut self.heap, &self.shapes, self.state.s_object).expect("memory");
         self.define_attrs(p, Key::Name(self.k_constructor), HIDDEN, f.value())?;
         self.define_attrs(f, Key::Name(self.k_prototype), A_W, p.value())?;
         Ok(p.value())

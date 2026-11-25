@@ -331,7 +331,7 @@ impl Realm {
 
     /// `{ status, value }` or `{ status, reason }`.
     fn settled_record(&mut self, ok: bool, x: Value) -> Value {
-        let o = Obj::new(&mut self.heap, &self.shapes, self.s_object).expect("memory");
+        let o = Obj::new(&mut self.heap, &self.shapes, self.state.s_object).expect("memory");
         let status = self.string(if ok { "fulfilled" } else { "rejected" });
         for (k, v) in [("status", status), (if ok { "value" } else { "reason" }, x)] {
             let k = self.intern(k);
@@ -465,7 +465,7 @@ fn promise_with_resolvers(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Val
         return rt.type_error("Promise.withResolvers called on a value that is not an object");
     }
     let cap = rt.capability(this)?;
-    let o = Obj::new(&mut rt.heap, &rt.shapes, rt.s_object).expect("memory");
+    let o = Obj::new(&mut rt.heap, &rt.shapes, rt.state.s_object).expect("memory");
     for (k, v) in [("promise", cap.promise), ("resolve", cap.resolve), ("reject", cap.reject)] {
         let k = rt.intern(k);
         rt.define(o, Key::Name(k), v)?;

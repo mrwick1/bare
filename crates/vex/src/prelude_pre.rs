@@ -113,7 +113,7 @@ impl Realm {
             return Ok(self.pre[slot]);
         }
         let ip = Realm::obj(self.iterator_prototype()).expect("an object");
-        let proto = Obj::new(&mut self.heap, &self.shapes, self.s_object).expect("memory");
+        let proto = Obj::new(&mut self.heap, &self.shapes, self.state.s_object).expect("memory");
         proto.set_proto(&mut self.shapes, Some(ip.cell()));
         let next = self.new_native(crate::bi_typed::iterator_next, false, 0, "next").value();
         let k = self.intern("next");

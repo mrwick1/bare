@@ -319,9 +319,9 @@ impl Realm {
     #[cold]
     fn lazy_make(&mut self, ti: usize, j: usize) {
         let (o, e, left) = {
-            let t = &mut self.ltab.tabs[ti];
+            let t = &mut self.state.ltab.tabs[ti];
             let at = t.base + j;
-            self.ltab.done[at / 64] |= 1 << (at % 64);
+            self.state.ltab.done[at / 64] |= 1 << (at % 64);
             t.left -= 1;
             (t.obj, t.ents[j], t.left)
         };

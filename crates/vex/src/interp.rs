@@ -1475,7 +1475,7 @@ impl Vm {
                             gate!();
                             let all = Realm::obj(record(stack, fp, 9)).expect("the arguments of a function with CF_ARGS");
                             let vals: Vec<Value> = (b!() as u32..all.len()).map(|i| all.get_element(i).unwrap_or(undef)).collect();
-                            r!(a!()) = Obj::array(&mut realm.heap, &realm.shapes, realm.s_array, &vals).expect("memory").value();
+                            r!(a!()) = Obj::array(&mut realm.heap, &realm.shapes, realm.state.s_array, &vals).expect("memory").value();
                             pc = next;
                         }
                         Op::Lazy => {
@@ -1522,7 +1522,7 @@ impl Vm {
                                 // A string is iterated by code points: walk an array of them.
                                 gate!();
                                 let vals = tri!(realm.iter_values(it));
-                                it = Obj::array(&mut realm.heap, &realm.shapes, realm.s_array, &vals).expect("memory").value();
+                                it = Obj::array(&mut realm.heap, &realm.shapes, realm.state.s_array, &vals).expect("memory").value();
                             }
                             let fast_array = !string && c!() == 0 && Realm::obj(it).is_some_and(|o| realm.plain_array_iterator(o));
                             // A generator is stepped by `IterNext` itself (`undefined` where an array has its index): see `generator.rs`.
@@ -2300,7 +2300,7 @@ impl Vm {
                     }
                     Op::NewObject => {
                         gate!();
-                        r!(a!()) = Obj::new(&mut realm.heap, &realm.shapes, realm.s_object).expect("memory").value();
+                        r!(a!()) = Obj::new(&mut realm.heap, &realm.shapes, realm.state.s_object).expect("memory").value();
                         pc = next;
                     }
                     Op::NewObjLit => {
@@ -2323,13 +2323,13 @@ impl Vm {
                     }
                     Op::NewArray => {
                         gate!();
-                        r!(a!()) = Obj::array(&mut realm.heap, &realm.shapes, realm.s_array, &[]).expect("memory").value();
+                        r!(a!()) = Obj::array(&mut realm.heap, &realm.shapes, realm.state.s_array, &[]).expect("memory").value();
                         pc = next;
                     }
                     Op::NewArrLit => {
                         gate!();
                         let vals = &stack[fp + b!()..fp + b!() + c!()];
-                        let o = Obj::array(&mut realm.heap, &realm.shapes, realm.s_array, vals).expect("memory");
+                        let o = Obj::array(&mut realm.heap, &realm.shapes, realm.state.s_array, vals).expect("memory");
                         r!(a!()) = o.value();
                         pc = next;
                     }
@@ -2357,7 +2357,7 @@ impl Vm {
                             let link = if nt.is_undefined() {
                                 co.slot(&realm.shapes, 4)
                             } else {
-                                Obj::array(&mut realm.heap, &realm.shapes, realm.s_array, &[cur, nt]).expect("memory").value()
+                                Obj::array(&mut realm.heap, &realm.shapes, realm.state.s_array, &[cur, nt]).expect("memory").value()
                             };
                             fo.set_slot(&realm.shapes, 4, link);
                         }

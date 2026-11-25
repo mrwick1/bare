@@ -110,7 +110,7 @@ use crate::object::Obj;
 impl Obj {
     /// A new plain object (`{}`) of the realm.
     pub(crate) fn new_plain(rt: &mut Realm) -> Obj {
-        Obj::new(&mut rt.heap, &rt.shapes, rt.s_object).expect("memory")
+        Obj::new(&mut rt.heap, &rt.shapes, rt.state.s_object).expect("memory")
     }
 }
 

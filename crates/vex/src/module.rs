@@ -255,7 +255,7 @@ impl Realm {
         let code = self.md.mods[m as usize].code;
         let cx = Ctx::new(&mut self.heap, info.slots as usize + 1, Value::HOLE).expect("memory");
         cx.set(0, Value::UNDEFINED);
-        let env = Obj::new(&mut self.heap, &self.shapes, self.s_object).expect("memory");
+        let env = Obj::new(&mut self.heap, &self.shapes, self.state.s_object).expect("memory");
         for (key, hole) in &info.env_props {
             let k = self.intern(key);
             self.define(env, Key::Name(k), if *hole { Value::HOLE } else { Value::UNDEFINED }).expect("define");
@@ -265,7 +265,7 @@ impl Realm {
             cx.set(1 + s as usize, Value::UNDEFINED);
         }
         cx.set(1 + info.id_slot as usize, Value::int(m as i32));
-        let meta = Obj::new(&mut self.heap, &self.shapes, self.s_object).expect("memory");
+        let meta = Obj::new(&mut self.heap, &self.shapes, self.state.s_object).expect("memory");
         let (k, url) = (self.intern("url"), self.string(&self.md.mods[m as usize].url.clone()));
         self.define(meta, Key::Name(k), url).expect("define");
         cx.set(1 + info.meta_slot as usize, meta.value());
@@ -309,7 +309,7 @@ impl Realm {
 
     /// An object with one property `name`: an accessor that reads the binding, or the namespace.
     fn md_view(&mut self, name: &str, of: ViewOf) -> Value {
-        let o = Obj::new(&mut self.heap, &self.shapes, self.s_object).expect("memory");
+        let o = Obj::new(&mut self.heap, &self.shapes, self.state.s_object).expect("memory");
         let k = Key::Name(self.intern(name));
         match of {
             ViewOf::Namespace(ns) => self.define(o, k, ns).expect("define"),

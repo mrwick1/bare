@@ -209,9 +209,9 @@ impl Realm {
         if let Some(pair) = self.bigint_intrinsics {
             return pair;
         }
-        let p = Obj::new(&mut self.heap, &self.shapes, self.s_object).expect("memory");
+        let p = Obj::new(&mut self.heap, &self.shapes, self.state.s_object).expect("memory");
         let c = self.new_native(bigint_ctor, true, 1, "BigInt");
-        self.bigint_intrinsics = Some((c, p));
+        self.state.bigint_intrinsics = Some((c, p));
         self.keep(p.value());
         self.keep(c.value());
         let tag = self.string("BigInt");

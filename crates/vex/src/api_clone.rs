@@ -409,7 +409,7 @@ impl Read<'_> {
 
     fn plain<'s>(&mut self, rt: &mut Realm, tag: Tag, depth: usize) -> R<'s, Value> {
         let v = if tag == Tag::Obj {
-            Obj::new(&mut rt.heap, &rt.shapes, rt.s_object).expect("memory").value()
+            Obj::new(&mut rt.heap, &rt.shapes, rt.state.s_object).expect("memory").value()
         } else {
             rt.new_array(&[])
         };
