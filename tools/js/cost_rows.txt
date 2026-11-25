@@ -300,6 +300,10 @@ bare-stress run boxes-mixed-runs 200000
 bare-stress run boxes-display-none 200000
 bare-stress run boxes-list-items 200000
 bare-stress run boxes-inline-blocks 200000
+bare-stress run boxes-contents-wide 20000
+bare-stress run boxes-contents-wide 200000
+bare-stress run boxes-contents-deep 2000
+bare-stress run boxes-contents-deep 20000
 bare-stress run text-words 1000000
 bare-stress run text-one-long-word 10000000
 bare-stress run text-only-spaces 10000000

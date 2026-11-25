@@ -60,6 +60,9 @@ pub enum Kind {
     OutOfFlow,
     /// A text node.
     Text,
+    /// `display: contents`: no box. Its children take its place in the box tree (CSS Display 3). The walks of layout
+    /// (`Tree::box_first`, `box_next`) go into it and never give it.
+    Contents,
     /// `<br>`: the line ends here.
     Break,
 }
@@ -96,12 +99,14 @@ pub struct Tree<'a> {
     editable: Option<Atom>,
     /// The atoms of the form controls (`controls.rs`).
     pub controls: crate::controls::Atoms,
+    /// Does some element have `display: contents`? Else the walks are the walks of the flat tree.
+    pub(crate) contents: bool,
     // The atoms of these names, if the page has them. A page with no `<br>` has no atom for `br`.
 }
 
 impl<'a> Tree<'a> {
     pub fn new(doc: &'a Document, styles: &'a Styles) -> Tree<'a> {
-        Tree { doc, styles, br: doc.find_atom("br"), ol: doc.find_atom("ol"), start: doc.find_atom("start"), value: doc.find_atom("value"), body: doc.find_atom("body"), details: doc.find_atom("details"), open: doc.find_atom("open"), summary: doc.find_atom("summary"), editable: doc.find_atom("contenteditable"), controls: crate::controls::Atoms::new(doc) }
+        Tree { doc, styles, br: doc.find_atom("br"), ol: doc.find_atom("ol"), start: doc.find_atom("start"), value: doc.find_atom("value"), body: doc.find_atom("body"), details: doc.find_atom("details"), open: doc.find_atom("open"), summary: doc.find_atom("summary"), editable: doc.find_atom("contenteditable"), controls: crate::controls::Atoms::new(doc), contents: styles.contents() }
     }
 
     /// The `html` element: the root of the boxes. `None` if it is not shown.
@@ -154,11 +159,14 @@ impl<'a> Tree<'a> {
                     // A column and a column group make no box: they only give widths to the table (`table.rs`).
                     Keyword::None | Keyword::TableColumn | Keyword::TableColumnGroup => Kind::None,
                     _ if self.doc.flat_parent(node) == Some(self.doc.root()) => Kind::Block,
+                    // The unusual elements of CSS Display 3 (Appendix B) and the elements of SVG and MathML make no box with `contents`.
+                    Keyword::Contents if self.doc.is_foreign(node) || unboxable(self.doc.atom_str(name)) => Kind::None,
+                    Keyword::Contents => Kind::Contents,
                     _ if matches!(style.get(Property::Position), Value::Keyword(Keyword::Absolute | Keyword::Fixed)) => Kind::OutOfFlow,
                     // A child of a flex or grid container is an item: a block, whatever its `display` and `float`
                     // ("blockified", CSS Display 3).
-                    Keyword::ListItem if self.is_flex_or_grid(self.doc.flat_parent(node)) => Kind::ListItem,
-                    _ if self.is_flex_or_grid(self.doc.flat_parent(node)) => Kind::Block,
+                    Keyword::ListItem if self.is_flex_or_grid(self.box_parent(node)) => Kind::ListItem,
+                    _ if self.is_flex_or_grid(self.box_parent(node)) => Kind::Block,
                     // The root element is always a block, whatever its `display` (CSS Display 3: "blockify").
                     // `float` does nothing on a box that is out of the flow (CSS 2.1, 9.7).
                     _ if matches!(style.get(Property::Float), Value::Keyword(Keyword::Left | Keyword::Right)) => Kind::Float,
@@ -187,8 +195,71 @@ impl<'a> Tree<'a> {
     pub fn children(&self, block: NodeId) -> Children<'_, 'a> {
         // A block holds lines if no child is a block (the common case for `p`, `h1`, `li`), else it holds blocks and
         // the runs of inline content between them become anonymous blocks. This needs one look at all the children first.
-        let has_blocks = self.doc.flat_children(block).any(|c| self.kind(c).is_block());
-        Children { tree: self, next: self.doc.flat_children(block).next(), has_blocks }
+        let has_blocks = self.box_children(block).any(|c| self.kind(c).is_block());
+        Children { tree: self, next: self.box_first(block), has_blocks }
+    }
+
+    /// The first child of `parent` in the box tree: its first flat child, where a `display: contents` element is replaced by its
+    /// own children. JS: like `firstChild`, but it looks through such elements.
+    #[inline]
+    pub fn box_first(&self, parent: NodeId) -> Option<NodeId> {
+        let first = self.doc.flat_children(parent).next();
+        if !self.contents { return first; }
+        self.settle(first?)
+    }
+
+    /// The next sibling of `node` in the box tree: its flat next sibling, with the same replacement. At the end of the children
+    /// of a `display: contents` element, the walk goes on after that element. It stops at the end of any other parent.
+    #[inline]
+    pub fn box_next(&self, node: NodeId) -> Option<NodeId> {
+        let next = self.doc.flat_next(node);
+        if !self.contents { return next; }
+        match next {
+            Some(n) => self.settle(n),
+            None => self.climb(node),
+        }
+    }
+
+    /// The parent of `node` in the box tree: its flat parent, past the `display: contents` elements.
+    #[inline]
+    pub fn box_parent(&self, node: NodeId) -> Option<NodeId> {
+        let mut p = self.doc.flat_parent(node);
+        if !self.contents { return p; }
+        while let Some(x) = p.filter(|&x| self.kind(x) == Kind::Contents) {
+            p = self.doc.flat_parent(x);
+        }
+        p
+    }
+
+    /// The children of `parent` in the box tree (`box_first`, then `box_next`).
+    pub fn box_children(&self, parent: NodeId) -> impl Iterator<Item = NodeId> + '_ {
+        std::iter::successors(self.box_first(parent), |&n| self.box_next(n))
+    }
+
+    /// `at` if it is not a contents element, else the first node in it (or after it, if it is empty) that is not one.
+    fn settle(&self, mut at: NodeId) -> Option<NodeId> {
+        while self.kind(at) == Kind::Contents {
+            at = match self.doc.flat_children(at).next().or_else(|| self.doc.flat_next(at)) {
+                Some(n) => n,
+                None => return self.climb(at),
+            };
+        }
+        Some(at)
+    }
+
+    /// After the last child `node` of its parent: if the parent is a contents element, the node after the parent (again if that
+    /// one is the last), else nothing.
+    fn climb(&self, mut node: NodeId) -> Option<NodeId> {
+        loop {
+            let p = self.doc.flat_parent(node)?;
+            if self.kind(p) != Kind::Contents {
+                return None;
+            }
+            match self.doc.flat_next(p) {
+                Some(n) => return self.settle(n),
+                None => node = p,
+            }
+        }
     }
 
     /// Does `node` have `scrollbar-width: none`? Its scroll container scrolls with no bar, and the bar takes no room.
@@ -281,6 +352,11 @@ pub fn marker_text(style: &ComputedStyle, number: i32) -> Option<String> {
     }
 }
 
+/// The HTML elements that make no box with `display: contents` (CSS Display 3, Appendix B): their content is not their children.
+fn unboxable(name: &str) -> bool {
+    matches!(name, "br" | "wbr" | "meter" | "progress" | "canvas" | "embed" | "object" | "audio" | "iframe" | "img" | "video" | "frame" | "frameset" | "input" | "textarea" | "select")
+}
+
 /// One child box of a block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Child {
@@ -307,7 +383,7 @@ impl Iterator for Children<'_, '_> {
         loop {
             let node = self.next?;
             // `?` on an `Option`: stop with `None` when there is no next child. JS: `if (node == null) return null`.
-            self.next = tree.doc.flat_next(node);
+            self.next = tree.box_next(node);
             let kind = tree.kind(node);
             if kind.is_block() {
                 return Some(Child::Block(node));
@@ -323,7 +399,7 @@ impl Iterator for Children<'_, '_> {
                 if k.is_block() {
                     break;
                 }
-                self.next = tree.doc.flat_next(n);
+                self.next = tree.box_next(n);
                 if k.is_inline() {
                     last = n;
                     only_space = only_space && k == Kind::Text && tree.is_collapsible_space(n);
@@ -365,7 +441,7 @@ pub fn dump(tree: &Tree) -> String {
                 out += &format!("{indent}(lines)\n");
                 let mut run = vec![first];
                 while *run.last().unwrap() != last {
-                    run.push(tree.doc.flat_next(*run.last().unwrap()).unwrap());
+                    run.push(tree.box_next(*run.last().unwrap()).unwrap());
                 }
                 stack.extend(run.into_iter().rev().map(|n| (Item::Inline(n), depth + 1)));
             }
@@ -374,7 +450,7 @@ pub fn dump(tree: &Tree) -> String {
                 Kind::Break => out += &format!("{indent}break\n"),
                 Kind::Inline => {
                     out += &format!("{indent}inline {}\n", name(tree, node));
-                    let kids: Vec<_> = tree.doc.flat_children(node).collect();
+                    let kids: Vec<_> = tree.box_children(node).collect();
                     stack.extend(kids.into_iter().rev().map(|c| (Item::Inline(c), depth + 1)));
                 }
                 Kind::Atomic | Kind::Float | Kind::OutOfFlow => {
@@ -391,7 +467,7 @@ pub fn dump(tree: &Tree) -> String {
                     out += &format!("{indent}block-in-inline {}\n", name(tree, node));
                     blocks(node, depth, &mut stack);
                 }
-                Kind::None => {}
+                Kind::None | Kind::Contents => {}
             },
         }
     }

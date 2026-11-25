@@ -1376,7 +1376,7 @@ impl RuleSet {
     #[inline(never)]
     fn walk<const WANT: bool, const PENDING: bool, const TRACK: bool>(&self, doc: &Document, want: Option<NodeId>, keep: bool) -> Styles {
         let mut way = Way { want, path: Vec::new(), sorted: Vec::new(), on: false, at: 0 };
-        let mut styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()], calcs: Vec::new(), grids: Vec::new(), customs: var::Sets::default(), spaced: false, wrapping: false, kept: None, partial: false, generated: HashMap::default(), pseudo_nodes: RefCell::default() };
+        let mut styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()], calcs: Vec::new(), grids: Vec::new(), customs: var::Sets::default(), spaced: false, wrapping: false, contents: false, kept: None, partial: false, generated: HashMap::default(), pseudo_nodes: RefCell::default() };
         // Style 0 is the starting style. It is the parent style of the `html` element.
         let mut cx = Cx { viewport: self.viewport, root_font_size: 16.0, layer_order: self.layer_order(), declared: &self.side, inline: RefCell::default(), computed: RefCell::default(), grids: RefCell::default(), customs: RefCell::new(self.sets()), merges: RefCell::default() };
         let style_atom = doc.find_atom("style");
@@ -2017,6 +2017,7 @@ impl RuleSet {
         let id = same.unwrap_or_else(|| {
             let id = styles.styles.len() as u32;
             styles.spaced |= style.px(Property::LetterSpacing) != 0.0 || style.px(Property::WordSpacing) != 0.0;
+            styles.contents |= style.get(Property::Display) == Value::Keyword(Keyword::Contents);
             styles.wrapping |= matches!(style.get(Property::OverflowWrap), Value::Keyword(Keyword::Anywhere | Keyword::BreakWord))
                 || style.get(Property::WordBreak) == Value::Keyword(Keyword::BreakAll);
             styles.styles.push(style);
@@ -2622,6 +2623,8 @@ pub struct Styles {
     spaced: bool,
     /// Conservative hint: some stored style requests additional text break opportunities.
     wrapping: bool,
+    /// Does any style have `display: contents`? Layout walks past such elements only then (`boxes.rs`, `Tree::box_next`).
+    contents: bool,
     /// The cache of the cascade, for `RuleSet::restyle`. Only `RuleSet::compute_kept` keeps it.
     kept: Option<Box<StyleKeep>>,
     /// Made by `RuleSet::style_chain`: only the elements that were asked for, and their ancestors, have a style. Layout needs the styles of a whole page.
@@ -2665,7 +2668,7 @@ impl StyleChain {
     /// No element has a style yet. It is the size of `doc`: the document must not change while the chain is used.
     pub fn new(rules: &RuleSet, doc: &Document) -> StyleChain {
         let kept = StyleKeep { memo: Memo::default(), calcs: HashMap::default(), grids: grid::Kept::default(), rem: 16.0, base: 1 };
-        let styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()], calcs: Vec::new(), grids: Vec::new(), customs: rules.sets(), spaced: false, wrapping: false, kept: Some(Box::new(kept)), partial: true, generated: HashMap::default(), pseudo_nodes: RefCell::default() };
+        let styles = Styles { styles: vec![ComputedStyle::initial()], of_node: vec![NONE; doc.len()], calcs: Vec::new(), grids: Vec::new(), customs: rules.sets(), spaced: false, wrapping: false, contents: false, kept: Some(Box::new(kept)), partial: true, generated: HashMap::default(), pseudo_nodes: RefCell::default() };
         StyleChain {
             styles: Rc::new(styles),
             filter: AncestorFilter::new(rules.tracks()),
@@ -2737,6 +2740,10 @@ impl Styles {
 
     pub fn spaced(&self) -> bool {
         self.spaced
+    }
+
+    pub fn contents(&self) -> bool {
+        self.contents
     }
 
     /// The custom properties of a style, sorted by name, with their text: `--gap`, `8px`.

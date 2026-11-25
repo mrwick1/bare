@@ -317,7 +317,7 @@ keywords! {
     BorderBox => "border-box", FlowRoot => "flow-root", Clip => "clip", Scroll => "scroll",
     Static => "static", Relative => "relative", Absolute => "absolute", Fixed => "fixed",
     Sticky => "sticky", Row => "row", RowReverse => "row-reverse", Column => "column",
-    ColumnReverse => "column-reverse", Wrap => "wrap", WrapReverse => "wrap-reverse", Content => "content",
+    ColumnReverse => "column-reverse", Wrap => "wrap", WrapReverse => "wrap-reverse", Content => "content", Contents => "contents",
     FlexStart => "flex-start", FlexEnd => "flex-end", SpaceBetween => "space-between", SpaceAround => "space-around",
     SpaceEvenly => "space-evenly", Stretch => "stretch", Baseline => "baseline", SelfStart => "self-start",
     SelfEnd => "self-end", First => "first", Last => "last", LastBaseline => "last baseline",
@@ -1684,7 +1684,7 @@ fn longhand(property: Property, part: Part) -> Option<Value> {
         Display => one_of(part, &[
             K::None, K::Block, K::Inline, K::InlineBlock, K::ListItem, K::Table, K::TableRow, K::TableCell, K::TableRowGroup,
             K::TableHeaderGroup, K::TableFooterGroup, K::TableColumn, K::TableColumnGroup, K::TableCaption, K::Flex, K::InlineFlex,
-            K::Grid, K::InlineGrid, K::FlowRoot, K::InlineTable,
+            K::Grid, K::InlineGrid, K::FlowRoot, K::InlineTable, K::Contents,
         ]),
         Float => one_of(part, &[K::None, K::Left, K::Right, K::InlineStart, K::InlineEnd]),
         Clear => one_of(part, &[K::None, K::Left, K::Right, K::Both]),

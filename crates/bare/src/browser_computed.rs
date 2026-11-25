@@ -986,6 +986,13 @@ impl<E: Eng> Dom<E> {
             return Ok(s.styles.custom_properties(&s.style).iter().find(|(n, _)| **n == *key).map(|(_, t)| t.to_string()).unwrap_or_default());
         }
         let longs = longs.expect("a longhand or a shorthand");
+        // On the root element `contents` computes to `block` (CSS Display 3, 2.5). Layout gives the root a box in any case.
+        if long == Some(Property::Display) && kind != PSEUDO && s.style.get(Property::Display) == Cv::Keyword(Keyword::Contents) {
+            let doc = self.doc.borrow();
+            if doc.flat_parent(el) == Some(doc.root()) {
+                return Ok("block".into());
+            }
+        }
         // A pseudo-element has no box here: no layout, and the computed values stay.
         let used = if kind == PSEUDO { None } else { self.used_for(it, &s, el, longs)? };
         let init = (kind == PSEUDO && !ruled).then(|| Snap { styles: s.styles.clone(), style: ComputedStyle::initial(), hidden: true, partial: s.partial });
