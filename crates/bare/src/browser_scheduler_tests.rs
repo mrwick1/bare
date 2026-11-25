@@ -727,8 +727,8 @@ fn the_transfer_list_is_checked_before_anything_moves() {
         assert_eq!(err(&mut b, "c.port1.postMessage(1, [window])"), "DataCloneError:Value not transferable.");
         assert_eq!(err(&mut b, "c.port1.postMessage(1, [new Uint8Array(1)])"), "DataCloneError:Value not transferable.");
         // a port in the message but not in the list
-        assert_eq!(err(&mut b, "c.port1.postMessage({ p: d.port1 })"), "DataCloneError:An object could not be cloned.");
-        assert_eq!(err(&mut b, "c.port1.postMessage({ p: d.port1 }, [buf])"), "DataCloneError:An object could not be cloned.");
+        assert_eq!(err(&mut b, "c.port1.postMessage({ p: d.port1 })"), "DataCloneError:MessagePort object could not be cloned.");
+        assert_eq!(err(&mut b, "c.port1.postMessage({ p: d.port1 }, [buf])"), "DataCloneError:MessagePort object could not be cloned.");
         // a failed call moves nothing
         assert_eq!(js(&mut b, "buf.byteLength + ',' + (d.port1.postMessage(1), 'ok')"), "4,ok");
         assert_eq!(err(&mut b, "c.port1.postMessage(1, 5)"), "TypeError:Failed to execute 'postMessage' on 'MessagePort': The transfer argument is not an object.");
