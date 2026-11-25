@@ -7,6 +7,8 @@
 //! Source of an element: the first `<source srcset>` of its `<picture>` that has no `media` and a supported `type`, else `src`, else the
 //! first URL of its own `srcset`. A `srcset` gives its first URL (the density and width descriptors are not read). A `data:` URL is
 //! decoded here, and any other URL is resolved against the document and downloaded with the client of the session (cache, TLS, limits).
+//! A `blob:` URL is read from the blob URL store of the document when the load starts (for a `src` set by a script: when `src` was set), so
+//! the page can revoke it after that. The worker reads the shared bytes of the Blob, with no copy.
 //!
 //! CSS images: `background-image` and `mask-image` name a picture by the number of its address (`bare_css::urls`). After each new set of
 //! styles the loader reads the numbers that the unique styles of the frame use, loads the ones it has not seen (the same way, the same limits,
@@ -42,14 +44,16 @@ pub(crate) struct Images {
     rescanned: bool,
     /// The elements that were asked for already.
     known: std::collections::HashSet<NodeId>,
-    /// The pictures that wait for a worker: the URL, the elements and when they were queued (the queue wait of the trace).
-    queue: VecDeque<(String, Vec<NodeId>, std::time::Instant)>,
+    /// The pictures that wait for a worker: the URL, the elements, when they were queued (the queue wait of the trace) and the bytes of a
+    /// `blob:` URL.
+    #[allow(clippy::type_complexity)] // A one-off tuple: a named alias would add nothing.
+    queue: VecDeque<(String, Vec<NodeId>, std::time::Instant, Option<Arc<[u8]>>)>,
     /// The pictures on their way: the elements, the job, and the URL and the start (for `Page::pending`).
     #[allow(clippy::type_complexity)] // A one-off tuple: a named alias would add nothing.
     jobs: Vec<(Vec<NodeId>, Task<Option<Bitmap>>, String, std::time::Instant)>,
     /// The CSS pictures: the numbers that were asked for, the ones that wait for a worker, and the ones on their way.
     css_seen: std::collections::HashSet<u32>,
-    css_queue: VecDeque<(u32, String, std::time::Instant)>,
+    css_queue: VecDeque<(u32, String, std::time::Instant, Option<Arc<[u8]>>)>,
     css_jobs: Vec<(u32, Task<Option<Bitmap>>, String, std::time::Instant)>,
     /// The styles that were read last (the address of the `Styles` and its number of styles).
     css_read: (usize, usize, u64),
@@ -178,9 +182,13 @@ fn download(client: &mut Client, url: &str, doc: Option<&Url>) -> Option<Vec<u8>
     None
 }
 
-/// Download (or read) and decode one picture. Runs on a worker thread.
-pub(crate) fn load(client: &mut Client, url: &str, used: &AtomicUsize, doc: Option<&Url>) -> Option<Bitmap> {
-    let bytes = if url.starts_with("data:") { data_url(url)? } else { download(client, url, doc)? };
+/// Download (or read) and decode one picture. Runs on a worker thread. `blob` is the Blob of a `blob:` URL.
+pub(crate) fn load(client: &mut Client, url: &str, blob: Option<&[u8]>, used: &AtomicUsize, doc: Option<&Url>) -> Option<Bitmap> {
+    let bytes: std::borrow::Cow<[u8]> = match blob {
+        Some(b) => b.into(),
+        None if url.starts_with("data:") => data_url(url)?.into(),
+        None => download(client, url, doc)?.into(),
+    };
     // An SVG file is drawn by the painter of an inline `<svg>`, at its own size.
     if bare_image::kind(&bytes).is_none() {
         let text = std::str::from_utf8(&bytes).ok().filter(|t| t.contains("<svg"))?;
@@ -217,13 +225,15 @@ const CAPTURE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 /// Queue the picture of the `<img>` `n` (`by_url` joins elements with one URL). Gives false if it cannot be queued.
 fn want(images: &mut Images, b: &crate::browser_any::AnyBrowser, doc: &Document, n: NodeId, by_url: &mut HashMap<String, usize>) -> bool {
     let Some(src) = source_of(doc, n) else { return false };
-    let url = if src.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("data:")) { Ok(src) } else { b.resolve_url(&src) };
-    let Ok(url) = url else { return false };
+    // A `blob:` URL is read now: the page can revoke it once the load has started.
+    let blob = crate::browser_web::is_blob_url(&src).then(|| b.img_blob(n, &src));
+    let url = if blob.is_some() || src.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("data:")) { Ok(src) } else { b.resolve_url(&src) };
+    let (Ok(url), None | Some(Some(_))) = (url, &blob) else { return false };
     match by_url.get(&url) {
         Some(&k) => images.queue[k].1.push(n),
         None if by_url.len() < MAX_PICTURES => {
             by_url.insert(url.clone(), images.queue.len());
-            images.queue.push_back((url, vec![n], std::time::Instant::now()));
+            images.queue.push_back((url, vec![n], std::time::Instant::now(), blob.flatten()));
         }
         None => return false,
     }
@@ -358,7 +368,7 @@ impl Page {
         let doc = self.source.browser().and_then(|b| b.document_url());
         while self.images.jobs.len() + self.images.css_jobs.len() < INFLIGHT {
             // The pictures of the tree first, then the ones of the styles (`id` is 0 for the first kind).
-            let Some((url, nodes, id, queued)) = self.images.queue.pop_front().map(|(u, n, t)| (u, n, 0, t)).or_else(|| self.images.css_queue.pop_front().map(|(i, u, t)| (u, Vec::new(), i, t))) else { break };
+            let Some((url, nodes, id, queued, blob)) = self.images.queue.pop_front().map(|(u, n, t, b)| (u, n, 0, t, b)).or_else(|| self.images.css_queue.pop_front().map(|(i, u, t, b)| (u, Vec::new(), i, t, b))) else { break };
             let used = self.images.used.clone();
             let client = match &mut self.source {
                 Source::Session(s) => s.resource_client(),
@@ -368,7 +378,7 @@ impl Page {
             let doc = doc.clone();
             let task = client.spawn(move |c| {
                 bare_net::trace::wanted(queued);
-                load(c, &url, &used, doc.as_deref().and_then(|d| Url::parse(d).ok()).as_ref())
+                load(c, &url, blob.as_deref(), &used, doc.as_deref().and_then(|d| Url::parse(d).ok()).as_ref())
             });
             if id == 0 {
                 self.images.jobs.push((nodes, task, shown, now));
@@ -459,9 +469,17 @@ impl Page {
                 continue;
             }
             let Some(raw) = bare_css::urls::get(id) else { continue };
+            if crate::browser_web::is_blob_url(&raw) {
+                // Read now: the page can revoke the URL once the load has started. A URL that is not in the store fails.
+                match b.blob_bytes(&raw) {
+                    Some(bytes) => self.images.css_queue.push_back((id, raw.to_string(), std::time::Instant::now(), Some(bytes))),
+                    None => self.images.failed += 1,
+                }
+                continue;
+            }
             let url = if raw.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("data:")) { Ok(raw.to_string()) } else { b.resolve_url(&raw) };
             if let Ok(url) = url {
-                self.images.css_queue.push_back((id, url, std::time::Instant::now()));
+                self.images.css_queue.push_back((id, url, std::time::Instant::now(), None));
             }
         }
     }
@@ -474,10 +492,10 @@ mod tests {
     #[test]
     fn an_svg_picture_has_its_size_and_no_raster_until_its_pixels_are_read() {
         let svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"12\"><rect width=\"12\" height=\"12\" fill=\"#f00\"/></svg>";
-        let (w, h, px) = load(&mut Client::new(), &format!("data:image/svg+xml,{svg}"), &AtomicUsize::new(0), None).expect("a picture");
+        let (w, h, px) = load(&mut Client::new(), &format!("data:image/svg+xml,{svg}"), None, &AtomicUsize::new(0), None).expect("a picture");
         assert_eq!((w, h, px.is_ready()), (24, 12, false));
         assert_eq!((px.len(), px[5 * 24 + 3], px[5 * 24 + 20] >> 24, px.is_ready()), (288, 0xffff_0000, 0, true));
         // A file that is not an SVG picture fails at once, as it did when the raster was made at the load.
-        assert!(load(&mut Client::new(), "data:image/svg+xml,<svg width=\"5000\" height=\"5\"></svg>", &AtomicUsize::new(0), None).is_none());
+        assert!(load(&mut Client::new(), "data:image/svg+xml,<svg width=\"5000\" height=\"5\"></svg>", None, &AtomicUsize::new(0), None).is_none());
     }
 }
