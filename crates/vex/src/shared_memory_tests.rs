@@ -30,7 +30,7 @@ fn separate_agents_share_growth_atomic_operations_and_waiters() {
     }).unwrap();
     worker.join().unwrap();
     main.collect_idle();
-    assert!(main.realm.deliver_test262_wait(Duration::ZERO).unwrap());
+    assert!(main.realm.deliver_shared_wait(Duration::ZERO).unwrap());
     main.drain_microtasks(&mut |_, _| {}).unwrap();
     assert_eq!(main.global_text("done"), "ok");
     let view = main.global("view");

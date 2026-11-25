@@ -1762,7 +1762,7 @@ impl<E: Eng> Browser<E> {
 
     /// Due time of the earliest queued task.
     pub fn next_scheduled_due(&self) -> Option<f64> {
-        let own = self.dom.next_due();
+        let own = self.own_scheduled_due();
         if !self.dom.kids.any() {
             return own;
         }
@@ -1773,8 +1773,28 @@ impl<E: Eng> Browser<E> {
         }
     }
 
+    fn own_scheduled_due(&self) -> Option<f64> {
+        match (self.dom.next_due(), self.shared_wait_due()) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    fn shared_wait_due(&self) -> Option<f64> {
+        let delay = self.it.shared_wait_delay()?;
+        // The virtual scheduler can advance its own timers only. Waiter timeouts
+        // use a real monotonic clock shared by agents.
+        if !delay.is_zero() && self.uses_virtual_clock() {
+            return None;
+        }
+        Some(self.now() + delay.as_secs_f64() * 1000.0)
+    }
+
     /// Does a queued task due at `limit` ms or before keep the page from being settled? See "Settled" in the header.
     pub fn blocks_settle(&self, limit: f64) -> bool {
+        if self.shared_wait_due().is_some_and(|due| due <= limit) {
+            return true;
+        }
         let s = self.dom.sched.borrow();
         s.tasks.iter().take_while(|(k, _)| f64::from_bits(k.0) <= limit).any(|(_, t)| !s.skips(t)) || self.dom.kids.blocks(&self.dom, limit)
     }
@@ -1879,8 +1899,21 @@ impl<E: Eng> Browser<E> {
                 dom.schedule(dom.now_ms() + 16.0, Task::Scroll)?;
             }
             if ran >= max {
-                capped = dom.next_due().is_some_and(|d| d <= upto);
+                capped = dom.next_due().is_some_and(|d| d <= upto)
+                    || self.it.shared_wait_delay().is_some_and(|delay| delay.is_zero());
                 break;
+            }
+            if self.it.shared_wait_delay().is_some_and(|delay| delay.is_zero())
+                && self.it.host_scope_o(|it| {
+                    if !it.deliver_shared_wait()? {
+                        return Ok(false);
+                    }
+                    it.host_checkpoint()?;
+                    Ok(true)
+                })?
+            {
+                ran += 1;
+                continue;
             }
             let Some((due, run)) = dom.pop_due(upto) else { break };
             if target.is_some() {
@@ -1913,7 +1946,7 @@ impl<E: Eng> Browser<E> {
              Field("tasks", Scalar::U64(s.tasks.len() as u64)), Field("messages", Scalar::U64(s.queued as u64)),
              Field("message_bytes", Scalar::U64(s.queued_bytes as u64))]
         });
-        Ok(Pump { ran, capped, next_due: dom.next_due() })
+        Ok(Pump { ran, capped, next_due: self.own_scheduled_due() })
     }
 }
 

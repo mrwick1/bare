@@ -418,3 +418,6 @@ mod browser_rellist_tests;
 mod browser_sandbox_tests;
 #[cfg(test)]
 mod browser_transition_tests;
+
+#[cfg(test)]
+mod browser_shared_wait_tests;

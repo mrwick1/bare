@@ -38,24 +38,33 @@ pub(crate) enum Transfer {
     End { me: u64, remote: Option<u64> },
 }
 
-/// What the engine asks of this page during a clone.
-impl<'q, E: Eng> CloneHost<E::Vm> for &Dom<E> {
+/// The clone destination can be storage or a live agent.
+struct BrowserClone<'a, E: Eng> {
+    dom: &'a Dom<E>,
+    storage: bool,
+}
+
+impl<E: Eng> CloneHost<E::Vm> for BrowserClone<'_, E> {
+    fn shared_buffer_cluster(&self) -> Option<&bare_js_api::clone::AgentCluster> {
+        if self.storage { None } else { self.dom.agent_cluster.get() }
+    }
+
     fn is_host_object(&self, o: &E::Raw) -> bool {
-        matches!(E::kind(*o), Val::Object(o) if Dom::is_host_object(self, o))
+        matches!(E::kind(*o), Val::Object(o) if self.dom.is_host_object(o))
     }
 
     fn can_transfer(&self, o: &E::Raw) -> bool {
-        matches!(E::kind(*o), Val::Object(o) if self.port_movable(o))
+        matches!(E::kind(*o), Val::Object(o) if self.dom.port_movable(o))
     }
 
     fn transfer_out(&mut self, o: &E::Raw) -> Box<dyn Any + Send> {
         let Val::Object(o) = E::kind(*o) else { unreachable!("a listed object") };
-        Box::new(Transfer::Port(self.park_port(o)))
+        Box::new(Transfer::Port(self.dom.park_port(o)))
     }
 
     fn transfer_in<'s>(&mut self, s: &mut Scope<'s, E::Vm>, items: Vec<Box<dyn Any + Send>>) -> Result<Vec<Local<'s>>, bare_js_api::Error<'s>> {
-        let os = make_hosts(self, s, items)?;
-        Ok(os.into_iter().map(|o| self.obj_local(s, o)).collect())
+        let os = make_hosts(self.dom, s, items)?;
+        Ok(os.into_iter().map(|o| self.dom.obj_local(s, o)).collect())
     }
 
     fn data_clone_error<'s>(&mut self, s: &mut Scope<'s, E::Vm>, what: Refused) -> bare_js_api::Error<'s> {
@@ -66,17 +75,17 @@ impl<'q, E: Eng> CloneHost<E::Vm> for &Dom<E> {
             Refused::DetachedBuffer => "An ArrayBuffer is detached and",
             Refused::DetachedTransfer => "A transferred item is detached and",
         };
-        self.dom_err_s(s, "DataCloneError", &format!("{what} could not be cloned."))
+        self.dom.dom_err_s(s, "DataCloneError", &format!("{what} could not be cloned."))
     }
 
     fn write_host_object(&mut self, o: &E::Raw) -> Option<(Box<dyn Any + Send>, usize)> {
         let Val::Object(o) = E::kind(*o) else { return None };
-        crate::browser_web::clone_out(self, o)
+        crate::browser_web::clone_out(self.dom, o)
     }
 
     fn read_host_object<'s>(&mut self, s: &mut Scope<'s, E::Vm>, data: &dyn Any) -> Result<Local<'s>, bare_js_api::Error<'s>> {
         match data.downcast_ref::<crate::browser_web::WebClone>() {
-            Some(w) => crate::browser_web::clone_in(self, s, w),
+            Some(w) => crate::browser_web::clone_in(self.dom, s, w),
             None => Err(self.data_clone_error(s, Refused::Object)),
         }
     }
@@ -95,10 +104,10 @@ fn make_hosts<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, items: Vec<Box<dyn Any 
 
 /// The record of `v` with these limits and this transfer list. The listed buffers are detached and the listed ports are parked after
 /// the walk succeeded.
-fn out<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>, limits: CloneLimits, list: &[E::Obj]) -> Res<'s, Cloned> {
+fn out<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>, limits: CloneLimits, list: &[E::Obj], storage: bool) -> Res<'s, Cloned> {
     let base = s.engine().stack_len();
     let items: Vec<Local<'s>> = list.iter().map(|&o| d.obj_local(s, o)).collect();
-    let mut host = d;
+    let mut host = BrowserClone { dom: d, storage };
     let r = s.engine().clone_out(v, &CloneOpts { limits, transfer: &items }, &mut host);
     // An error is a local above `base`: it stays.
     if r.is_ok() {
@@ -111,7 +120,7 @@ fn out<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>, limits: CloneLim
 pub(crate) fn serialize<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>) -> Res<'s, Cloned> {
     let l = d.nav.lim.get();
     let limits = CloneLimits { bytes: l.max_state_bytes, depth: l.max_state_depth.min(128), nodes: l.max_state_nodes, names: ["history-state-bytes", "history-state-depth", "history-state-nodes"] };
-    match out(d, s, v, limits, &[]) {
+    match out(d, s, v, limits, &[], true) {
         // The size is the page's choice: a catchable error, as in Firefox. The depth cap stays a limit.
         Err(bare_js_api::Error::Abort(Abort::Limit("history-state-bytes" | "history-state-nodes"))) => Err(d.dom_err_s(s, "DataCloneError", "A state over the size cap could not be cloned.")),
         r => r,
@@ -127,7 +136,7 @@ fn clone_limits() -> CloneLimits {
 /// `list` comes from `Dom::transfer_list`. With no list the engine copies in one pass and makes no record (`Engine::clone_copy`).
 pub(crate) fn clone_with<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>, list: &[E::Obj]) -> Res<'s, (Local<'s>, Vec<E::Obj>, usize)> {
     if list.is_empty() {
-        let mut host = d;
+        let mut host = BrowserClone { dom: d, storage: false };
         let (copy, cost) = s.engine().clone_copy(v, &clone_limits(), &mut host)?;
         return Ok((copy, Vec::new(), cost));
     }
@@ -140,18 +149,19 @@ pub(crate) fn clone_with<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>
 /// are detached and the listed ports are parked after the walk succeeded. A listed item that changed during the walk (a getter
 /// detached it) throws `DataCloneError` before any item moves.
 pub(crate) fn clone_state_with<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>, list: &[E::Obj]) -> Res<'s, Cloned> {
-    out(d, s, v, clone_limits(), list)
+    out(d, s, v, clone_limits(), list, false)
 }
 
 /// A new object graph for `c`. No JS runs (the objects are new, so no setter can be hit). A record with no moved item can be read again.
 pub(crate) fn materialize<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, c: &mut Cloned) -> Res<'s, Local<'s>> {
-    materialize_with(d, s, c).map(|r| r.0)
+    let mut host = BrowserClone { dom: d, storage: true };
+    s.engine().clone_in(c, &mut host).map(|result| result.value)
 }
 
 /// `materialize` with a transfer list: the graph and the new ports of the list, in list order. A listed buffer that no node uses is dropped.
 /// The moved items leave `c`.
 pub(crate) fn materialize_with<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, c: &mut Cloned) -> Res<'s, (Local<'s>, Vec<E::Obj>)> {
-    let mut host = d;
+    let mut host = BrowserClone { dom: d, storage: false };
     let ci = s.engine().clone_in(c, &mut host)?;
     let ports = ci.hosts.iter().filter_map(|&l| obj_id::<E>(s, l)).collect();
     Ok((ci.value, ports))

@@ -14,7 +14,7 @@
 //! lower-cased when it is `ltr`, `rtl` or `auto`, else ""; the setter writes the attribute), `lastModified` (the load time in UTC as
 //! `MM/DD/YYYY hh:mm:ss`; the `Last-Modified` header is not known to the document).
 //!
-//! `window`: `devicePixelRatio` 1, `screenX` and `screenY` 0, `crossOriginIsolated` false, `closed` false, `opener` and `frameElement`
+//! `window`: `devicePixelRatio` 1, `screenX` and `screenY` 0, `crossOriginIsolated` reflects the host agent, `closed` false, `opener` and `frameElement`
 //! null (data properties); `isSecureContext` (https, or a loopback or `.localhost` host); `outerWidth` and `outerHeight` are the inner
 //! size (`browser_scroll.rs`); `print`, `focus` and `blur` do nothing; `alert`, `confirm`, `prompt` and `open` answer a driver (`agent.rs`); without one
 //! `alert` does nothing, `confirm` gives false, `prompt` gives null and `open` gives null (a blocked popup, as it does for a driver). `postMessage(message, targetOrigin | { targetOrigin, transfer })` clones the message (`structuredClone`), drops
@@ -85,7 +85,8 @@ pub(crate) fn define<E: Eng>(d: &Dom<E>, it: &mut E::Vm, key: &str) -> R<E, ()> 
         "fonts" | "FontFace" => crate::browser_fonts::define(d, it),
         "devicePixelRatio" => data(it, g, E::num(1.0)),
         "screenX" | "screenY" => data(it, g, E::num(0.0)),
-        "crossOriginIsolated" | "closed" => data(it, g, E::bool_raw(false)),
+        "crossOriginIsolated" => getter(d, it, g, &[key], |d, s, _, _| Ok(s.boolean(d.agent_cluster.get().is_some())), false),
+        "closed" => data(it, g, E::bool_raw(false)),
         "opener" | "frameElement" => data(it, g, E::null()),
         "postMessage" => d.def_method_s(it, g, "postMessage", 1, post_message).map(|_| ()),
         // `close`: a page that no script opened stays open (Chrome ignores the call). Teams binds it while it builds its window wrapper.
