@@ -443,6 +443,13 @@ impl Realm {
         (o.is_kind(K_BUFFER) && !is_shared(o) && !immutable_buffer(o)).then(|| Buffer::of(self, o).bytes_mut(self))
     }
 
+    /// The bytes of a buffer or a view, with no copy (as `Engine::bytes`), for a host that holds a raw value. `None` for any other
+    /// value and for a shared buffer.
+    pub fn value_bytes(&self, v: Value) -> Option<&[u8]> {
+        let (b, span) = self.byte_range(Self::obj(v)?)?;
+        self.buffer_bytes(b)?.get(span)
+    }
+
     pub(crate) fn byte_range(&self, o: Obj) -> Option<(Obj, std::ops::Range<usize>)> {
         if o.is_kind(K_BUFFER) {
             return Some((o, 0..Buffer::of(self, o).len));

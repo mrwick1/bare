@@ -618,9 +618,8 @@ impl Ops<New> for Realm {
         let e = self.iter_fail(it, e);
         fault(self, e)
     }
-    fn bytes_of(&self, _v: Value) -> Option<&[u8]> {
-        // Vex has no ArrayBuffer, TypedArray or DataView cells yet.
-        None
+    fn bytes_of(&self, v: Value) -> Option<&[u8]> {
+        self.value_bytes(v)
     }
     fn set_wall_clock(&mut self, c: WallClock) -> Result<(), Fault<New>> {
         let clock = match c {

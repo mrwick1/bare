@@ -233,7 +233,6 @@ fn post_json_sends_exact_bytes_and_engine_made_framing() {
 }
 
 #[test]
-#[ignore = "vex: left: ([48, 44, 50, 53, 53, 44, 49, 48], 'POST', ['text/plain;charset=UTF-8'])"]
 fn bytes_and_string_bodies_get_the_right_content_type() {
     big(|| {
         let srv = serve(|_| ok("{}"));
@@ -1028,7 +1027,6 @@ fn unescape(s: &str) -> String {
 }
 
 #[test]
-#[ignore = "vex: left: '104,105'"]
 fn bodies_are_the_bytes_that_chrome_sends() {
     big(|| {
         let srv = serve(|_| ok("{}"));
@@ -1076,7 +1074,6 @@ fn each_request_has_a_new_random_boundary() {
 }
 
 #[test]
-#[ignore = "vex: left: 'true|text/plain;charset=UTF-8'"]
 fn request_and_response_take_blob_form_and_params_bodies() {
     big(|| {
         let mut b = at(1);

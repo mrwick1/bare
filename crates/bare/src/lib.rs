@@ -470,6 +470,8 @@ mod browser_worker_scope_tests;
 mod browser_worker_import_tests;
 #[cfg(test)]
 mod browser_worker_gc_tests;
+#[cfg(test)]
+mod browser_worker_fetch_upload_tests;
 mod browser_remote_window;
 mod browser_port_hub;
 

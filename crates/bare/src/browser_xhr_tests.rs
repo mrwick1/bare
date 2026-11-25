@@ -113,7 +113,6 @@ fn cases() -> Vec<(String, String)> {
 }
 
 #[test]
-#[ignore = "vex: 2 of 68 differ:"]
 fn every_recorded_chrome_case_gives_the_same_result() {
     big(|| {
         let srv = server();
