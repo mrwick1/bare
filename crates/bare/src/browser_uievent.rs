@@ -286,6 +286,11 @@ fn no_events<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args
     s.new_array(&[])
 }
 
+fn target_ranges<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let r = with_ui(d, s, this, |_, u| u.targets)?;
+    crate::browser_range::static_ranges(d, s, r)
+}
+
 fn null<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     with_ui(d, s, this, |_, _| ())?;
     Ok(s.null())
@@ -381,7 +386,7 @@ impl<E: Eng> Dom<E> {
             (&[pt], "getPredictedEvents", To::Method(no_events, 0)),
             (&[k], "charCode", To::Get(char_code)),
             (&[i], "dataTransfer", To::Get(null)),
-            (&[i], "getTargetRanges", To::Method(no_events, 0)),
+            (&[i], "getTargetRanges", To::Method(target_ranges, 0)),
             (&[el], "setPointerCapture", To::Method(set_pointer_capture, 1)),
             (&[el], "releasePointerCapture", To::Method(release_pointer_capture, 1)),
             (&[el], "hasPointerCapture", To::Method(has_pointer_capture, 1)),

@@ -108,6 +108,8 @@ pub(crate) struct Ui {
     pub char_code: u32,
     pub data: Option<String>,
     pub input_type: String,
+    /// The points of the target range of a `beforeinput` on an editing host (`getTargetRanges`).
+    pub targets: Option<(NodeId, u32, NodeId, u32)>,
     /// A `PointerEvent` made by script. `None`: the mouse of the window (`PointerData::MOUSE`).
     pub pointer: Option<Box<PointerData>>,
     /// Coordinates keep their fraction (a `PointerEvent`); a `MouseEvent` floors them, as Chrome does.
@@ -798,7 +800,9 @@ impl<E: Eng> Dom<E> {
 
     /// `beforeinput` (cancelable) or `input`.
     fn input_ev(&self, it: &mut E::Vm, target: NodeId, ty: &str, kind: &str, data: Option<&str>) -> R<E, bool> {
-        let ui = Ui { data: data.map(str::to_string), input_type: kind.to_string(), ..Ui::default() };
+        // Chrome gives the range that the edit replaces in an editing host, and no range in a text field.
+        let targets = if ty == "beforeinput" && self.editing_host(target).is_some() { crate::browser_range::sel_points(self) } else { None };
+        let ui = Ui { data: data.map(str::to_string), input_type: kind.to_string(), targets, ..Ui::default() };
         self.fire_ui(it, target, ty, self.p().inputev, true, ty == "beforeinput", ui, None)
     }
 
