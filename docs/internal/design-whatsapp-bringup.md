@@ -59,3 +59,24 @@ Live effect, same journey, before vs after PR 1 (archMachine, 1 run each):
 
 With PRs 1 to 4, `whatsapp-qr.steps` passes: the login page shows a QR code in 15 s (archMachine, 1 run). `zbarimg` reads
 the screenshot as a `https://wa.me/settings/li...` link. Next: link a device, then the chat list.
+
+## Link attempt 1 (2026-11-25)
+
+The owner scanned the QR code. The phone and the page did the link handshake. The page showed "Your messages are
+downloading", then an error. The phone then showed no linked device for bare.
+
+- The page logged `[backend-worker] worker script failed to load during init`. `WAWebBackendWorkerInitErrorWatcher` reads
+  an `error` event that is not an `ErrorEvent` as a script that failed to load. Bare fires a plain `Event`.
+- The cause was in the worker: an uncaught `Invariant Violation #56318` in its `message` listener. The full-text-search
+  worker bundle (`WAWebWorkerConnect`) asserts `self instanceof DedicatedWorkerGlobalScope`. In a bare worker, that name
+  was `undefined` and `Object.prototype.toString.call(self)` gave `[object Window]`.
+- The 400 responses on the `init_script` requests did not reproduce with `curl`. Hypothesis: a side effect of the failed
+  worker, not a cause.
+- Not the cause: `WebAssembly`. WhatsApp uses it (liboqs, media worker), and a design for it is open for owner review.
+
+**Worker global scope** (PR 5). The worker global gets the interfaces `WorkerGlobalScope` and
+`DedicatedWorkerGlobalScope` (illegal constructors) and the chain `self -> DedicatedWorkerGlobalScope.prototype ->
+WorkerGlobalScope.prototype -> Window.prototype -> .. -> EventTarget.prototype`. Its tag is `DedicatedWorkerGlobalScope`.
+`Window.prototype` stays in the chain, because the functions of the global live there; the standard has no window names in
+a worker (`design-workers.md`, step 3). Fix: `crates/bare/src/browser_worker.rs` (`install_scope`). Tests:
+`crates/bare/src/browser_worker_scope_tests.rs`.

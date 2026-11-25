@@ -90,8 +90,31 @@ pub(crate) fn install_scope<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, ()> {
         s.define_str(g, "close", close, attrs)?;
         let import = d.add_fn_s(s, scope_import, "importScripts", 0, HostFn::Method)?;
         s.define_str(g, "importScripts", import, attrs)?;
+        // The chain is `self -> DedicatedWorkerGlobalScope.prototype -> WorkerGlobalScope.prototype -> Window.prototype -> ..
+        // -> EventTarget.prototype`. The standard has no `Window.prototype` here; it stays because the functions of the global live on it.
+        let mut up = s.get_prototype_of(g)?;
+        for name in ["WorkerGlobalScope", "DedicatedWorkerGlobalScope"] {
+            let p = match up { Some(u) => s.new_object_with(u)?, None => s.new_object()? };
+            let f = d.add_fn_s(s, illegal, name, 0, HostFn::Ctor)?;
+            s.define_str(f, "prototype", p, Attrs { writable: false, enumerable: false, configurable: false })?;
+            s.define_str(p, "constructor", f, Attrs::METHOD)?;
+            let key = s.intrinsic(Intrinsic::SymbolToStringTag);
+            let tag = s.string(name)?;
+            s.define(p, key, tag, Attrs { writable: false, enumerable: false, configurable: true })?;
+            s.define_str(g, name, f, Attrs::METHOD)?;
+            up = Some(p);
+        }
+        s.set_prototype_of(g, up)?;
+        // The window code puts the tag `Window` on the global itself.
+        let key = s.intrinsic(Intrinsic::SymbolToStringTag);
+        let tag = s.string("DedicatedWorkerGlobalScope")?;
+        s.define(g, key, tag, Attrs { writable: false, enumerable: false, configurable: true })?;
         Ok(())
     })
+}
+
+fn illegal<'s, E: Eng>(_: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    Err(s.type_error("Illegal constructor"))
 }
 
 /// Clone `a[0]` with the transfer list `a[1]` (a list, or an object with `transfer`) into the outbox, for `to`.
