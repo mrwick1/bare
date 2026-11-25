@@ -448,11 +448,11 @@ pub(crate) fn wrapper_proto<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, E::Obj> 
     if d.html_on.get() {
         crate::browser_html::proto(d, it, "style")
     } else {
-        Ok(d.cssom.style_p.get().copied().unwrap_or(d.p().html))
+        style_proto(d, it)
     }
 }
 
-// Created only after a sheet or HTMLStyleElement read.
+// Created at the first `<style>` wrapper, `sheet` read or HTMLStyleElement read.
 #[cold]
 pub(crate) fn style_proto<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, E::Obj> {
     if let Some(&p) = d.cssom.style_p.get() {
@@ -460,6 +460,7 @@ pub(crate) fn style_proto<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, E::Obj> {
     }
     let p = d.obj(it, d.p().html)?;
     d.def_get_s(it, p, "sheet", sheet_get_s, None)?;
+    crate::browser_reflect::reflect!(d, it, p, &["style"], { "media" => "media": Str, "type" => "type": Str });
     d.cssom.style_p.set(p).ok();
     Ok(p)
 }
