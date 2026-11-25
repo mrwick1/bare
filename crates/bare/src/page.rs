@@ -522,13 +522,12 @@ impl Page {
         }
     }
 
-    /// Why the page stopped for good, if it did: a fatal error of the engine or the host, or too many tasks aborted by script budgets
-    /// (`Fatal::Aborted`), or a budget of the page or the session. The DOM stays and can be read, but no script, timer or input runs
+    /// Why the page stopped for good, if it did: a fatal error of the engine or the host, or a budget of the page or the
+    /// session. The DOM stays and can be read, but no script, timer or input runs
     /// any more. A driver should fail a step that waits for a change with this text.
     pub fn stopped(&self) -> Option<String> {
         match &self.source {
             Source::Session(s) => match s.ended() {
-                Some(SessionStop::Page(crate::Stop::Fatal(crate::Fatal::Aborted(why)))) => Some(why.clone()),
                 Some(SessionStop::Page(crate::Stop::Fatal(f))) => Some(format!("{f:?}")),
                 Some(b @ (SessionStop::Page(crate::Stop::TaskBudget | crate::Stop::RoundBudget | crate::Stop::TimeBudget) | SessionStop::TaskBudget | SessionStop::RoundBudget | SessionStop::TimeBudget)) => Some(format!("the {b:?} ran out")),
                 _ => None,
@@ -933,7 +932,6 @@ impl Page {
                 Ok(_) => None,
                 Err(e) => match b.survive(e, "task") {
                     Survive::Aborted => None,
-                    Survive::Exhausted(why) => Some(why),
                     Survive::Fatal => Some(format!("{e:?}")),
                 },
             },
@@ -951,7 +949,6 @@ impl Page {
                 // A script budget ends only this task (the console has the error); the page takes the next input.
                 match self.browser().map(|b| b.survive(e, "event handler")) {
                     Some(Survive::Aborted) => {}
-                    Some(Survive::Exhausted(why)) => self.note(format!("input: {why}")),
                     _ => self.note(format!("input: {e:?}")),
                 }
                 // The call may have changed the page before it stopped.
