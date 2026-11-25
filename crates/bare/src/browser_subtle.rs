@@ -57,6 +57,21 @@ impl Drop for Key {
     }
 }
 
+/// The algorithms in their disk order (`profile_record.rs`). Append only: a profile on disk names an algorithm by its index.
+const DISK: [Alg; 5] = [Alg::AesGcm, Alg::AesCbc, Alg::AesCtr, Alg::Hmac, Alg::Hkdf];
+
+impl Key {
+    /// The disk form: algorithm index, key bytes, extractable, usage bits.
+    pub(crate) fn parts(&self) -> (u8, &[u8], bool, u8) {
+        (DISK.iter().position(|&a| a == self.alg).expect("listed") as u8, &self.bytes, self.extractable, self.usages)
+    }
+
+    /// The key of `parts`. `None` for an unknown algorithm index.
+    pub(crate) fn from_parts(alg: u8, bytes: Vec<u8>, extractable: bool, usages: u8) -> Option<Key> {
+        Some(Key { alg: *DISK.get(alg as usize)?, bytes, extractable, usages })
+    }
+}
+
 /// The `KeyUsage` values, in the order that `usages` lists them.
 const USAGES: [&str; 8] = ["encrypt", "decrypt", "sign", "verify", "deriveKey", "deriveBits", "wrapKey", "unwrapKey"];
 const ENCRYPT: u8 = 1;
