@@ -80,6 +80,8 @@ mod browser_subtle;
 #[cfg(test)]
 mod browser_subtle_tests;
 #[cfg(test)]
+mod browser_subtle_ctr_hmac_tests;
+#[cfg(test)]
 mod browser_web_tests;
 #[cfg(test)]
 mod browser_web_filelist_tests;
