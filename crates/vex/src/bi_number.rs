@@ -599,12 +599,19 @@ fn imul(rt: &mut Realm, _this: Value, args: &[Value]) -> R<Value> {
     Ok(Value::int(a.wrapping_mul(b)))
 }
 
-/// xorshift64*, seeded from the OS at the first call.
+/// xorshift64*, seeded from the OS at the first call. With `BARE_SEED=<number>` in the environment, the seed is that number, so a run
+/// that replays recorded replies makes the same values each time (as `crypto.getRandomValues` does in the browser).
 fn random(rt: &mut Realm, _this: Value, _args: &[Value]) -> R<Value> {
     if rt.rng == 0 {
-        let mut b = [0u8; 8];
-        let _ = bare_os::random::fill(&mut b);
-        rt.rng = u64::from_le_bytes(b) | 1;
+        static SEED: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+        rt.rng = match SEED.get_or_init(|| std::env::var("BARE_SEED").ok()?.parse().ok()) {
+            Some(seed) => seed.wrapping_mul(0x9E37_79B9_7F4A_7C15),
+            None => {
+                let mut b = [0u8; 8];
+                let _ = bare_os::random::fill(&mut b);
+                u64::from_le_bytes(b)
+            }
+        } | 1;
     }
     let mut x = rt.rng;
     x ^= x >> 12;
