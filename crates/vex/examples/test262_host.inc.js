@@ -6,7 +6,13 @@
   function hide(name, value) { Object.defineProperty(g, name, { value: value, writable: true, configurable: true }); }
   hide('__log', []);
   hide('print', function print() { append(g.__log, join.call(arguments, ' ')); });
-  hide('$262', { global: g, gc: function () {}, agent: {} });
+  var call = Function.prototype.call;
+  var detached = call.bind(Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'detached').get);
+  var transfer = call.bind(ArrayBuffer.prototype.transferToFixedLength);
+  function detachArrayBuffer(buffer) {
+    if (!detached(buffer)) transfer(buffer, 0);
+  }
+  hide('$262', { global: g, gc: function () {}, agent: {}, detachArrayBuffer: detachArrayBuffer });
   hide('__finish', function () { return join.call(g.__log, '\n'); });
   hide('__thrown', function (e) {
     var n = 'unknown', m = '', k = ['TypeError', 'RangeError', 'ReferenceError', 'SyntaxError', 'EvalError', 'URIError', 'Test262Error', 'Error'];

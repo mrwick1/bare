@@ -1,6 +1,6 @@
-# Rules of crates/js-diff/examples/test262_run.rs for tools/js/test262_js2.sh. Both engines get the same rules, so a skipped test is not
-# a failure of either. A test with a `module` flag is always skipped by the runner. A test with an `async` flag runs: see the runner.
-# NAME: a test262 feature. include:FILE: a harness file. text:STRING: the test source holds STRING. allow:NAME: see below.
+# Vex Test262 runner rules. The runner always skips tests with the `module` flag.
+# NAME skips a feature. include:FILE skips a harness file. text:STRING skips source text.
+# allow:NAME permits a feature. An optional path prefix after a space limits that permission.
 # What the runner does not offer (the same as tools/fixtures/js/test262-skip.txt):
 cross-realm
 IsHTMLDDA
@@ -12,11 +12,9 @@ Temporal
 tail-call-optimization
 host-gc-required
 include:atomicsHelper.js
-include:detachArrayBuffer.js
 include:tcoHelper.js
 text:$262.agent
 text:$262.createRealm
-text:$262.detachArrayBuffer
 text:$262.evalScript
 text:$262.IsHTMLDDA
 import-attributes
@@ -110,6 +108,7 @@ allow:Reflect
 allow:Reflect.construct
 allow:Reflect.set
 allow:Reflect.setPrototypeOf
+allow:Proxy test/built-ins/TypedArrayConstructors/
 # ArrayBuffer, numeric typed arrays and DataView.
 allow:ArrayBuffer
 allow:TypedArray
