@@ -1554,11 +1554,12 @@ fn post_remote<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>, list: &[
     let mut cloned = crate::browser_navigation_state::clone_state_with(d, s, v, list)?;
     d.export_ports(s, &mut cloned)?;
     let bytes = 16usize.saturating_add(cloned.cost());
-    if hub.bytes().saturating_add(bytes) > d.sched.borrow().limits.max_queued_message_bytes {
-        return Err(d.lim_s(s, "message-bytes"));
-    }
-    if let Err(w) = hub.push(end, Wire { cloned, bytes, origin: None }) {
+    let max_bytes = d.sched.borrow().limits.max_queued_message_bytes;
+    if let Err((w, limit)) = hub.push(end, Wire { cloned, bytes, origin: None }, d.max_messages(), max_bytes) {
         hub.release(w.cloned.moved());
+        if let Some(limit) = limit {
+            return Err(d.lim_s(s, limit));
+        }
     }
     Ok(())
 }

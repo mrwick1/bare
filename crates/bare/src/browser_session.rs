@@ -223,13 +223,49 @@ pub struct Session {
     loading: Option<(Next, Loading)>,
     /// The HTTP status of the last document that a live session loaded (0: none yet).
     status: u16,
+    isolation_requested: Option<EmbedderPolicy>,
     /// Live: the next document after its download, while turns parse it. The old document stays until the parse is done.
     parsing: Option<Box<Parsing>>,
 }
 
+/// The embedder policy requested by a top-level response with a matching opener policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EmbedderPolicy {
+    RequireCorp,
+    Credentialless,
+}
+
+pub(crate) struct DocumentResponse {
+    pub(crate) url: String,
+    pub(crate) html: String,
+    status: u16,
+    isolation_requested: Option<EmbedderPolicy>,
+}
+
+fn requests_isolation(response: &Response, url: &Url, frame: bool) -> Option<EmbedderPolicy> {
+    if frame || !potentially_trustworthy(url) {
+        return None;
+    }
+    let single = |name: &str| {
+        let mut values = response.headers.iter().filter(|(key, _)| key == name);
+        let (_, value) = values.next()?;
+        values.next().is_none().then(|| value.trim_ascii())
+    };
+    // Accept the bare policy tokens. Report-only, duplicate and composite fields
+    // do not qualify for the initial top-level isolation path.
+    if single("cross-origin-opener-policy") != Some("same-origin") {
+        return None;
+    }
+    match single("cross-origin-embedder-policy") {
+        Some("require-corp") => Some(EmbedderPolicy::RequireCorp),
+        Some("credentialless") => Some(EmbedderPolicy::Credentialless),
+        _ => None,
+    }
+}
+
 /// What a live load gives the page thread: one result, or a feed of text for a document that is still on its way.
 enum Loading {
-    Task(Task<Result<(String, String, u16), String>>),
+    Task(Task<Result<DocumentResponse, String>>),
     Feed(Arc<Feed>),
 }
 
@@ -247,9 +283,9 @@ impl Loading {
 enum Msg {
     /// The load ended with this result, with no feed of text: a redirect chain that failed, a text that is not HTML, a download, a body that
     /// has a coding that we cannot undo. The same value that `load_document` gives.
-    Whole(Result<(String, String, u16), String>),
-    /// The reply is HTML and its body follows: the final URL (with the fragment) and the status.
-    Head(String, u16),
+    Whole(Result<DocumentResponse, String>),
+    /// The reply is HTML and its decoded body follows.
+    Head(DocumentResponse),
     /// The next piece of the decoded text.
     Text(String),
     /// The body ended well.
@@ -274,7 +310,7 @@ impl Feed {
     }
 
     /// The worker is done: say how the load ended.
-    fn finish(&self, res: Result<(String, String, u16), String>) {
+    fn finish(&self, res: Result<DocumentResponse, String>) {
         self.push(match (self.streamed.load(Ordering::Relaxed), res) {
             (false, res) => Msg::Whole(res),
             (true, Ok(_)) => Msg::End,
@@ -313,6 +349,7 @@ struct Parsing {
     next: Next,
     url: String,
     html: String,
+    isolation_requested: Option<EmbedderPolicy>,
     /// Bytes of `html` given to the parser.
     at: usize,
     parser: tree::Parser,
@@ -519,7 +556,7 @@ pub(crate) fn redirect_allowed(from: &Url, to: &Url) -> bool {
 /// `keep_errors`: a status outside 200 to 299 still gives the document (a live page shows it), with that status as the last value.
 // Each argument is a separate input of one load; a bundle struct would add a copy.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn load_document(client: &mut Client, url: &str, from: Option<&str>, body: Option<&Body>, lim: &SessionLimits, deadline: Instant, grab: Option<&Grab>, keep_errors: bool, feed: Option<&Arc<Feed>>, frame: bool) -> Result<(String, String, u16), String> {
+pub(crate) fn load_document(client: &mut Client, url: &str, from: Option<&str>, body: Option<&Body>, lim: &SessionLimits, deadline: Instant, grab: Option<&Grab>, keep_errors: bool, feed: Option<&Arc<Feed>>, frame: bool) -> Result<DocumentResponse, String> {
     let max_url = NavLimits::default().max_url_bytes;
     if url.len() > max_url { return Err("the document URL is too big".into()); }
     let (bare, fragment) = match url.split_once('#') {
@@ -581,9 +618,10 @@ pub(crate) fn load_document(client: &mut Client, url: &str, from: Option<&str>, 
                     let feed = feed.expect("fetch_hop opens a reply only for a feed");
                     // From here the result goes through the feed: the head now, the text as it comes, the end (or the failure) when `load_document`
                     // returns. The page thread parses while the body is on its way.
-                    feed.push(Msg::Head(final_url.clone(), r.status));
+                    let isolation_requested = requests_isolation(&r, &cur, frame);
+                    feed.push(Msg::Head(DocumentResponse { url: final_url.clone(), html: String::new(), status: r.status, isolation_requested }));
                     stream_body(body, r.header("content-type"), lim.max_document_bytes, feed)?;
-                    return Ok((final_url, String::new(), r.status));
+                    return Ok(DocumentResponse { url: final_url, html: String::new(), status: r.status, isolation_requested });
                 }
             },
         };
@@ -629,7 +667,7 @@ pub(crate) fn load_document(client: &mut Client, url: &str, from: Option<&str>, 
             final_url.push('#');
             final_url.push_str(&f);
         }
-        return Ok((final_url, text, resp.status));
+        return Ok(DocumentResponse { url: final_url, html: text, status: resp.status, isolation_requested: requests_isolation(&resp, &cur, frame) });
     }
     Err("too many redirects".into())
 }
@@ -637,7 +675,7 @@ pub(crate) fn load_document(client: &mut Client, url: &str, from: Option<&str>, 
 impl Session {
     pub fn new(mut cfg: SessionConfig) -> Session {
         let store = cfg.storage.take().unwrap_or_default();
-        Session { cfg, store, browser: None, used: Used::default(), hist: Vec::new(), at: 0, client: None, loading: None, parsing: None, status: 0 }
+        Session { cfg, store, browser: None, used: Used::default(), hist: Vec::new(), at: 0, client: None, loading: None, parsing: None, status: 0, isolation_requested: None }
     }
 
     /// A client that shares the connections of the session.
@@ -751,6 +789,7 @@ impl Session {
         if self.cfg.live {
             // The old document ends now, so a heap is never held twice.
             self.browser = None;
+            self.isolation_requested = None;
             return self.start(next);
         }
         self.drive(Some(next), &[])
@@ -795,6 +834,7 @@ impl Session {
     /// End the document now, and forget the next one that is on its way. Its realm is dropped; the history and the storage stay.
     pub fn end_document(&mut self) {
         self.browser = None;
+        self.isolation_requested = None;
         self.loading = None;
         self.parsing = None;
     }
@@ -810,6 +850,12 @@ impl Session {
     /// The HTTP status of the last document that a live session loaded (0: none yet).
     pub fn status(&self) -> u16 {
         self.status
+    }
+
+    /// Whether the committed top-level document requested cross-origin isolation.
+    /// This records response policy. The browser's resource enforcement determines capability.
+    pub fn isolation_requested(&self) -> Option<EmbedderPolicy> {
+        self.isolation_requested
     }
 
     /// Why the session cannot go on (`run` and `resume` give this stop and run nothing), or `None`.
@@ -885,13 +931,13 @@ impl Session {
                 Loading::Task(task) => (task.wait().unwrap_or_else(|| Err("network error".into())), None),
                 Loading::Feed(feed) => match feed.pop() {
                     Some(Msg::Whole(res)) => (res, None),
-                    Some(Msg::Head(url, status)) => (Ok((url, String::new(), status)), Some(feed)),
+                    Some(Msg::Head(response)) => (Ok(response), Some(feed)),
                     Some(Msg::Err(why)) => (Err(why), None),
                     _ => (Err("network error".into()), None),
                 },
             };
             match got {
-                Ok((url, html, status)) => {
+                Ok(DocumentResponse { url, html, status, isolation_requested }) => {
                     self.status = status;
                     let scan = Url::parse(url.split('#').next().unwrap_or("")).map(|page| {
                         let mut c = self.fork();
@@ -900,7 +946,7 @@ impl Session {
                     });
                     let Ok(scan) = scan else { return SessionStop::LoadFailed("the URL is not an http(s) URL".into()) };
                     let ended = feed.is_none();
-                    self.parsing = Some(Box::new(Parsing { next: n, url, html, at: 0, parser: tree::Parser::new(), scan, feed, ended }));
+                    self.parsing = Some(Box::new(Parsing { next: n, url, html, isolation_requested, at: 0, parser: tree::Parser::new(), scan, feed, ended }));
                 }
                 // A download: the file is saved, and the document on screen stays.
                 Err(why) if why == SAVED => {
@@ -922,7 +968,7 @@ impl Session {
                 Ok(true) => {
                     let p = *self.parsing.take().expect("checked");
                     bare_net::trace::mark(|| "document parsed in slices".into(), 0);
-                    fetched = Some(Ok((p.url, p.parser.finish())));
+                    fetched = Some(Ok((p.url, p.parser.finish(), p.isolation_requested)));
                     scan = Some(p.scan);
                     next = Some(p.next);
                 }
@@ -961,12 +1007,13 @@ impl Session {
                 Some(Next { from, url, body, how }) => {
                     // The old document ends here: its realm, timers and callbacks are gone before the next load starts.
                     self.browser = None;
+                    self.isolation_requested = None;
                     let mut base = self.fork();
                     let doc = match fetched.take() {
                         Some(d) => d,
-                        None => load_document(&mut base, &url, from.as_deref(), body.as_ref(), &lim, deadline, None, false, None, false).map(|(url, html, _)| (url, tree::parse(&html))),
+                        None => load_document(&mut base, &url, from.as_deref(), body.as_ref(), &lim, deadline, None, false, None, false).map(|doc| (doc.url, tree::parse(&doc.html), doc.isolation_requested)),
                     };
-                    let (url, dom) = match doc {
+                    let (url, dom, isolation_requested) = match doc {
                         Ok(d) => d,
                         Err(why) => return SessionStop::LoadFailed(why),
                     };
@@ -995,7 +1042,7 @@ impl Session {
                         Err(_) => Err(SessionStop::LoadFailed("the realm could not be made".into())),
                     };
                     match started {
-                        Ok(x) => x,
+                        Ok(x) => { self.isolation_requested = isolation_requested; x },
                         Err(stop) => return stop,
                     }
                 }
@@ -1075,7 +1122,7 @@ mod tests {
         let scan = Scan::new(Client::new(), Url::parse("http://127.0.0.1:1/").unwrap(), lim, Instant::now());
         let next = Next { from: None, url: String::new(), body: None, how: How::Push };
         let ended = feed.is_none();
-        Parsing { next, url: String::new(), html, at: 0, parser: tree::Parser::new(), scan, feed, ended }
+        Parsing { next, url: String::new(), html, isolation_requested: None, at: 0, parser: tree::Parser::new(), scan, feed, ended }
     }
 
     /// The saved pages of the repository, each repeated until it is several parse steps long, give the tree of `tree::parse` when turns
@@ -1103,7 +1150,7 @@ mod tests {
             let html = page.repeat(2 * CHUNK / page.len() + 2);
             for size in [1, 7, 5000] {
                 let feed = Arc::new(Feed::default());
-                feed.push(Msg::Head(String::new(), 200));
+                feed.push(Msg::Head(DocumentResponse { url: String::new(), html: String::new(), status: 200, isolation_requested: None }));
                 let mut p = parsing(String::new(), Some(feed.clone()));
                 let mut at = 0;
                 let mut guard = 0;
@@ -1127,3 +1174,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "browser_session_isolation_tests.rs"]
+mod isolation_tests;

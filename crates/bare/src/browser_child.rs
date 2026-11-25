@@ -94,6 +94,7 @@ use bare_url::Url;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 
 /// The index of a child page in its parent.
 pub(crate) type FrameId = u32;
@@ -128,7 +129,7 @@ pub(crate) struct Cfg {
     /// The site of the top page: the site for the cookies of a frame load.
     top_site: Option<String>,
     /// The messages of the ports that are split across the pages of this top page (`browser_port_hub.rs`).
-    hub: Rc<PortHub>,
+    hub: Arc<PortHub>,
 }
 
 /// What a slot loads: the document of an iframe element, or the script of a dedicated worker (`browser_worker.rs`).
@@ -148,7 +149,7 @@ struct Slot<E: Eng> {
     win: Option<E::Obj>,
 }
 
-type Fetched = Task<Result<(String, String, u16), String>>;
+type Fetched = Task<Result<crate::browser_session::DocumentResponse, String>>;
 
 enum State<E: Eng> {
     /// The document is on its way.
@@ -282,7 +283,7 @@ impl<E: Eng> Kids<E> {
         self.cfg.borrow().as_ref().is_some_and(|c| c.hub.busy())
     }
 
-    pub(crate) fn hub(&self) -> Option<Rc<PortHub>> {
+    pub(crate) fn hub(&self) -> Option<Arc<PortHub>> {
         self.cfg.borrow().as_ref().map(|c| c.hub.clone())
     }
 
@@ -410,7 +411,7 @@ impl<E: Eng> Kids<E> {
             return;
         }
         let env = self.env.borrow_mut().take().unwrap_or_default();
-        *self.cfg.borrow_mut() = Some(Rc::new(Cfg { env, client, page, fetch, browser: dom_lim, total: Rc::new(Cell::new(0)), depth: 0, top_site, hub: Rc::default() }));
+        *self.cfg.borrow_mut() = Some(Rc::new(Cfg { env, client, page, fetch, browser: dom_lim, total: Rc::new(Cell::new(0)), depth: 0, top_site, hub: Arc::default() }));
     }
 
     pub(crate) fn set_env(&self, env: KidEnv) {
@@ -663,7 +664,7 @@ impl<E: Eng> Browser<E> {
                 st @ (State::Loading(_) | State::Start) => {
                     t.work += 1;
                     let got = match st {
-                        State::Loading(task) => task.wait().unwrap_or_else(|| Err("network error".into())).map(|(url, html, _)| (url, html, None)),
+                        State::Loading(task) => task.wait().unwrap_or_else(|| Err("network error".into())).map(|doc| (doc.url, doc.html, None)),
                         _ => match of {
                             Of::Worker(_, module) => worker_doc(&slot_url, module, &from),
                             Of::Frame(_) => Ok((slot_url.clone(), String::new(), None)),
