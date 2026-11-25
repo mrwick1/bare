@@ -11,7 +11,7 @@ fn big<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
 }
 
 /// Run `src` after the helpers, then the microtasks. Gives `out.join('|')`.
-fn go(src: &str) -> String {
+pub(crate) fn go(src: &str) -> String {
     let src = src.to_string();
     big(move || {
         let mut b = Browser::new(tree::parse("<body></body>"), BrowserLimits::default(), EvalLimits { max_steps: 20_000_000, ..Default::default() }, HeapLimits::default()).expect("browser");
@@ -112,12 +112,8 @@ fn whatsapp_feature_checks_pass() {
 }
 
 #[test]
-fn a_memory_export_is_a_link_error_for_now() {
-    let got = go("var M = w(HEAD + '0503 01 0001 070701 036d656d 0200'); out.push(err(() => new WebAssembly.Instance(new WebAssembly.Module(M))));");
-    assert_eq!(got, "LinkError:true");
-}
-
-#[test]
-fn func_handle_has_no_padding() {
+fn handles_have_no_padding() {
     assert_eq!(size_of::<wasmi::Func>(), 8);
+    assert_eq!(size_of::<wasmi::Memory>(), 8);
+    assert_eq!(size_of::<wasmi::Table>(), 8);
 }

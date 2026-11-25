@@ -1065,6 +1065,21 @@ impl Engine for Realm {
         self.a_ret(r)
     }
 
+    fn new_external_buffer<'s>(&mut self, bytes: &'static mut [u8]) -> Result<Local<'s>, Error<'s>> {
+        let data = std::ptr::NonNull::new(bytes.as_mut_ptr()).expect("a slice is not null");
+        // SAFETY: a `'static` slice stays valid; the host detaches the buffer before it ends a slice that it made longer lived.
+        let r = unsafe { Realm::new_external_buffer(self, data, bytes.len()) }.map(|o| o.value());
+        self.a_ret(r)
+    }
+
+    fn detach_buffer(&mut self, value: Local<'_>) -> bool {
+        let Some(o) = Self::obj(self.a_at(value)).filter(|o| o.is_kind(crate::object::K_BUFFER) && !crate::shared_memory::is_shared(*o)) else {
+            return false;
+        };
+        Realm::detach_buffer(self, o);
+        true
+    }
+
     fn new_typed_array<'s>(&mut self, elem: bare_js_api::Elem, bytes: Vec<u8>) -> Result<Local<'s>, Error<'s>> {
         let Some(elem) = crate::bi_typed::Element::from_api(elem) else {
             return Err(Error::Abort(Abort::Unsupported("typed array element type")));
