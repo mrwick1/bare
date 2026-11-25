@@ -199,6 +199,8 @@ mod browser_sw_tests;
 #[cfg(test)]
 mod browser_loader_queue_tests;
 #[cfg(test)]
+mod browser_loader_data_tests;
+#[cfg(test)]
 mod browser_link_sheet_tests;
 #[cfg(test)]
 mod browser_perf_detail_tests;
@@ -281,6 +283,8 @@ mod browser_raf_tests;
 mod browser_idle_tests;
 #[cfg(test)]
 mod browser_element_tests;
+#[cfg(test)]
+mod browser_element_nonce_tests;
 mod browser_elements;
 mod browser_canvas;
 mod browser_svg;
