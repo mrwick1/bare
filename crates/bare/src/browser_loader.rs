@@ -832,7 +832,7 @@ impl<E: Eng> Browser<E> {
         bare_net::trace::page_start();
         let deadline = deadline_after(cfg.limits.max_time);
         let live = self.live();
-        let net = dom.scripts.net.borrow_mut().take().filter(|_| live).map_or_else(|| Net::new(cfg.client), |n| *n);
+        let net = dom.scripts.net.borrow_mut().take().filter(|_| live).map_or_else(|| Net::new(cfg.client, &page), |n| *n);
         let mut run = Run {
             b: self,
             dom: dom.clone(),
@@ -913,7 +913,7 @@ impl<E: Eng> Browser<E> {
             step: 0,
             waiting: false,
         });
-        let net = net.map_or_else(|| Net::new(client), |n| *n);
+        let net = net.map_or_else(|| Net::new(client, &page), |n| *n);
         let mut run = Run {
             b: self,
             dom: dom.clone(),
@@ -1076,6 +1076,8 @@ struct Parsed {
 /// The client of the page, and the downloads that run on worker threads: started early, taken when the page needs them.
 struct Net {
     client: Client,
+    /// The origin of the document, for the Fetch Metadata of its requests.
+    doc: Arc<Url>,
     /// By the kind and the URL of the target. A download that finished waits here, with its text, until it is taken.
     /// `None`: the job did not download (see `done`), and the page thread does it when it takes the file.
     started: HashMap<String, Task<Option<Result<resources::Resource, LoadError>>>>,
@@ -1100,8 +1102,9 @@ struct Net {
 const WINDOW: usize = bare_net::parallel::MAX_WORKERS;
 
 impl Net {
-    fn new(client: Client) -> Net {
-        Net { client, started: HashMap::new(), direct: HashSet::default(), done: Arc::default(), waits: Vec::new(), born: HashMap::new(), hints: HashSet::new() }
+    fn new(client: Client, doc: &Url) -> Net {
+        let doc = Arc::new(Url { scheme: doc.scheme, host: doc.host.clone(), port: doc.port, path: String::new() });
+        Net { client, doc, started: HashMap::new(), direct: HashSet::default(), done: Arc::default(), waits: Vec::new(), born: HashMap::new(), hints: HashSet::new() }
     }
 
     fn tag(expect: Expect, url: &Url) -> u64 {
@@ -1130,13 +1133,13 @@ impl Net {
             return;
         }
         let url = Url { scheme: url.scheme, host: url.host.clone(), port: url.port, path: url.path.clone() };
-        let (target, lim, done) = (resources::Target { expect, url }, lim.clone(), self.done.clone());
+        let (target, lim, done, doc) = (resources::Target { expect, url }, lim.clone(), self.done.clone(), self.doc.clone());
         self.born.insert(key.clone(), Instant::now());
         self.started.insert(key, self.client.spawn(move |client| {
             if done.load(Ordering::Relaxed) >= lim.max_total_bytes {
                 return None;
             }
-            let r = resources::fetch(client, &target, &lim, deadline, retained);
+            let r = resources::fetch(client, &target, &lim, deadline, retained, Some(&doc));
             if let Ok(r) = &r {
                 // Saturating: `usize::MAX` marks a page that is done (`Drop`).
                 let _ = done.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| Some(d.saturating_add(r.text.len())));
@@ -1149,7 +1152,7 @@ impl Net {
     fn fetch(&mut self, target: &resources::Target, lim: &Limits, deadline: Instant, retained: usize) -> Result<resources::Resource, LoadError> {
         self.direct.insert(Net::tag(target.expect, &target.url));
         if self.started.is_empty() {
-            return resources::fetch(&mut self.client, target, lim, deadline, retained);
+            return resources::fetch(&mut self.client, target, lim, deadline, retained, Some(&self.doc));
         }
         let key = Net::key(target.expect, &target.url);
         self.born.remove(&key);
@@ -1162,10 +1165,10 @@ impl Net {
                     if r.text.len() > lim.max_total_bytes.saturating_sub(retained) { Err(LoadError::TotalTooLarge) } else { Ok(r) }
                 }
                 Some(Some(Err(e))) => Err(e),
-                Some(None) => resources::fetch(&mut self.client, target, lim, deadline, retained),
+                Some(None) => resources::fetch(&mut self.client, target, lim, deadline, retained, Some(&self.doc)),
                 None => Err(LoadError::Network("a download thread failed".into())),
             },
-            None => resources::fetch(&mut self.client, target, lim, deadline, retained),
+            None => resources::fetch(&mut self.client, target, lim, deadline, retained, Some(&self.doc)),
         }
     }
 }
