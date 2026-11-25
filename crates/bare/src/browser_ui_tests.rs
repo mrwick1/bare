@@ -501,7 +501,7 @@ fn many_events_fit_in_the_event_cap() {
     big(|| {
         let mut d = Driver::new(FORM);
         d.click((50.0, Y[0]));
-        // 10,000 key presses and 10,000 moves: each makes several event objects, and `max_events` is 16,384.
+        // 10,000 key presses and 10,000 moves: each makes several event objects. A collect frees them when their count doubles.
         for i in 0..10_000 {
             d.type_chars(if i % 2 == 0 { "a" } else { "b" });
             d.mv((20.0 + (i % 100) as f64, 20.0 + (i % 7) as f64 * 40.0));

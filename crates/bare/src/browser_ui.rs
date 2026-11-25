@@ -1355,8 +1355,8 @@ impl<E: Eng> Browser<E> {
         if always && !self.dom.scroll_key_set(false) {
             self.dom.bump();
         }
-        // The events are freed by `collect`: `collect_due` asks at half of `max_events`, so the next call has room. A call that runs many
-        // events (a typed text) also collects when the heap has grown to twice its live size (`gc_due`), so its garbage does not pile up.
+        // The events are freed by `collect`: `collect_due` asks when the live events have doubled. A call that runs many events (a
+        // typed text) also collects when the heap has grown to twice its live size (`gc_due`), so its garbage does not pile up.
         if self.collect_due() {
             self.collect(&[])?;
         }

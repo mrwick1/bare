@@ -1,6 +1,5 @@
-//! A transaction with more requests than the live event cap (`BrowserLimits::max_events`) runs to the end. Each request fires a
-//! `success` event. Before the fix all requests of a transaction ran in one microtask chain, so no collect could free the events
-//! and the page stopped with `Limit(Host("dom-events"))` (WhatsApp, the message download after the link).
+//! A transaction with thousands of requests runs to the end. Each request fires a `success` event. The shim yields to a task
+//! after each 64 requests, so a collect between tasks can free the events (WhatsApp, the message download after the link).
 
 use crate::eng_new::Peek;
 use crate::browser::*;
@@ -24,7 +23,7 @@ fn js(b: &mut Browser, src: &str) -> String {
 #[test]
 fn a_transaction_with_more_requests_than_the_event_cap_completes() {
     big(|| {
-        let lim = BrowserLimits { max_events: 2048, ..BrowserLimits::default() };
+        let lim = BrowserLimits::default();
         let mut b = Browser::new(tree::parse("<body></body>"), lim, EvalLimits { max_steps: 50_000_000, ..Default::default() }, HeapLimits::default()).expect("browser");
         b.use_virtual_clock_at(1000.0).unwrap();
         b.set_document_url("https://web.example/").unwrap();
