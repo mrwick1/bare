@@ -208,14 +208,36 @@ impl Realm {
 /// instead of a scan of the source up to it. A minified script is one long line, so the column of an ASCII source is a subtraction too.
 pub(crate) struct Lines {
     starts: Box<[u32]>,
-    ascii: bool,
+    /// For a source that is not all ASCII: a byte offset about every `STEP` bytes (on a character start), and the UTF-16 units
+    /// before it. A column then counts at most `STEP` bytes from a checkpoint. Empty for an ASCII source.
+    utf16: Box<[(u32, u32)]>,
 }
+
+/// The distance in bytes between two checkpoints of `Lines::utf16`.
+const STEP: usize = 1024;
 
 impl Lines {
     pub(crate) fn new(src: &str) -> Lines {
         let b = src.as_bytes();
         let starts = std::iter::once(0).chain(b.iter().enumerate().filter(|&(_, &c)| c == b'\n').map(|(i, _)| i as u32 + 1)).collect();
-        Lines { starts, ascii: b.is_ascii() }
+        let mut utf16 = Vec::new();
+        if !b.is_ascii() {
+            let (mut next, mut units) = (0, 0u32);
+            for (i, c) in src.char_indices() {
+                if i >= next {
+                    utf16.push((i as u32, units));
+                    next = i + STEP;
+                }
+                units += c.len_utf16() as u32;
+            }
+        }
+        Lines { starts, utf16: utf16.into() }
+    }
+
+    /// The UTF-16 units of `src` before the byte `off`.
+    fn units(&self, src: &str, off: usize) -> usize {
+        let (at, units) = self.utf16[self.utf16.partition_point(|c| c.0 as usize <= off) - 1];
+        units as usize + src.get(at as usize..off).map_or(off - at as usize, |s| s.encode_utf16().count())
     }
 
     /// The line and the column (1-based, the column in UTF-16 units) of the byte `off` of `src`, the source that made `self`.
@@ -223,7 +245,7 @@ impl Lines {
         let off = off.min(src.len());
         let line = self.starts.partition_point(|&s| s as usize <= off);
         let start = self.starts[line - 1] as usize;
-        let col = if self.ascii { off - start } else { src.get(start..off).map_or(off - start, |s| s.encode_utf16().count()) };
+        let col = if self.utf16.is_empty() { off - start } else { self.units(src, off) - self.units(src, start) };
         (line, col + 1)
     }
 }

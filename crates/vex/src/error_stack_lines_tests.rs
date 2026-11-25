@@ -29,3 +29,15 @@ fn many_reads_in_one_long_line_give_the_same_frames() {
     // 50 errors, one distinct frame: the column of `new` in the one line.
     assert_eq!(frame(&src), format!("    at f (<anonymous>:1:{})", src.find("new Error").unwrap() + 1));
 }
+
+#[test]
+fn the_column_after_a_long_line_that_is_not_ascii_counts_every_unit() {
+    // Each checkpoint of the index is about 1 KiB apart: the lines cross many of them, with 1-, 2-, 3- and 4-byte characters.
+    let src: String = (0..40).map(|i| format!("{}\n", "aé日😀".repeat(100 + i * 37))).collect();
+    let lines = crate::error_stack::Lines::new(&src);
+    for (off, _) in src.char_indices().step_by(97) {
+        let start = src[..off].rfind('\n').map_or(0, |n| n + 1);
+        let line = src[..off].matches('\n').count() + 1;
+        assert_eq!(lines.get(&src, off), (line, src[start..off].encode_utf16().count() + 1), "byte {off}");
+    }
+}
