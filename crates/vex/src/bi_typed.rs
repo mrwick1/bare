@@ -195,6 +195,8 @@ pub(crate) fn intrinsic(rt: &mut Realm) -> (Obj, Obj) {
             m("map", 1, map),
             m("filter", 1, filter),
             m("forEach", 1, for_each),
+            m("every", 1, test_predicate::<false>),
+            m("some", 1, test_predicate::<true>),
             m("reduce", 1, reduce::<false>),
             m("reduceRight", 1, reduce::<true>),
             m("sort", 1, sort),
@@ -734,6 +736,21 @@ fn for_each(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     Ok(Value::UNDEFINED)
 }
 
+fn test_predicate<const STOP_ON: bool>(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+    let (src, len) = validated(rt, this)?;
+    let cb = arg(args, 0);
+    callback(rt, cb)?;
+    let this_arg = arg(args, 1);
+    for i in 0..len {
+        let element = item(rt, src, i)?;
+        let result = rt.call_function(cb, this_arg, &[element, Realm::num(i as f64), this])?;
+        if Realm::truthy(result) == STOP_ON {
+            return Ok(Value::bool(STOP_ON));
+        }
+    }
+    Ok(Value::bool(!STOP_ON))
+}
+
 fn reduce<const REVERSE: bool>(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let (src, len) = validated(rt, this)?;
     let cb = arg(args, 0);
@@ -891,3 +908,7 @@ mod copy_within_tests;
 #[cfg(test)]
 #[path = "bi_typed_reduce_right_tests.rs"]
 mod reduce_right_tests;
+
+#[cfg(test)]
+#[path = "bi_typed_every_some_tests.rs"]
+mod every_some_tests;
