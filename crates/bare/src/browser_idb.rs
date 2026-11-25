@@ -15,6 +15,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Bound;
 use std::sync::{Arc, Mutex};
 
+#[path = "browser_idb_log.rs"]
+pub(crate) mod log;
+
 /// The most bytes of records that one origin keeps. A write past it is a `QuotaExceededError`.
 const MAX_BYTES: usize = 512 << 20;
 /// The deepest array key. A deeper one (or a cycle) is not a valid key.
@@ -36,6 +39,8 @@ pub(crate) struct IdbStore {
     txs: HashMap<u32, Vec<Undo>>,
     next_tx: u32,
     bytes: usize,
+    /// The disk log of a profile (`browser_idb_log.rs`). `None`: memory only.
+    log: Option<Box<log::Log>>,
 }
 
 /// A store shared by the realms of an origin.
@@ -117,6 +122,43 @@ impl IdbStore {
         }
         self.bytes = self.bytes.saturating_sub(freed) + added;
         old
+    }
+
+    /// Put `row` at `key` as a put does: an `autoIncrement` store moves its key generator past a number key. Gives the old row.
+    fn put_row(&mut self, db: &str, store: &str, k: Key, row: Row) -> Option<Row> {
+        let so = self.store(db, store)?;
+        if so.auto && matches!(kv_number(&k), Some(n) if n >= so.next) {
+            so.next = (kv_number(&k).expect("a number").floor() + 1.0).min(9007199254740992.0);
+        }
+        self.set_row(db, store, &k, Some(row))
+    }
+
+    /// Remove database `name`. Gives its version, 0 when it did not exist.
+    fn drop_db(&mut self, name: &str) -> f64 {
+        self.dbs.remove(name).map_or(0.0, |db| {
+            self.bytes = self.bytes.saturating_sub(db.stores.values().flat_map(|s| s.rows.values()).map(|r| r.value.bytes().len()).sum::<usize>());
+            db.version
+        })
+    }
+
+    fn drop_store(&mut self, db: &str, store: &str) -> Option<Store> {
+        let gone = self.dbs.get_mut(db)?.stores.remove(store)?;
+        self.bytes = self.bytes.saturating_sub(gone.rows.values().map(|r| r.value.bytes().len()).sum::<usize>());
+        Some(gone)
+    }
+
+    /// Add the ops that `f` writes to the disk log of transaction `t` (a profile only).
+    fn rec(&mut self, t: u32, f: impl FnOnce(&mut log::W)) {
+        if let Some(l) = &mut self.log {
+            l.rec(self.txs.contains_key(&t).then_some(t), f);
+        }
+    }
+
+    /// Write the log of this origin (a profile only). `sync`: `fsync` too.
+    pub(crate) fn flush(&mut self, sync: bool) {
+        if let Some(l) = &mut self.log {
+            l.flush(&self.dbs, !self.txs.is_empty(), sync);
+        }
     }
 
     fn log(&mut self, t: u32, u: Undo) {
@@ -437,10 +479,12 @@ pub(crate) fn idb_host<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, 
         // deleteDatabase(name) -> the old version
         2 => {
             let name = text(s, 1)?;
-            let old = st.dbs.remove(&name).map_or(0.0, |db| {
-                st.bytes = st.bytes.saturating_sub(db.stores.values().flat_map(|s| s.rows.values()).map(|r| r.value.bytes().len()).sum::<usize>());
-                db.version
-            });
+            let old = st.drop_db(&name);
+            if old != 0.0 {
+                st.rec(0, |w| {
+                    w.op(log::DROP_DB, &name, "");
+                });
+            }
             Ok(s.number(old))
         }
         // begin() -> the transaction id
@@ -453,6 +497,9 @@ pub(crate) fn idb_host<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, 
         // commit(t), abort(t)
         4 | 5 => {
             let t = num::<E>(s, a, 1) as u32;
+            if let Some(l) = &mut st.log {
+                l.end(t, op == 4);
+            }
             if let Some(list) = st.txs.remove(&t) {
                 if op == 5 {
                     for u in list.into_iter().rev() {
@@ -469,6 +516,9 @@ pub(crate) fn idb_host<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, 
             let v = num::<E>(s, a, 3);
             let old = st.dbs.get(&name).map_or(0.0, |db| db.version);
             st.dbs.entry(name.clone()).or_insert_with(|| Db { version: 0.0, stores: BTreeMap::new() }).version = v;
+            st.rec(t, |w| {
+                w.op(log::VERSION, &name, "").f64(v);
+            });
             st.log(t, Undo::Version { db: name, old });
             Ok(s.undefined())
         }
@@ -496,8 +546,13 @@ pub(crate) fn idb_host<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, 
             let kp = kp_of(d, s, kp_v)?;
             let auto_v = arg_s::<E>(s, a, 5);
             let auto = s.as_bool(auto_v).unwrap_or(false);
-            let Some(dbo) = st.dbs.get_mut(&db) else { return Err(not_found(d, s)) };
-            dbo.stores.insert(store.clone(), Store { kp, auto, next: 1.0, rows: BTreeMap::new(), indexes: BTreeMap::new(), next_ix: 0 });
+            if !st.dbs.contains_key(&db) {
+                return Err(not_found(d, s));
+            }
+            st.rec(t, |w| {
+                w.op(log::MAKE_STORE, &db, &store).kp(&kp).u8(auto as u8);
+            });
+            st.dbs.get_mut(&db).expect("checked").stores.insert(store.clone(), Store { kp, auto, next: 1.0, rows: BTreeMap::new(), indexes: BTreeMap::new(), next_ix: 0 });
             st.log(t, Undo::StoreMade { db, store });
             Ok(s.undefined())
         }
@@ -505,8 +560,10 @@ pub(crate) fn idb_host<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, 
         9 => {
             let t = num::<E>(s, a, 1) as u32;
             let (db, store) = (text(s, 2)?, text(s, 3)?);
-            let Some(gone) = st.dbs.get_mut(&db).and_then(|x| x.stores.remove(&store)) else { return Err(not_found(d, s)) };
-            st.bytes = st.bytes.saturating_sub(gone.rows.values().map(|r| r.value.bytes().len()).sum::<usize>());
+            let Some(gone) = st.drop_store(&db, &store) else { return Err(not_found(d, s)) };
+            st.rec(t, |w| {
+                w.op(log::DROP_STORE, &db, &store);
+            });
             st.log(t, Undo::StoreGone { db, store, st: gone });
             Ok(s.undefined())
         }
@@ -521,6 +578,10 @@ pub(crate) fn idb_host<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, 
             let Some(so) = st.store(&db, &store) else { return Err(not_found(d, s)) };
             let id = so.next_ix;
             so.next_ix += 1;
+            st.rec(t, |w| {
+                w.op(log::MAKE_INDEX, &db, &store).str(&ix).kp(&kp).u8(unique as u8).u8(multi as u8);
+            });
+            let so = st.store(&db, &store).expect("checked");
             so.indexes.insert(ix.clone(), Index { id, kp, unique, multi, entries: BTreeSet::new() });
             st.log(t, Undo::IndexMade { db, store, ix });
             Ok(s.undefined())
@@ -530,6 +591,9 @@ pub(crate) fn idb_host<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, 
             let t = num::<E>(s, a, 1) as u32;
             let (db, store, ix) = (text(s, 2)?, text(s, 3)?, text(s, 4)?);
             let Some(index) = st.store(&db, &store).and_then(|so| so.indexes.remove(&ix)) else { return Err(not_found(d, s)) };
+            st.rec(t, |w| {
+                w.op(log::DROP_INDEX, &db, &store).str(&ix);
+            });
             st.log(t, Undo::IndexGone { db, store, ix, index });
             Ok(s.undefined())
         }
@@ -550,6 +614,14 @@ pub(crate) fn idb_host<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, 
             let r = if op == 15 { range(d, s, a, 4)? } else { Range { lo: Bound::Unbounded, up: Bound::Unbounded } };
             let Some(so) = st.store(&db, &store) else { return Err(not_found(d, s)) };
             let keys: Vec<Key> = if empty(&r.lo, &r.up) { Vec::new() } else { so.rows.range::<[u8], _>((row_bound(&r.lo), row_bound(&r.up))).map(|(k, _)| k.clone()).collect() };
+            st.rec(t, |w| match op {
+                16 => {
+                    w.op(log::CLEAR, &db, &store);
+                }
+                _ => keys.iter().for_each(|k| {
+                    w.op(log::DELETE, &db, &store).bytes(k);
+                }),
+            });
             for k in keys {
                 let old = st.set_row(&db, &store, &k, None);
                 st.log(t, Undo::Row { db: db.clone(), store: store.clone(), key: k, old });
@@ -572,6 +644,7 @@ pub(crate) fn idb_host<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, 
         }
         // ixFill(t, db, store, index, [[primaryKey, [keys]]])
         19 => {
+            let t = num::<E>(s, a, 1) as u32;
             let (db, store, ix) = (text(s, 2)?, text(s, 3)?, text(s, 4)?);
             let list = arg_s::<E>(s, a, 5);
             let n = s.array_len(list)?.unwrap_or(0);
@@ -596,6 +669,13 @@ pub(crate) fn idb_host<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, 
                 }
                 index.entries.insert((k.clone(), pk.clone()));
             }
+            st.rec(t, |w| {
+                w.op(log::FILL, &db, &store).str(&ix).u32(adds.len() as u32);
+                adds.iter().for_each(|(k, pk)| {
+                    w.bytes(k).bytes(pk);
+                });
+            });
+            let so = st.store(&db, &store).expect("checked");
             for (k, pk) in adds {
                 if let Some(row) = so.rows.get_mut(&pk) {
                     row.ix.push((id, k));
@@ -642,6 +722,9 @@ fn put<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, a: Args<'s>, st: &mut IdbStore
         ixk.push((name, keys_of(d, s, ks)?));
     }
     let value = crate::browser_navigation_state::serialize_storage(d, s, v)?;
+    if st.log.is_some() && !crate::profile_record::storable(&value) {
+        return Err(d.dom_err_s(s, "DataCloneError", "The value cannot be saved to disk."));
+    }
     let Some(so) = st.store(&db, &store) else { return Err(not_found(d, s)) };
     if add && so.rows.contains_key(&k) {
         return Err(d.dom_err_s(s, "ConstraintError", "Unable to add key to index. A record with this key already exists."));
@@ -665,6 +748,19 @@ fn put<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, a: Args<'s>, st: &mut IdbStore
         let next = so.next;
         so.next = (kv_number(&k).expect("a number").floor() + 1.0).min(9007199254740992.0);
         st.log(t, Undo::Next { db: db.clone(), store: store.clone(), next });
+    }
+    if let Some(l) = &mut st.log {
+        // The index entries go by name: a replay gives new index ids.
+        let so = &st.dbs[&db].stores[&store];
+        l.rec(st.txs.contains_key(&t).then_some(t), |w| {
+            w.op(log::PUT, &db, &store).bytes(&k);
+            crate::profile_record::encode(&value, w.0);
+            w.u32(ix.len() as u32);
+            for (id, ik) in &ix {
+                let name = so.indexes.iter().find(|(_, i)| i.id == *id).map_or("", |(n, _)| n);
+                w.str(name).bytes(ik);
+            }
+        });
     }
     let old = st.set_row(&db, &store, &k, Some(Row { value, ix }));
     st.log(t, Undo::Row { db, store, key: k, old });
