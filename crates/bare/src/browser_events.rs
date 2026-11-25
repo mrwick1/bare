@@ -545,9 +545,6 @@ pub(crate) fn add_event_listener<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this
     if st.n_listeners >= d.lim.max_listeners {
         return Err(d.lim_s(s, "dom-listeners"));
     }
-    if list.len() >= d.lim.max_listeners_per_target {
-        return Err(d.lim_s(s, "dom-listeners-per-target"));
-    }
     st.next_id += 1;
     let id = st.next_id;
     list.push(Listener { id, ty: Rc::from(ty.as_str()), cb: traced, capture, once, passive, handler: false });

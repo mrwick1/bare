@@ -644,9 +644,6 @@ fn handler_set<'s, const ERR: bool, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this:
                 return Err(d.lim_s(s, "dom-listeners"));
             }
             let list = st.listeners.entry(t).or_default();
-            if list.len() >= d.lim.max_listeners_per_target {
-                return Err(d.lim_s(s, "dom-listeners-per-target"));
-            }
             st.next_id += 1;
             let id = st.next_id;
             list.push(Listener { id, ty: ty.into(), cb: s.trace_ref(cb), capture: false, once: false, passive: false, handler: false });
