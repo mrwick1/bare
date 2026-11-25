@@ -142,6 +142,33 @@ impl<'a> Reader<'a> {
     }
 }
 
+/// One TLV: the tag, a definite length (X.690 8.1.3) and the content.
+pub fn tlv(tag: u8, content: &[u8]) -> Vec<u8> {
+    let mut v = vec![tag];
+    let n = content.len();
+    if n < 128 {
+        v.push(n as u8);
+    } else {
+        let b = n.to_be_bytes();
+        let b = &b[b.iter().take_while(|&&x| x == 0).count()..];
+        v.push(0x80 | b.len() as u8);
+        v.extend_from_slice(b);
+    }
+    v.extend_from_slice(content);
+    v
+}
+
+/// A non-negative INTEGER TLV of a big-endian magnitude (leading zeros are removed, a sign octet is added when needed).
+pub fn uint(be: &[u8]) -> Vec<u8> {
+    let be = &be[be.iter().take_while(|&&x| x == 0).count().min(be.len().saturating_sub(1))..];
+    let mut c = Vec::with_capacity(be.len() + 1);
+    if be.is_empty() || be[0] & 0x80 != 0 {
+        c.push(0);
+    }
+    c.extend_from_slice(be);
+    tlv(INTEGER, &c)
+}
+
 /// BOOLEAN content (X.690 11.1: TRUE is 0xFF).
 pub fn boolean(content: &[u8]) -> Result<bool> {
     match content {

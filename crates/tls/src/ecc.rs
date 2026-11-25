@@ -140,6 +140,14 @@ pub fn sign(curve: Curve, d: &[u8], digest: &[u8], k: &[u8]) -> Option<Vec<u8>> 
     }
 }
 
+/// Is `key` a valid public key `04 || X || Y` of the curve (both coordinates below p, on the curve)?
+pub fn valid_public(curve: Curve, key: &[u8]) -> bool {
+    match curve {
+        Curve::P256 => P256.parse_point(key).is_ok(),
+        Curve::P384 => P384.parse_point(key).is_ok(),
+    }
+}
+
 /// Is `d` a valid private scalar: `curve.size()` bytes, in `1..n`?
 pub fn valid_scalar(curve: Curve, d: &[u8]) -> bool {
     match curve {

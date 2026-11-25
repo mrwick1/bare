@@ -77,6 +77,7 @@ mod browser_xhr;
 mod browser_encoding;
 mod browser_web;
 mod browser_subtle;
+mod browser_subtle_sign;
 #[cfg(test)]
 mod browser_subtle_tests;
 #[cfg(test)]

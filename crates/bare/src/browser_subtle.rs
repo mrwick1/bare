@@ -1,17 +1,23 @@
-//! `SubtleCrypto` key methods (W3C Web Cryptography API) for AES-GCM, AES-CBC and HKDF: `generateKey`, `importKey`, `exportKey`,
-//! `encrypt`, `decrypt`, `deriveBits` and `deriveKey`. `digest` is in `browser_web.rs`. The cipher code is `bare_tls::aes` and
-//! `bare_tls::hkdf`. Learning code, not audited.
+//! `SubtleCrypto` key methods (W3C Web Cryptography API) for AES-GCM, AES-CBC, HKDF, HMAC, RSASSA-PKCS1-v1_5 and ECDSA:
+//! `generateKey`, `importKey`, `exportKey`, `encrypt`, `decrypt`, `sign`, `verify`, `deriveBits` and `deriveKey`. `digest` is in
+//! `browser_web.rs`. The cipher code is `bare_tls::aes` and `bare_tls::hkdf`. The signature algorithms and their formats are in
+//! `browser_subtle_sign.rs`. Learning code, not audited.
 //!
-//! A `CryptoKey` is an object of `CryptoKey.prototype` with an entry in `WebHost::keys`: the algorithm, the key bytes, `extractable`
-//! and the usages. The prototype has the getters `type` ("secret"), `extractable`, `algorithm` and `usages`. `algorithm` and
-//! `usages` give a new object on each read (the spec caches one). There is no `CryptoKey` global and no structured clone of a key.
+//! A `CryptoKey` is an object of `CryptoKey.prototype` with an entry in `WebHost::keys`: the algorithm, the key bytes, `extractable`,
+//! the usages, the key type, and for the signature algorithms the hash and the modulus or curve size. The prototype has the getters
+//! `type` ("secret", "public" or "private"), `extractable`, `algorithm` and `usages`. `algorithm` and `usages` give a new object on
+//! each read (the spec caches one). `CryptoKey` is a global interface that no script can construct. A structured clone copies the
+//! whole entry (`key_data`), so a key can go through `structuredClone` and `IndexedDB`. `generateKey` of a signature pair gives a plain
+//! object `{ publicKey, privateKey }` (the `CryptoKeyPair` dictionary).
 //!
-//! Limits: key formats "raw" only ("jwk", "spki" and "pkcs8" reject with `NotSupportedError`). AES-GCM takes a 12-byte IV only
-//! (`NotSupportedError` for other lengths). HKDF takes SHA-256 only. RSA, ECDSA, ECDH, HMAC, `sign`, `verify`, `wrapKey` and
-//! `unwrapKey` reject with `NotSupportedError`.
+//! Limits: key formats "raw" for AES, HKDF and HMAC ("jwk", "spki" and "pkcs8" for AES and HKDF reject with `NotSupportedError`; the
+//! formats of the signature keys are in `browser_subtle_sign.rs`). AES-GCM takes a 12-byte IV only (`NotSupportedError` for other
+//! lengths). HKDF takes SHA-256 only. RSA-PSS, RSA-OAEP, ECDH, `wrapKey` and `unwrapKey` reject with `NotSupportedError`. The count
+//! of keys is capped (`crypto-keys`); a key holds at most 2.4 KiB (RSA-4096 private) or 8 KiB (HMAC).
 
 use crate::browser::*;
 use crate::browser_scoped::*;
+use crate::browser_subtle_sign::{self as sig, Hash};
 use crate::browser_web::{need, page_random, settle, subtle_this, usv, web_made_key_proto};
 use crate::eng::Eng;
 use bare_js_api::{Args, Attrs, Local, Type};
@@ -21,6 +27,10 @@ pub(crate) enum Alg {
     AesGcm,
     AesCbc,
     Hkdf,
+    Hmac,
+    /// RSASSA-PKCS1-v1_5.
+    Rsa,
+    Ecdsa,
 }
 
 impl Alg {
@@ -29,18 +39,49 @@ impl Alg {
             Alg::AesGcm => "AES-GCM",
             Alg::AesCbc => "AES-CBC",
             Alg::Hkdf => "HKDF",
+            Alg::Hmac => "HMAC",
+            Alg::Rsa => "RSASSA-PKCS1-v1_5",
+            Alg::Ecdsa => "ECDSA",
         }
     }
 }
 
-/// The data of one `CryptoKey`. The bytes are zeroed on drop.
+/// The `type` of a `CryptoKey`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Kind {
+    Secret,
+    Public,
+    Private,
+}
+
+/// A key format of `importKey` and `exportKey`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Fmt {
+    Raw,
+    Jwk,
+    Spki,
+    Pkcs8,
+}
+
+/// The data of one `CryptoKey`. The bytes are zeroed on drop. The form of `bytes` is in `browser_subtle_sign.rs`.
 #[derive(Clone)]
 pub(crate) struct Key {
-    alg: Alg,
-    bytes: Vec<u8>,
-    extractable: bool,
+    pub(crate) alg: Alg,
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) extractable: bool,
     /// Bits in the order of `USAGES`.
-    usages: u8,
+    pub(crate) usages: u8,
+    pub(crate) kind: Kind,
+    /// The hash of HMAC and RSA keys (SHA-256 for the other algorithms, where it means nothing).
+    pub(crate) hash: Hash,
+    /// The modulus length of an RSA key, 256 or 384 for an EC key (the curve), else 0.
+    pub(crate) param: u32,
+}
+
+impl Key {
+    fn secret(alg: Alg, bytes: Vec<u8>, extractable: bool, usages: u8) -> Key {
+        Key { alg, bytes, extractable, usages, kind: Kind::Secret, hash: Hash::Sha256, param: 0 }
+    }
 }
 
 impl Drop for Key {
@@ -53,22 +94,24 @@ impl Drop for Key {
 }
 
 /// The `KeyUsage` values, in the order that `usages` lists them.
-const USAGES: [&str; 8] = ["encrypt", "decrypt", "sign", "verify", "deriveKey", "deriveBits", "wrapKey", "unwrapKey"];
+pub(crate) const USAGES: [&str; 8] = ["encrypt", "decrypt", "sign", "verify", "deriveKey", "deriveBits", "wrapKey", "unwrapKey"];
 const ENCRYPT: u8 = 1;
 const DECRYPT: u8 = 2;
+pub(crate) const SIGN: u8 = 4;
+pub(crate) const VERIFY: u8 = 8;
 const DERIVE_KEY: u8 = 16;
 const DERIVE_BITS: u8 = 32;
 const AES_USES: u8 = ENCRYPT | DECRYPT | 64 | 128;
 const HKDF_USES: u8 = DERIVE_KEY | DERIVE_BITS;
 
-/// The most keys of a page. A key holds at most 32 bytes.
+/// The most keys of a page.
 const MAX_KEYS: usize = 100_000;
 
-fn err<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, name: &str, msg: &str) -> bare_js_api::Error<'s> {
+pub(crate) fn err<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, name: &str, msg: &str) -> bare_js_api::Error<'s> {
     d.dom_err_s(s, name, msg)
 }
 
-fn undef<E: Eng>(s: &mut Sc<'_, E>, v: Local<'_>) -> bool {
+pub(crate) fn undef<E: Eng>(s: &mut Sc<'_, E>, v: Local<'_>) -> bool {
     s.type_of(v) == Type::Undefined
 }
 
@@ -90,7 +133,7 @@ fn alg<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>, allowed: &[Alg])
 }
 
 /// A required member of the parameters of an algorithm.
-fn member<'s, E: Eng>(s: &mut Sc<'s, E>, obj: Option<Local<'s>>, name: &str) -> Res<'s, Local<'s>> {
+pub(crate) fn member<'s, E: Eng>(s: &mut Sc<'s, E>, obj: Option<Local<'s>>, name: &str) -> Res<'s, Local<'s>> {
     let v = match obj {
         Some(o) => s.get_str(o, name)?,
         None => s.undefined(),
@@ -102,7 +145,7 @@ fn member<'s, E: Eng>(s: &mut Sc<'s, E>, obj: Option<Local<'s>>, name: &str) -> 
 }
 
 /// A copy of the bytes of a `BufferSource`.
-fn buf<'s, E: Eng>(s: &mut Sc<'s, E>, v: Local<'s>, what: &str) -> Res<'s, Vec<u8>> {
+pub(crate) fn buf<'s, E: Eng>(s: &mut Sc<'s, E>, v: Local<'s>, what: &str) -> Res<'s, Vec<u8>> {
     let Some(b) = s.bytes(v).map(<[u8]>::to_vec) else { return Err(s.type_error(&format!("{what} is not of type '(ArrayBuffer or ArrayBufferView)'."))) };
     s.charge((b.len() / 64) as u64)?;
     Ok(b)
@@ -118,7 +161,7 @@ fn aes_len<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, obj: Option<Local<'s>>) ->
 }
 
 /// A `sequence<KeyUsage>` as bits. A value that is not a `KeyUsage` is a TypeError.
-fn usages<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>) -> Res<'s, u8> {
+pub(crate) fn usages<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>) -> Res<'s, u8> {
     let bad = "The provided value cannot be converted to a sequence.";
     let Some(mut iter) = (if is_object::<E>(s, v) { s.iter_open(v)? } else { None }) else { return Err(s.type_error(bad)) };
     let mut bits = 0u8;
@@ -140,7 +183,7 @@ fn usages<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>) -> Res<'s, u8
 }
 
 /// The usages of a new secret key: within `allowed` and not empty, else a SyntaxError.
-fn check_uses<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, uses: u8, allowed: u8) -> Res<'s, ()> {
+pub(crate) fn check_uses<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, uses: u8, allowed: u8) -> Res<'s, ()> {
     if uses & !allowed != 0 {
         return Err(err(d, s, "SyntaxError", "Cannot create a key using the specified key usages."));
     }
@@ -167,13 +210,18 @@ pub(crate) fn new_key<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, k: Key) -> Res<
 }
 
 /// The key `v` with `usage`, for the algorithm `alg`. Else an InvalidAccessError (a TypeError when `v` is not a key).
-fn use_key<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>, alg: Alg, usage: u8) -> Res<'s, Vec<u8>> {
-    let got = obj_id::<E>(s, v).and_then(|o| d.web.keys.borrow().get(&o).map(|k| (k.alg, k.usages, k.bytes.clone())));
-    let Some((a, uses, bytes)) = got else { return Err(s.type_error("The provided value is not of type 'CryptoKey'.")) };
-    if a != alg || uses & usage == 0 {
+pub(crate) fn use_full<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>, alg: Alg, usage: u8) -> Res<'s, Key> {
+    let got = obj_id::<E>(s, v).and_then(|o| d.web.keys.borrow().get(&o).cloned());
+    let Some(k) = got else { return Err(s.type_error("The provided value is not of type 'CryptoKey'.")) };
+    if k.alg != alg || k.usages & usage == 0 {
         return Err(err(d, s, "InvalidAccessError", "The requested operation is not valid for the provided key."));
     }
-    Ok(bytes)
+    Ok(k)
+}
+
+/// The bytes of the key `v` (see `use_full`).
+fn use_key<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>, alg: Alg, usage: u8) -> Res<'s, Vec<u8>> {
+    Ok(std::mem::take(&mut use_full(d, s, v, alg, usage)?.bytes))
 }
 
 fn key_this<'s, E: Eng, T>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, f: impl FnOnce(&Key) -> T) -> Res<'s, T> {
@@ -191,8 +239,8 @@ fn key_this<'s, E: Eng, T>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, f: im
 // ------------------------------------------------------------------------------------------ CryptoKey getters
 
 pub(crate) fn key_type<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
-    key_this(d, s, this, |_| ())?;
-    d.js_str_s(s, "secret")
+    let kind = key_this(d, s, this, |k| k.kind)?;
+    d.js_str_s(s, ["secret", "public", "private"][kind as usize])
 }
 
 pub(crate) fn key_extractable<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
@@ -201,13 +249,17 @@ pub(crate) fn key_extractable<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: L
 }
 
 pub(crate) fn key_algorithm<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
-    let (alg, len) = key_this(d, s, this, |k| (k.alg, k.bytes.len()))?;
+    let k = key_this(d, s, this, |k| k.clone())?;
     let o = s.new_object()?;
-    let n = d.js_str_s(s, alg.name())?;
+    let n = d.js_str_s(s, k.alg.name())?;
     s.define_str(o, "name", n, Attrs::ALL)?;
-    if alg != Alg::Hkdf {
-        let l = s.number((len * 8) as f64);
-        s.define_str(o, "length", l, Attrs::ALL)?;
+    match k.alg {
+        Alg::AesGcm | Alg::AesCbc => {
+            let l = s.number((k.bytes.len() * 8) as f64);
+            s.define_str(o, "length", l, Attrs::ALL)?;
+        }
+        Alg::Hkdf => {}
+        _ => sig::describe(d, s, o, &k)?,
     }
     Ok(o)
 }
@@ -239,35 +291,47 @@ fn promise<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'
 
 pub(crate) fn generate_key<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     promise(d, s, this, a, 3, "generateKey", |s, v| {
-        let (alg, obj) = alg(d, s, v[0], &[Alg::AesGcm, Alg::AesCbc])?;
+        let (alg, obj) = alg(d, s, v[0], &[Alg::AesGcm, Alg::AesCbc, Alg::Hmac, Alg::Rsa, Alg::Ecdsa])?;
         let extractable = s.to_boolean(v[1]);
         let uses = usages(d, s, v[2])?;
+        if !matches!(alg, Alg::AesGcm | Alg::AesCbc) {
+            return sig::generate(d, s, alg, obj, extractable, uses);
+        }
         let len = aes_len(d, s, obj)?;
         check_uses(d, s, uses, AES_USES)?;
         let mut bytes = vec![0u8; len];
         if page_random(&mut bytes).is_err() {
             return Err(err(d, s, "OperationError", "The operating system random source failed."));
         }
-        new_key(d, s, Key { alg, bytes, extractable, usages: uses })
+        new_key(d, s, Key::secret(alg, bytes, extractable, uses))
     })
 }
 
-/// The key format: "raw" works; the other formats of the spec are not built.
-fn format<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>) -> Res<'s, ()> {
+/// The key format.
+fn format<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>) -> Res<'s, Fmt> {
     match usv(d, s, v)?.as_str() {
-        "raw" => Ok(()),
-        "jwk" | "spki" | "pkcs8" => Err(err(d, s, "NotSupportedError", "Only the 'raw' key format is supported.")),
+        "raw" => Ok(Fmt::Raw),
+        "jwk" => Ok(Fmt::Jwk),
+        "spki" => Ok(Fmt::Spki),
+        "pkcs8" => Ok(Fmt::Pkcs8),
         f => Err(s.type_error(&format!("The provided value '{f}' is not a valid enum value of type KeyFormat."))),
     }
 }
 
 pub(crate) fn import_key<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     promise(d, s, this, a, 5, "importKey", |s, v| {
-        format(d, s, v[0])?;
-        let bytes = buf::<E>(s, v[1], "keyData")?;
-        let (alg, _) = alg(d, s, v[2], &[Alg::AesGcm, Alg::AesCbc, Alg::Hkdf])?;
+        let fmt = format(d, s, v[0])?;
+        let (alg, obj) = alg(d, s, v[2], &[Alg::AesGcm, Alg::AesCbc, Alg::Hkdf, Alg::Hmac, Alg::Rsa, Alg::Ecdsa])?;
         let extractable = s.to_boolean(v[3]);
         let uses = usages(d, s, v[4])?;
+        if !matches!(alg, Alg::AesGcm | Alg::AesCbc | Alg::Hkdf) {
+            let key = sig::import(d, s, fmt, v[1], alg, obj, extractable, uses)?;
+            return new_key(d, s, key);
+        }
+        if fmt != Fmt::Raw {
+            return Err(err(d, s, "NotSupportedError", "Only the 'raw' key format is supported."));
+        }
+        let bytes = buf::<E>(s, v[1], "keyData")?;
         if alg == Alg::Hkdf {
             if extractable {
                 return Err(err(d, s, "SyntaxError", "HKDF keys cannot be extractable."));
@@ -279,24 +343,50 @@ pub(crate) fn import_key<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<
             }
             check_uses(d, s, uses, AES_USES)?;
         }
-        new_key(d, s, Key { alg, bytes, extractable, usages: uses })
+        new_key(d, s, Key::secret(alg, bytes, extractable, uses))
     })
 }
 
 pub(crate) fn export_key<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     promise(d, s, this, a, 2, "exportKey", |s, v| {
-        format(d, s, v[0])?;
+        let fmt = format(d, s, v[0])?;
         let k = v[1];
-        let got = obj_id::<E>(s, k).and_then(|o| d.web.keys.borrow().get(&o).map(|k| (k.alg, k.extractable, k.bytes.clone())));
-        let Some((alg, extractable, bytes)) = got else { return Err(s.type_error("The provided value is not of type 'CryptoKey'.")) };
-        if alg == Alg::Hkdf {
+        let got = obj_id::<E>(s, k).and_then(|o| d.web.keys.borrow().get(&o).cloned());
+        let Some(key) = got else { return Err(s.type_error("The provided value is not of type 'CryptoKey'.")) };
+        if key.alg == Alg::Hkdf {
             return Err(err(d, s, "NotSupportedError", "HKDF keys cannot be exported."));
         }
-        if !extractable {
+        if !key.extractable {
             return Err(err(d, s, "InvalidAccessError", "The key is not extractable."));
         }
-        s.new_array_buffer(bytes)
+        if !matches!(key.alg, Alg::AesGcm | Alg::AesCbc) {
+            return sig::export(d, s, fmt, &key);
+        }
+        if fmt != Fmt::Raw {
+            return Err(err(d, s, "NotSupportedError", "Only the 'raw' key format is supported."));
+        }
+        s.new_array_buffer(key.bytes.clone())
     })
+}
+
+/// `sign` and `verify` with HMAC, RSASSA-PKCS1-v1_5 or ECDSA.
+fn sign_op<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>, verify: bool) -> Res<'s, Local<'s>> {
+    promise(d, s, this, a, if verify { 4 } else { 3 }, if verify { "verify" } else { "sign" }, |s, v| {
+        let (alg, obj) = alg(d, s, v[0], &[Alg::Hmac, Alg::Rsa, Alg::Ecdsa])?;
+        let hash = if alg == Alg::Ecdsa { sig::hash_param(d, s, obj)? } else { Hash::Sha256 };
+        let key = use_full(d, s, v[1], alg, if verify { VERIFY } else { SIGN })?;
+        let (signature, data) = if verify { (Some(buf::<E>(s, v[2], "signature")?), buf::<E>(s, v[3], "data")?) } else { (None, buf::<E>(s, v[2], "data")?) };
+        let out = sig::sign_verify(d, s, &key, hash, &data, signature.as_deref())?;
+        if verify { Ok(s.boolean(out == [1])) } else { s.new_array_buffer(out) }
+    })
+}
+
+pub(crate) fn sign<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    sign_op(d, s, this, a, false)
+}
+
+pub(crate) fn verify<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    sign_op(d, s, this, a, true)
 }
 
 /// `encrypt` and `decrypt` with AES-GCM or AES-CBC.
@@ -387,6 +477,6 @@ pub(crate) fn derive_key<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<
         let key = use_key(d, s, v[1], Alg::Hkdf, DERIVE_KEY)?;
         let bytes = hkdf(d, s, obj, &key, (len * 8) as f64)?;
         check_uses(d, s, uses, AES_USES)?;
-        new_key(d, s, Key { alg: to, bytes, extractable, usages: uses })
+        new_key(d, s, Key::secret(to, bytes, extractable, uses))
     })
 }

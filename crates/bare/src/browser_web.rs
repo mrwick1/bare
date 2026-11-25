@@ -1,7 +1,7 @@
-//! `crypto`, `navigator`, `Blob`, `File`, `FormData`, `SubtleCrypto` and `FileList`.
+//! `crypto`, `navigator`, `Blob`, `File`, `FormData`, `SubtleCrypto`, `FileList` and `CryptoKey`.
 //!
-//! Lazy: the seven globals are accessors until a script first reads or writes one (the way `Intl` and `BigInt` work in the
-//! engine). A page that uses none of them pays for seven functions. The first read makes every object of this file
+//! Lazy: the eight globals are accessors until a script first reads or writes one (the way `Intl` and `BigInt` work in the
+//! engine). A page that uses none of them pays for eight functions. The first read makes every object of this file
 //! once (`made`) and replaces its own accessor with a data property. A write replaces the accessor with the written value.
 //!
 //! `crypto` (Web Crypto): `getRandomValues(array)` and `randomUUID()`. The bytes come from `bare_tls::random::fill`, the
@@ -12,7 +12,7 @@
 //! `digest(algorithm, data)` hashes with SHA-1, SHA-256, SHA-384 or SHA-512 (`bare_tls`), a name or `{name}`, ASCII
 //! case-insensitive. It copies the bytes of an ArrayBuffer, a typed array or a DataView when it is called, and resolves
 //! with a new ArrayBuffer. An unknown name rejects with `NotSupportedError`; bad data rejects with `TypeError`. AES-GCM, AES-CBC
-//! and HKDF keys are in `browser_subtle.rs`. `sign`, `verify`, `wrapKey` and `unwrapKey` reject with `NotSupportedError`.
+//! HKDF, HMAC, RSASSA-PKCS1-v1_5 and ECDSA keys, `sign` and `verify` are in `browser_subtle.rs`. `wrapKey` and `unwrapKey` reject with `NotSupportedError`.
 //!
 //! `navigator`: getters on `Navigator.prototype` with fixed values (`USER_AGENT` is the one place of the string).
 //! `userAgentData` (WICG UA Client Hints) has `brands` (a frozen array), `mobile` and `platform`, `toJSON()` of these three, and
@@ -74,7 +74,7 @@ const MAX_ENTRIES: usize = 1 << 16;
 const MAX_URLS: usize = 1 << 12;
 const MAX_RANDOM: usize = 65536;
 
-const NAMES: [&str; 7] = ["crypto", "navigator", "Blob", "File", "FormData", "SubtleCrypto", "FileList"];
+const NAMES: [&str; 8] = ["crypto", "navigator", "Blob", "File", "FormData", "SubtleCrypto", "FileList", "CryptoKey"];
 
 struct BlobData {
     /// Shared: a Blob never changes, so a clone (`structuredClone`, `postMessage`, `indexedDB`) shares the bytes.
@@ -105,8 +105,8 @@ struct IterObj<E: Eng> {
 /// Every object made on the first use. All are roots.
 #[derive(Clone, Copy)]
 struct Made<E: Eng> {
-    /// `crypto`, `navigator`, `Blob`, `File`, `FormData`, `SubtleCrypto`, `FileList` (the order of `NAMES`).
-    glob: [E::Obj; 7],
+    /// `crypto`, `navigator`, `Blob`, `File`, `FormData`, `SubtleCrypto`, `FileList`, `CryptoKey` (the order of `NAMES`).
+    glob: [E::Obj; 8],
     /// The one `crypto.subtle` object.
     subtle: E::Obj,
     langs: E::Obj,
@@ -309,13 +309,13 @@ fn text(out: &mut Vec<u8>, s: &str, norm: bool, esc: bool) {
 macro_rules! lazy {
     ($($f:ident $i:literal),*) => { $(fn $f<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> { lazy(d, s, $i, a) })* };
 }
-lazy!(lazy0 0, lazy1 1, lazy2 2, lazy3 3, lazy4 4, lazy5 5, lazy6 6);
+lazy!(lazy0 0, lazy1 1, lazy2 2, lazy3 3, lazy4 4, lazy5 5, lazy6 6, lazy7 7);
 
 const SW_NAMES: [&str; 3] = ["ServiceWorkerContainer", "ServiceWorkerRegistration", "ServiceWorker"];
 
 pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> {
     let g = s.global();
-    for (i, h) in [lazy0 as HS<E>, lazy1, lazy2, lazy3, lazy4, lazy5, lazy6].into_iter().enumerate() {
+    for (i, h) in [lazy0 as HS<E>, lazy1, lazy2, lazy3, lazy4, lazy5, lazy6, lazy7].into_iter().enumerate() {
         let f = d.add_fn_s(s, h, NAMES[i], 0, HostFn::Method)?;
         s.define_accessor_str(g, NAMES[i], Some(f), Some(f), Attrs { writable: false, enumerable: i < 2, configurable: true })?;
     }
@@ -429,18 +429,19 @@ fn make<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, Made<E>> {
     op(d, s, sp, "digest", 2, subtle_digest)?;
     {
         use crate::browser_subtle as k;
-        let ops: [(&str, u32, HS<E>); 7] = [("encrypt", 3, k::encrypt), ("decrypt", 3, k::decrypt), ("generateKey", 3, k::generate_key), ("importKey", 5, k::import_key), ("exportKey", 2, k::export_key), ("deriveKey", 5, k::derive_key), ("deriveBits", 2, k::derive_bits)];
+        let ops: [(&str, u32, HS<E>); 9] = [("encrypt", 3, k::encrypt), ("decrypt", 3, k::decrypt), ("sign", 3, k::sign), ("verify", 4, k::verify), ("generateKey", 3, k::generate_key), ("importKey", 5, k::import_key), ("exportKey", 2, k::export_key), ("deriveKey", 5, k::derive_key), ("deriveBits", 2, k::derive_bits)];
         for (name, len, h) in ops {
             op(d, s, sp, name, len, h)?;
         }
     }
-    for (name, len) in [("sign", 3), ("verify", 4), ("wrapKey", 4), ("unwrapKey", 7)] {
+    for (name, len) in [("wrapKey", 4), ("unwrapKey", 7)] {
         op(d, s, sp, name, len, subtle_unsupported)?;
     }
     let kp = proto(d, s, op_, "CryptoKey")?;
     for (name, h) in [("type", crate::browser_subtle::key_type as HS<E>), ("extractable", crate::browser_subtle::key_extractable), ("algorithm", crate::browser_subtle::key_algorithm), ("usages", crate::browser_subtle::key_usages)] {
         getter(d, s, kp, name, h)?;
     }
+    let key_ctor = iface(d, s, "CryptoKey", 0, subtle_illegal, kp)?;
     let subtle = plain(d, s, sp)?;
     let subtle_ctor = iface(d, s, "SubtleCrypto", 0, subtle_illegal, sp)?;
 
@@ -519,8 +520,8 @@ fn make<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, Made<E>> {
     let ip = plain(d, s, ip)?;
     op(d, s, ip, "next", 0, iter_next)?;
 
-    let [crypto, navigator, blob, file, form, subtle_ctor, file_list, subtle, langs, uad, brands, bp, fp, fo, ip, kp] = [crypto, navigator, blob, file, form, subtle_ctor, file_list, subtle, langs, uad, brands, bp, fp, fo, ip, kp].map(|l| lid::<E>(s, l));
-    Ok(Made { glob: [crypto, navigator, blob, file, form, subtle_ctor, file_list], subtle, langs, uad, brands, blob_p: bp, file_p: fp, form_p: fo, iter_p: ip, key_p: kp })
+    let [crypto, navigator, blob, file, form, subtle_ctor, file_list, key_ctor, subtle, langs, uad, brands, bp, fp, fo, ip, kp] = [crypto, navigator, blob, file, form, subtle_ctor, file_list, key_ctor, subtle, langs, uad, brands, bp, fp, fo, ip, kp].map(|l| lid::<E>(s, l));
+    Ok(Made { glob: [crypto, navigator, blob, file, form, subtle_ctor, file_list, key_ctor], subtle, langs, uad, brands, blob_p: bp, file_p: fp, form_p: fo, iter_p: ip, key_p: kp })
 }
 
 pub(crate) fn need<'s, E: Eng>(s: &mut Sc<'s, E>, a: Args<'s>, n: usize, what: &str) -> Res<'s, ()> {

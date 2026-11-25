@@ -83,12 +83,12 @@ fn aes_and_hkdf_keys_match_node() {
     });
 }
 
-/// The methods that are not built still reject with `NotSupportedError`, and `jwk` import is not built.
+/// The methods and algorithms that are not built still reject with `NotSupportedError`, and `jwk` import of AES is not built.
 #[test]
 fn the_other_methods_and_formats_reject_with_not_supported() {
     big(|| {
         let mut b = mk(Some("https://example.com/".into()), FetchLimits::default());
-        let got = go(&mut b, "var out = []; var c = crypto.subtle; var n = function (p) { return p.then(function () { return 'ok'; }, function (e) { return e.name; }); }; Promise.all([n(c.sign('HMAC', null, new Uint8Array(1))), n(c.verify('HMAC', null, new Uint8Array(1), new Uint8Array(1))), n(c.wrapKey('raw', null, null, 'AES-KW')), n(c.unwrapKey('raw', new Uint8Array(1), null, 'AES-KW', 'AES-GCM', true, ['encrypt'])), n(c.importKey('jwk', {}, 'AES-GCM', true, ['encrypt'])), n(c.generateKey({ name: 'RSASSA-PKCS1-v1_5' }, true, ['sign']))]).then(function (r) { out.push(r.join()); }); 1");
+        let got = go(&mut b, "var out = []; var c = crypto.subtle; var n = function (p) { return p.then(function () { return 'ok'; }, function (e) { return e.name; }); }; Promise.all([n(c.generateKey({ name: 'RSA-PSS', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' }, true, ['sign'])), n(c.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits'])), n(c.wrapKey('raw', null, null, 'AES-KW')), n(c.unwrapKey('raw', new Uint8Array(1), null, 'AES-KW', 'AES-GCM', true, ['encrypt'])), n(c.importKey('jwk', {}, 'AES-GCM', true, ['encrypt'])), n(c.generateKey({ name: 'RSA-OAEP' }, true, ['encrypt']))]).then(function (r) { out.push(r.join()); }); 1");
         assert_eq!(got, "NotSupportedError,NotSupportedError,NotSupportedError,NotSupportedError,NotSupportedError,NotSupportedError");
     });
 }
