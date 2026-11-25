@@ -55,6 +55,8 @@ mod page_pseudo_style_tests;
 #[cfg(test)]
 mod browser_rects_pseudo_tests;
 #[cfg(test)]
+mod browser_rects_fixed_tests;
+#[cfg(test)]
 mod page_live_events_tests;
 #[cfg(test)]
 mod page_live_iframe_tests;
@@ -405,6 +407,8 @@ mod browser_dom_text_bound_tests;
 mod browser_count_caps_tests;
 #[cfg(test)]
 mod browser_resize_tests;
+#[cfg(test)]
+mod browser_resize_device_box_tests;
 #[cfg(test)]
 mod browser_geometry_tests;
 #[cfg(test)]

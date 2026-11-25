@@ -523,56 +523,64 @@ pub fn out_of_flow(cx: &mut Cx, at: usize, pad: Rect, fixed: bool, abs: bool) {
     let mut inlines: HashMap<u32, (Rect, Rect)> = HashMap::new();
     // The open fragments: (their end, their corner from the border box of `at`, a positioned block is open).
     let mut open: Vec<(u32, f32, f32, bool)> = Vec::new();
-    let mut i = at + 1;
-    while i < cx.out.len() {
-        while open.last().is_some_and(|o| o.0 as usize <= i) {
-            open.pop();
-        }
-        let f = cx.out[i];
-        let (px, py, inside) = open.last().map_or((0.0, 0.0, false), |o| (o.1, o.2, o.3));
-        let (x, y) = (px + f.rect.x, py + f.rect.y);
-        match f.kind {
-            crate::fragment::Kind::Static => {
-                let is_fixed = cx.tree.position(f.node) == Keyword::Fixed;
-                if if is_fixed { fixed } else { abs && !inside } {
-                    found.push((f.node, x - pad.x, y - pad.y));
-                }
-            }
-            crate::fragment::Kind::Box if cx.tree.kind(f.node) == Kind::Inline && cx.tree.position(f.node) != Keyword::Static => {
-                let r = Rect { x, y, ..f.rect };
-                inlines.entry(f.node.index() as u32).and_modify(|e| e.1 = r).or_insert((r, r));
-            }
-            crate::fragment::Kind::Box if f.end as usize > i + 1 => {
-                let positioned = cx.tree.kind(f.node) != Kind::Inline && cx.tree.position(f.node) != Keyword::Static;
-                if positioned && !(fixed && cx.fixed) {
-                    i = f.end as usize;
-                    continue;
-                }
-                open.push((f.end, x, y, inside || positioned));
-            }
-            _ => {}
-        }
-        i += 1;
-    }
     let top = cx.out[at].node;
-    for (node, sx, sy) in found {
-        // The nearest positioned inline box above it, inside `at`. Its containing block goes from the top-left of the
-        // padding box of its first fragment to the bottom-right of the padding box of its last one (CSS 2.1, 10.1).
-        let mut cb = pad;
-        let mut up = cx.tree.box_parent(node);
-        while !inlines.is_empty()
-            && let Some(n) = up
-            && n != top
-        {
-            if let Some(&(first, last)) = inlines.get(&(n.index() as u32)) {
-                let (border, _) = border_padding(cx, cx.tree.style(n), pad.w);
-                let (x0, y0) = (first.x + border.left, first.y + border.top);
-                cb = Rect { x: x0, y: y0, w: (last.x + last.w - border.right - x0).max(0.0), h: (last.y + last.h - border.bottom - y0).max(0.0) };
-                break;
+    let mut i = at + 1;
+    // The window lays out its absolute boxes after the walk. Their fragments go at the end of the list, so the walk
+    // runs again over the new fragments for the `fixed` boxes inside them. Each new fragment is a child of `at`.
+    loop {
+        while i < cx.out.len() {
+            while open.last().is_some_and(|o| o.0 as usize <= i) {
+                open.pop();
             }
-            up = cx.tree.box_parent(n);
+            let f = cx.out[i];
+            let (px, py, inside) = open.last().map_or((0.0, 0.0, false), |o| (o.1, o.2, o.3));
+            let (x, y) = (px + f.rect.x, py + f.rect.y);
+            match f.kind {
+                crate::fragment::Kind::Static => {
+                    let is_fixed = cx.tree.position(f.node) == Keyword::Fixed;
+                    if if is_fixed { fixed } else { abs && !inside } {
+                        found.push((f.node, x - pad.x, y - pad.y));
+                    }
+                }
+                crate::fragment::Kind::Box if cx.tree.kind(f.node) == Kind::Inline && cx.tree.position(f.node) != Keyword::Static => {
+                    let r = Rect { x, y, ..f.rect };
+                    inlines.entry(f.node.index() as u32).and_modify(|e| e.1 = r).or_insert((r, r));
+                }
+                crate::fragment::Kind::Box if f.end as usize > i + 1 => {
+                    let positioned = cx.tree.kind(f.node) != Kind::Inline && cx.tree.position(f.node) != Keyword::Static;
+                    if positioned && !(fixed && cx.fixed) {
+                        i = f.end as usize;
+                        continue;
+                    }
+                    open.push((f.end, x, y, inside || positioned));
+                }
+                _ => {}
+            }
+            i += 1;
         }
-        absolute(cx, node, sx + pad.x - cb.x, sy + pad.y - cb.y, cb);
+        for (node, sx, sy) in found.drain(..) {
+            // The nearest positioned inline box above it, inside `at`. Its containing block goes from the top-left of the
+            // padding box of its first fragment to the bottom-right of the padding box of its last one (CSS 2.1, 10.1).
+            let mut cb = pad;
+            let mut up = cx.tree.box_parent(node);
+            while !inlines.is_empty()
+                && let Some(n) = up
+                && n != top
+            {
+                if let Some(&(first, last)) = inlines.get(&(n.index() as u32)) {
+                    let (border, _) = border_padding(cx, cx.tree.style(n), pad.w);
+                    let (x0, y0) = (first.x + border.left, first.y + border.top);
+                    cb = Rect { x: x0, y: y0, w: (last.x + last.w - border.right - x0).max(0.0), h: (last.y + last.h - border.bottom - y0).max(0.0) };
+                    break;
+                }
+                up = cx.tree.box_parent(n);
+            }
+            absolute(cx, node, sx + pad.x - cb.x, sy + pad.y - cb.y, cb);
+        }
+        if !(fixed && cx.fixed) || i == cx.out.len() {
+            break;
+        }
+        open.clear();
     }
 }
 
