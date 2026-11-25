@@ -392,6 +392,8 @@ mod browser_message_queue_gc_tests;
 #[cfg(test)]
 mod browser_worker_run_tests;
 #[cfg(test)]
+mod browser_worker_scope_tests;
+#[cfg(test)]
 mod browser_worker_import_tests;
 #[cfg(test)]
 mod browser_worker_gc_tests;
