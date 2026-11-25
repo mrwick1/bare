@@ -470,6 +470,9 @@ impl Realm {
                 c = self.proto_of(x);
             }
         }
+        if crate::census::on() {
+            crate::census::note(self, o, key, want);
+        }
         Ok(Walk::Miss)
     }
 
