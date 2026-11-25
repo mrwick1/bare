@@ -185,6 +185,7 @@ pub(crate) fn intrinsic(rt: &mut Realm) -> (Obj, Obj) {
             getter("byteOffset", "get byteOffset", byte_offset),
             sym_getter(TO_STRING_TAG, "get [Symbol.toStringTag]", class_name),
             m("set", 1, set),
+            m("copyWithin", 2, copy_within),
             m("subarray", 2, subarray),
             m("slice", 2, slice),
             m("fill", 1, fill),
@@ -192,6 +193,7 @@ pub(crate) fn intrinsic(rt: &mut Realm) -> (Obj, Obj) {
             indexed("includes", 1, search, 1),
             m("join", 1, join),
             m("map", 1, map),
+            m("filter", 1, filter),
             m("forEach", 1, for_each),
             m("reduce", 1, reduce),
             m("sort", 1, sort),
@@ -518,6 +520,28 @@ fn set(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     Ok(Value::UNDEFINED)
 }
 
+fn copy_within(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+    let (view, len) = validated(rt, this)?;
+    let to = relative(rt, arg(args, 0), len, 0)?;
+    let from = relative(rt, arg(args, 1), len, 0)?;
+    let end = relative(rt, arg(args, 2), len, len)?;
+    let count = end.saturating_sub(from).min(len - to);
+    if count == 0 {
+        return Ok(this);
+    }
+
+    // Argument conversion can resize or detach the buffer.
+    let (_, len) = validated(rt, this)?;
+    let count = count.min(len.saturating_sub(from.max(to)));
+    if count != 0 {
+        let width = view.width();
+        let src = view.offset + from * width;
+        let dst = view.offset + to * width;
+        rt.copy_buffer_bytes(view.buffer, src, view.buffer, dst, count * width);
+    }
+    Ok(this)
+}
+
 fn subarray(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
     let src = require(rt, this)?;
     let len = src.len().unwrap_or(0);
@@ -671,6 +695,29 @@ fn map(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
         let element = item(rt, src, i)?;
         let v = rt.call_function(cb, arg(args, 1), &[element, Realm::num(i as f64), this])?;
         finish(rt, dst, i, v)?;
+    }
+    Ok(result)
+}
+
+fn filter(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+    let (src, len) = validated(rt, this)?;
+    let cb = arg(args, 0);
+    callback(rt, cb)?;
+    let this_arg = arg(args, 1);
+    let mut kept = Vec::new();
+    for i in 0..len {
+        let value = item(rt, src, i)?;
+        let selected = rt.call_function(cb, this_arg, &[value, Realm::num(i as f64), this])?;
+        if Realm::truthy(selected) {
+            if kept.try_reserve(1).is_err() {
+                return range(rt, "out of memory");
+            }
+            kept.push(value);
+        }
+    }
+    let (result, dst) = for_species(rt, this, src.elem.expect("typed array"), kept.len())?;
+    for (i, value) in kept.into_iter().enumerate() {
+        finish(rt, dst, i, value)?;
     }
     Ok(result)
 }
@@ -829,3 +876,11 @@ pub(crate) fn iterator_next(rt: &mut Realm, this: Value, _args: &[Value]) -> R<V
 #[cfg(test)]
 #[path = "bi_bigint_typed_tests.rs"]
 mod bigint_tests;
+
+#[cfg(test)]
+#[path = "bi_typed_filter_tests.rs"]
+mod filter_tests;
+
+#[cfg(test)]
+#[path = "bi_typed_copy_within_tests.rs"]
+mod copy_within_tests;
