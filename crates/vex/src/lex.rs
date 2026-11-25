@@ -594,8 +594,7 @@ impl<'a> Lexer<'a> {
 
     fn punct(&self, c: u8) -> Option<(Punct, usize)> {
         use Punct::*;
-        let p = self.pos;
-        let (b1, b2, b3) = (self.at(p + 1), self.at(p + 2), self.at(p + 3));
+        let next = |n| self.at(self.pos + n);
         Some(match c {
             b'{' => (LBrace, 1),
             b'}' => (RBrace, 1),
@@ -607,15 +606,15 @@ impl<'a> Lexer<'a> {
             b',' => (Comma, 1),
             b':' => (Colon, 1),
             b'~' => (Tilde, 1),
-            b'.' if b1 == b'.' && b2 == b'.' => (Ellipsis, 3),
+            b'.' if next(1) == b'.' && next(2) == b'.' => (Ellipsis, 3),
             b'.' => (Dot, 1),
-            b'<' => match (b1, b2) {
+            b'<' => match (next(1), next(2)) {
                 (b'<', b'=') => (ShlAssign, 3),
                 (b'<', _) => (Shl, 2),
                 (b'=', _) => (LtEq, 2),
                 _ => (Lt, 1),
             },
-            b'>' => match (b1, b2, b3) {
+            b'>' => match (next(1), next(2), next(3)) {
                 (b'>', b'>', b'=') => (UShrAssign, 4),
                 (b'>', b'>', _) => (UShr, 3),
                 (b'>', b'=', _) => (ShrAssign, 3),
@@ -623,52 +622,52 @@ impl<'a> Lexer<'a> {
                 (b'=', _, _) => (GtEq, 2),
                 _ => (Gt, 1),
             },
-            b'=' => match (b1, b2) {
+            b'=' => match (next(1), next(2)) {
                 (b'=', b'=') => (EqEqEq, 3),
                 (b'=', _) => (EqEq, 2),
                 (b'>', _) => (Arrow, 2),
                 _ => (Assign, 1),
             },
-            b'!' => match (b1, b2) {
+            b'!' => match (next(1), next(2)) {
                 (b'=', b'=') => (NotEqEq, 3),
                 (b'=', _) => (NotEq, 2),
                 _ => (Bang, 1),
             },
-            b'+' => match b1 {
+            b'+' => match next(1) {
                 b'+' => (PlusPlus, 2),
                 b'=' => (PlusAssign, 2),
                 _ => (Plus, 1),
             },
-            b'-' => match b1 {
+            b'-' => match next(1) {
                 b'-' => (MinusMinus, 2),
                 b'=' => (MinusAssign, 2),
                 _ => (Minus, 1),
             },
-            b'*' => match (b1, b2) {
+            b'*' => match (next(1), next(2)) {
                 (b'*', b'=') => (StarStarAssign, 3),
                 (b'*', _) => (StarStar, 2),
                 (b'=', _) => (StarAssign, 2),
                 _ => (Star, 1),
             },
-            b'/' if b1 == b'=' => (SlashAssign, 2),
+            b'/' if next(1) == b'=' => (SlashAssign, 2),
             b'/' => (Slash, 1),
-            b'%' if b1 == b'=' => (PercentAssign, 2),
+            b'%' if next(1) == b'=' => (PercentAssign, 2),
             b'%' => (Percent, 1),
-            b'^' if b1 == b'=' => (CaretAssign, 2),
+            b'^' if next(1) == b'=' => (CaretAssign, 2),
             b'^' => (Caret, 1),
-            b'&' => match (b1, b2) {
+            b'&' => match (next(1), next(2)) {
                 (b'&', b'=') => (AmpAmpAssign, 3),
                 (b'&', _) => (AmpAmp, 2),
                 (b'=', _) => (AmpAssign, 2),
                 _ => (Amp, 1),
             },
-            b'|' => match (b1, b2) {
+            b'|' => match (next(1), next(2)) {
                 (b'|', b'=') => (PipePipeAssign, 3),
                 (b'|', _) => (PipePipe, 2),
                 (b'=', _) => (PipeAssign, 2),
                 _ => (Pipe, 1),
             },
-            b'?' => match (b1, b2) {
+            b'?' => match (next(1), next(2)) {
                 (b'?', b'=') => (QQAssign, 3),
                 (b'?', _) => (QQ, 2),
                 // `a?.5:1` is `a ? .5 : 1`, so `?.` before a digit is just `?`.

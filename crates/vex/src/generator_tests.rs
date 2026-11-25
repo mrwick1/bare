@@ -490,6 +490,7 @@ fn a_generator_that_waits_as_a_stub_is_compiled_at_its_first_call() {
     let sh = shared();
     // The stub of a function with one plain parameter: the arguments are in the registers when it runs (`script.rs`, `stub`).
     let mut stub = Code::new(1, 1);
+    stub.fn_len = 1;
     let mut w = Vec::new();
     encode(&mut w, &Ins::new(Op::Lazy, 0, 0, 0)).unwrap();
     stub.words = w;
