@@ -1249,7 +1249,7 @@ fn dom_implementation_interface() {
     big(|| {
         let mut b = browser();
         assert!(b.dom.implementation.get().is_none());
-        assert_eq!(js(&mut b, "var C=true,h='prototype',ut={};var {createHTMLDocument:Tm,createDocument:Ep}=C?DOMImplementation[h]:ut; typeof Tm+','+typeof Ep"), "function,undefined");
+        assert_eq!(js(&mut b, "var C=true,h='prototype',ut={};var {createHTMLDocument:Tm,createDocument:Ep}=C?DOMImplementation[h]:ut; typeof Tm+','+typeof Ep"), "function,function");
         assert_eq!(js(&mut b, "var I=DOMImplementation, mi=document.implementation; [mi instanceof I, Object.getPrototypeOf(mi)===I.prototype, mi.constructor===I, I===DOMImplementation].join()"), "true,true,true,true");
         assert_eq!(js(&mut b, "var p=Object.getOwnPropertyDescriptor(I,'prototype'),c=Object.getOwnPropertyDescriptor(I.prototype,'constructor'); [p.writable,p.enumerable,p.configurable,c.writable,c.enumerable,c.configurable].join()"), "false,false,false,true,false,true");
         assert_eq!(js(&mut b, "var errors=[]; for(var f of [()=>I(),()=>new I(),()=>Tm.call({}),()=>I.prototype.hasFeature.call(Object.create(I.prototype))]) {try{f();errors.push('bad')}catch(e){errors.push(e.name)}} errors.join()"), "TypeError,TypeError,TypeError,TypeError");
