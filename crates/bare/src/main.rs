@@ -359,6 +359,7 @@ fn show_window(arg: &str, viewport: (f32, f32), profile: Option<&str>) -> i32 {
 /// `--window URL`: the page runs in a session (scripts, `fetch`, navigation), and the window sends pointer and keyboard
 /// input to it (see `page.rs`). The VM needs a big stack, as for `--run`. With `BARE_WINDOW_STATS` set, print the counts.
 fn show_interactive(url: &str, viewport: (f32, f32), profile: Option<&str>) -> i32 {
+    bare_css::at_rules::set_prefers_dark(bare_os::scheme::prefers_dark());
     let url = url.to_string();
     let profile = match bare::profile::Profile::choose(profile) {
         Ok((p, note)) => {
