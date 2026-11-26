@@ -447,7 +447,7 @@ fn make<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, Made<E>> {
 
     // navigator
     let np = proto(d, s, op_, "Navigator")?;
-    let getters: [(&str, HS<E>); 9] = [
+    let getters: [(&str, HS<E>); 10] = [
         ("userAgent", nav_user_agent),
         ("userAgentData", nav_uad),
         ("language", nav_language),
@@ -457,6 +457,7 @@ fn make<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, Made<E>> {
         ("cookieEnabled", nav_cookie_enabled),
         ("hardwareConcurrency", nav_cores),
         ("serviceWorker", nav_sw),
+        ("permissions", nav_permissions),
     ];
     for (name, h) in getters {
         getter(d, s, np, name, h)?;
@@ -765,6 +766,11 @@ fn nav_sw<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s
     nav(d, s, this)?;
     let w = sw_made(d, s)?;
     Ok(d.obj_local(s, w.inst))
+}
+
+fn nav_permissions<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    nav(d, s, this)?;
+    crate::browser_notification::permissions(d, s)
 }
 
 fn nav_cores<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {

@@ -46,7 +46,7 @@ use crate::browser_scoped::*;
 use crate::browser_navigation_state as st;
 use bare_js_api::Cloned;
 use crate::browser_navigation_storage as sto;
-pub use crate::browser_navigation_storage::{StorageLimits, StoreError, WebStorage};
+pub use crate::browser_navigation_storage::{Permission, StorageLimits, StoreError, WebStorage};
 use crate::browser_navigation_url::{self as nu, Part, Rec, UErr};
 use bare_html::dom::NodeData;
 use bare_js_api::{Args, HostFn, Local};
