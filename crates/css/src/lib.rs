@@ -18,6 +18,8 @@ pub mod rule_cache;
 mod scan;
 pub mod selector;
 #[cfg(test)]
+mod calc_infinity_tests;
+#[cfg(test)]
 mod env_tests;
 #[cfg(test)]
 mod shadow_tests;

@@ -10,6 +10,8 @@
 
 pub mod bars;
 pub mod canvas;
+#[cfg(test)]
+mod canvas_radius_tests;
 pub mod display;
 pub mod glyphs;
 pub mod hit;
