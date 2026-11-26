@@ -481,6 +481,9 @@ impl<U: Fn(f32, &str) -> Option<Length> + Copy> P<'_, '_, U> {
         let length = |l: Length| Term { value: Linear::from_length(l), number: false, node: None };
         match token {
             Token::Number { value, .. } => Some(number(*value)),
+            // `infinity` is the largest finite number here: `calc(infinity * 1px)` is a huge length (CSS Values 4, 10.7.1).
+            Token::Ident(n) if n.eq_ignore_ascii_case("infinity") => Some(number(f32::MAX)),
+            Token::Ident(n) if n.eq_ignore_ascii_case("-infinity") => Some(number(-f32::MAX)),
             Token::Percentage(x) => Some(length(Length::Percent(*x))),
             Token::Dimension { value, unit, .. } => Some(length((self.unit)(*value, unit)?)),
             Token::OpenParen => self.group(depth),
