@@ -475,7 +475,7 @@ fn a_lazy_dictionary_global_caches_its_own_data() {
     assert!(r.shapes.get(r.global.shape(&r.shapes)).is_dict());
     r.run_code(ci, false).unwrap();
     let tag = r.shapes.watch_tag();
-    let caches = &r.pool.last().unwrap().fbs[ci].caches;
+    let caches = &r.pool.last().unwrap().fbs[ci].as_ref().unwrap().caches;
     assert_eq!(caches.iter().filter(|c| c.shape == tag).count(), 6);
     assert_eq!(js(&mut r, "sum + ',' + i"), "499500,1000");
 }
