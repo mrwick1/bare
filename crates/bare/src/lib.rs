@@ -232,8 +232,11 @@ mod browser_scheduler;
 mod browser_worker;
 mod browser_sw;
 mod sw_hub;
+mod cache_store;
+mod browser_caches;
+pub use cache_store::{CacheEntry, SavedCache};
 mod browser_notification;
-pub use browser_notification::{NotificationEvent, NotificationInfo};
+pub use browser_notification::{NotificationAction, NotificationEvent, NotificationInfo};
 pub use sw_hub::SavedReg;
 mod browser_wasm;
 #[cfg(test)]
@@ -265,6 +268,8 @@ mod browser_date_tests;
 mod browser_web_api_tests;
 #[cfg(test)]
 mod browser_gaps_tests;
+#[cfg(test)]
+mod browser_flex_min_height_tests;
 #[cfg(test)]
 mod browser_scrollbar_none_tests;
 #[cfg(test)]
@@ -511,6 +516,14 @@ mod browser_sw_register_tests;
 mod browser_sw_lifecycle_tests;
 #[cfg(test)]
 mod browser_sw_message_tests;
+#[cfg(test)]
+mod browser_sw_notification_tests;
+#[cfg(test)]
+mod browser_sw_fetch_tests;
+#[cfg(test)]
+mod browser_sw_navigate_tests;
+#[cfg(test)]
+mod browser_caches_store_tests;
 #[cfg(test)]
 mod browser_background_tests;
 #[cfg(test)]

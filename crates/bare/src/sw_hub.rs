@@ -16,7 +16,10 @@
 //!   active version, when the active one controls no client, or after `skipWaiting()`. Then `activate` runs.
 //! - A page that a registration does not control pays nothing: `has_regs` is one length check.
 
+use crate::browser_notification::{NotificationAction, NotificationEvent, NotificationInfo};
 use bare_js_api::Cloned;
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 /// A worker with no event in flight stops after this time (ms of the host page clock), as in Chrome.
@@ -53,6 +56,8 @@ pub(crate) struct Ver {
     pub state: St,
     /// `skipWaiting()` ran.
     pub skip: bool,
+    /// The script added a `fetch` listener when it ran last (`None`: it has not run in this session).
+    pub has_fetch: Option<bool>,
 }
 
 impl Ver {
@@ -114,6 +119,29 @@ pub(crate) enum ToClient {
     Ctrl(Option<WSnap>),
     /// A message from a worker.
     Msg { from: WSnap, origin: String, data: Cloned },
+    /// `WindowClient.focus()` in a `notificationclick`: the page comes to the front.
+    Focus,
+    /// The reply of the worker to the `fetch` `id` of this client.
+    Fetched { id: u64, reply: FetchReply },
+}
+
+/// A request of a controlled page for a `fetch` event. Headers are `name:value` lines.
+pub(crate) struct FetchReq {
+    pub id: u64,
+    pub url: String,
+    pub method: String,
+    pub headers: String,
+    pub body: Option<Vec<u8>>,
+    pub mode: String,
+    pub credentials: String,
+    pub redirect: String,
+}
+
+/// What the worker answered: no `respondWith` (the page goes to the network), a network error, or a response.
+pub(crate) enum FetchReply {
+    Fallback,
+    Error,
+    Resp { status: u16, status_text: String, headers: String, body: Vec<u8>, url: String },
 }
 
 pub(crate) struct Client {
@@ -135,6 +163,37 @@ pub(crate) enum EvKind {
     Install,
     Activate,
     Message { client: u64, data: Cloned },
+    /// The user clicked (`click`, with the `action` button or "") or closed a notification of the registration.
+    Note { click: bool, note: Rc<PNote>, action: String },
+    /// A `fetch` of the client `client`.
+    Fetch { client: u64, req: FetchReq },
+}
+
+/// A notification of a registration (`showNotification`). It lives in the session until a close.
+pub(crate) struct PNote {
+    pub id: u64,
+    pub reg: u64,
+    pub origin: String,
+    pub title: String,
+    pub body: String,
+    pub tag: String,
+    pub icon: String,
+    pub badge: String,
+    pub lang: String,
+    pub dir: &'static str,
+    pub silent: Option<bool>,
+    pub renotify: bool,
+    pub require: bool,
+    pub timestamp: f64,
+    pub actions: Vec<NotificationAction>,
+    /// The structured clone of `options.data` with no transfer, so it can be read again; `None` for null.
+    pub data: Option<RefCell<Cloned>>,
+}
+
+impl PNote {
+    fn event(&self, kind: &'static str) -> NotificationEvent {
+        NotificationEvent { kind, id: self.id, origin: self.origin.clone(), title: self.title.clone(), body: self.body.clone(), tag: self.tag.clone(), at_ms: self.timestamp }
+    }
 }
 
 pub(crate) struct Ev {
@@ -203,6 +262,16 @@ pub(crate) struct Hub {
     next: u64,
     /// Moves when what the profile keeps changes.
     pub rev: u64,
+    /// The live notifications of the registrations, oldest first.
+    notes: Vec<Rc<PNote>>,
+    /// The event log of those notifications, drained per origin by an agent.
+    log: Vec<NotificationEvent>,
+    /// The id of the last notification of the session: a page notification and a registration notification share the numbers.
+    note_last: u64,
+    /// The `fetch` events with no reply yet: event id, version, client, fetch id.
+    fetches: Vec<(u64, u64, u64, u64)>,
+    /// The replies to navigation `fetch` events (client 0): fetch id, reply. The session takes them (`take_nav`).
+    nav: Vec<(u64, FetchReply)>,
 }
 
 /// The origin of a URL: `scheme://host[:port]`.
@@ -411,7 +480,7 @@ impl Hub {
             return self.reply(job.client, id, Ok(snap));
         }
         let vid = self.id();
-        self.regs[i].parsed = Some((Ver { id: vid, url: job.script, text: text.into(), module: job.module, state: St::Parsed, skip: false }, id));
+        self.regs[i].parsed = Some((Ver { id: vid, url: job.script, text: text.into(), module: job.module, state: St::Parsed, skip: false, has_fetch: None }, id));
         self.jobs.push(Job { id, client: job.client, reg: job.reg, script: String::new(), module: job.module });
         let eid = self.id();
         self.events.push(Ev { id: eid, ver: vid, kind: EvKind::Start });
@@ -470,10 +539,17 @@ impl Hub {
     /// Remove registration `i`: each of its versions becomes redundant.
     fn clear(&mut self, i: usize) {
         let mut r = self.regs.remove(i);
+        let (gone, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut self.notes).into_iter().partition(|n| n.reg == r.id);
+        self.notes = keep;
+        self.log.extend(gone.iter().map(|n| n.event("closed")));
         let vs: Vec<Ver> = [r.installing.take(), r.waiting.take(), r.active.take()].into_iter().flatten().collect();
         for v in vs {
             self.push_state(&r.origin, v.id, St::Redundant);
             self.events.retain(|e| e.ver != v.id);
+            let open: Vec<u64> = self.fetches.iter().filter(|f| f.1 == v.id).map(|f| f.3).collect();
+            for id in open {
+                self.fetch_reply(id, FetchReply::Fallback);
+            }
         }
         self.rev += 1;
     }
@@ -532,6 +608,10 @@ impl Hub {
     pub(crate) fn run_ended(&mut self, ver: u64) {
         let Some(k) = self.runs.iter().position(|r| r.ver == ver) else { return };
         let r = self.runs.remove(k);
+        let open: Vec<u64> = self.fetches.iter().filter(|f| f.1 == ver).map(|f| f.3).collect();
+        for id in open {
+            self.fetch_reply(id, FetchReply::Fallback);
+        }
         for (id, life) in r.inflight {
             match life {
                 Life::Install => self.finish(ver, Life::Install, false),
@@ -551,6 +631,10 @@ impl Hub {
         let Some(k) = r.inflight.iter().position(|e| e.0 == id) else { return };
         let (_, life) = r.inflight.remove(k);
         r.idle_since = now;
+        // A `fetch` event that ended with no reply: the page goes to the network.
+        if let Some(f) = self.fetches.iter().find(|f| f.0 == id).map(|f| f.3) {
+            self.fetch_reply(f, FetchReply::Fallback);
+        }
         self.finish(ver, life, ok);
     }
 
@@ -668,6 +752,162 @@ impl Hub {
         Ok(())
     }
 
+    // ------------------------------------------------------------------------------------------ notifications
+
+    /// The id of a new notification of the session.
+    pub(crate) fn note_id(&mut self) -> u64 {
+        self.note_last += 1;
+        self.note_last
+    }
+
+    /// Does registration `reg` have an active version?
+    pub(crate) fn has_active(&self, reg: u64) -> bool {
+        self.regs.iter().any(|r| r.id == reg && r.active.is_some())
+    }
+
+    /// Show `n` (its id from `note_id`). A live notification of the origin with the same tag leaves with no event ("replaced").
+    pub(crate) fn show_note(&mut self, n: PNote) {
+        if !n.tag.is_empty()
+            && let Some(i) = self.notes.iter().position(|o| o.origin == n.origin && o.tag == n.tag)
+        {
+            let old = self.notes.remove(i);
+            self.log.push(old.event("replaced"));
+        }
+        self.log.push(n.event("shown"));
+        self.notes.push(Rc::new(n));
+    }
+
+    /// The live notifications of registration `reg` with tag `tag` (all with ""), oldest first.
+    pub(crate) fn notes_of(&self, reg: u64, tag: &str) -> Vec<Rc<PNote>> {
+        self.notes.iter().filter(|n| n.reg == reg && (tag.is_empty() || n.tag == tag)).cloned().collect()
+    }
+
+    /// Take the live notification `id` of `origin` out of the list and log "closed".
+    fn take_note(&mut self, id: u64, origin: &str) -> Option<Rc<PNote>> {
+        let i = self.notes.iter().position(|n| n.id == id && n.origin == origin)?;
+        let n = self.notes.remove(i);
+        self.log.push(n.event("closed"));
+        Some(n)
+    }
+
+    /// `close()` of a notification object: no event.
+    pub(crate) fn close_note(&mut self, id: u64, origin: &str) {
+        self.take_note(id, origin);
+    }
+
+    /// The user clicks the live notification `id` of `origin`, on the button `action` ("" for the notification). The active worker
+    /// of its registration gets `notificationclick`. False when no such notification or button.
+    pub(crate) fn click_note(&mut self, id: u64, origin: &str, action: &str) -> bool {
+        let Some(n) = self.notes.iter().find(|n| n.id == id && n.origin == origin).cloned() else { return false };
+        if !action.is_empty() && !n.actions.iter().any(|a| a.action == action) {
+            return false;
+        }
+        self.log.push(n.event("clicked"));
+        self.note_event(n, true, action.to_string());
+        true
+    }
+
+    /// The user closes the live notification `id` of `origin`: it leaves, and the worker gets `notificationclose`.
+    pub(crate) fn user_close_note(&mut self, id: u64, origin: &str) -> bool {
+        let Some(n) = self.take_note(id, origin) else { return false };
+        self.note_event(n, false, String::new());
+        true
+    }
+
+    fn note_event(&mut self, note: Rc<PNote>, click: bool, action: String) {
+        let Some(ver) = self.regs.iter().find(|r| r.id == note.reg).and_then(|r| r.active.as_ref()).map(|v| v.id) else { return };
+        let id = self.id();
+        self.events.push(Ev { id, ver, kind: EvKind::Note { click, note, action } });
+    }
+
+    /// The live notifications of `origin`, as an agent sees them.
+    pub(crate) fn note_infos(&self, origin: &str) -> Vec<NotificationInfo> {
+        self.notes
+            .iter()
+            .filter(|n| n.origin == origin)
+            .map(|n| NotificationInfo { id: n.id, origin: n.origin.clone(), title: n.title.clone(), body: n.body.clone(), tag: n.tag.clone(), icon: n.icon.clone(), silent: n.silent == Some(true), at_ms: n.timestamp, actions: n.actions.clone() })
+            .collect()
+    }
+
+    /// Drain the event log entries of `origin`.
+    pub(crate) fn take_log(&mut self, origin: &str) -> Vec<NotificationEvent> {
+        if self.log.is_empty() {
+            return Vec::new();
+        }
+        let (mine, rest) = std::mem::take(&mut self.log).into_iter().partition(|e| e.origin == origin);
+        self.log = rest;
+        mine
+    }
+
+    pub(crate) fn log_count(&self, origin: &str) -> usize {
+        self.log.iter().filter(|e| e.origin == origin).count()
+    }
+
+    /// `WindowClient.focus()` of the client `uuid`: its page comes to the front at its next turn. False when no such client.
+    pub(crate) fn focus(&mut self, uuid: &str) -> bool {
+        let Some(c) = self.clients.iter_mut().find(|c| c.uuid == uuid) else { return false };
+        c.hidden = false;
+        c.inbox.push(ToClient::Focus);
+        true
+    }
+
+    // ------------------------------------------------------------------------------------------ fetch events
+
+    /// The script of `ver` ran: did it add a `fetch` listener?
+    pub(crate) fn set_has_fetch(&mut self, ver: u64, has: bool) {
+        if let Some(i) = self.reg_of_ver(ver) {
+            let r = &mut self.regs[i];
+            for v in [r.parsed.as_mut().map(|p| &mut p.0), r.installing.as_mut(), r.waiting.as_mut(), r.active.as_mut()].into_iter().flatten() {
+                if v.id == ver {
+                    v.has_fetch = Some(has);
+                }
+            }
+        }
+    }
+
+    /// The worker that gets the `fetch` events of client `client`: its controller, unless its script has no `fetch` listener.
+    pub(crate) fn fetch_ver(&self, client: u64) -> Option<u64> {
+        let ver = self.client(client)?.controller?;
+        let v = self.ver(ver)?;
+        (matches!(v.state, St::Activating | St::Activated) && v.has_fetch != Some(false)).then_some(ver)
+    }
+
+    /// A `fetch` event of client `client` for `ver`. Gives the fetch id (`req.id` is set here).
+    pub(crate) fn fetch(&mut self, ver: u64, client: u64, mut req: FetchReq) -> u64 {
+        let (eid, fid) = (self.id(), self.id());
+        req.id = fid;
+        self.fetches.push((eid, ver, client, fid));
+        self.events.push(Ev { id: eid, ver, kind: EvKind::Fetch { client, req } });
+        fid
+    }
+
+    /// The reply to the fetch `id`: it goes to its client, or to the session for a navigation. A second reply does nothing.
+    pub(crate) fn fetch_reply(&mut self, id: u64, reply: FetchReply) {
+        let Some(k) = self.fetches.iter().position(|f| f.3 == id) else { return };
+        let (_, _, client, _) = self.fetches.remove(k);
+        if client == 0 {
+            self.nav.push((id, reply));
+            return;
+        }
+        if let Some(c) = self.clients.iter_mut().find(|c| c.id == client) {
+            c.inbox.push(ToClient::Fetched { id, reply });
+        }
+    }
+
+    /// The worker that gets the `fetch` event of a navigation to `url`: the active version of the registration whose scope matches,
+    /// unless its script has no `fetch` listener.
+    pub(crate) fn nav_ver(&self, url: &str) -> Option<u64> {
+        let v = self.match_url(url)?.active.as_ref()?;
+        (matches!(v.state, St::Activating | St::Activated) && v.has_fetch != Some(false)).then_some(v.id)
+    }
+
+    /// The reply to the navigation fetch `id`. With none yet, the navigation goes to the network.
+    pub(crate) fn take_nav(&mut self, id: u64) -> FetchReply {
+        self.fetch_reply(id, FetchReply::Fallback);
+        let k = self.nav.iter().position(|n| n.0 == id).expect("fetch_reply keeps a navigation reply");
+        self.nav.remove(k).1
+    }
+
     // ------------------------------------------------------------------------------------------ the profile
 
     /// The registrations with an active version, for the profile.
@@ -686,7 +926,7 @@ impl Hub {
                 continue;
             }
             let (id, vid) = (self.id(), self.id());
-            let v = Ver { id: vid, url: s.script.clone(), text: s.text.as_str().into(), module: s.module, state: St::Activated, skip: false };
+            let v = Ver { id: vid, url: s.script.clone(), text: s.text.as_str().into(), module: s.module, state: St::Activated, skip: false, has_fetch: None };
             self.regs.push(Reg { id, scope: s.scope.clone(), origin: origin_of(&s.scope), uvc: s.uvc, parsed: None, installing: None, waiting: None, active: Some(v), uninstalling: false });
         }
     }

@@ -25,6 +25,8 @@ mod env_tests;
 mod shadow_tests;
 #[cfg(test)]
 mod values_clip_tests;
+#[cfg(test)]
+mod values_cap_tests;
 pub mod tokenizer;
 pub mod transform;
 pub mod urls;

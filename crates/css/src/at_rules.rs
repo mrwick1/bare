@@ -23,6 +23,20 @@ use crate::values::{Side, parse_declaration};
 const MAX_DEPTH: usize = 32;
 
 /// Does this `@media` prelude match a window of `viewport` pixels? An empty prelude matches.
+/// Does the user prefer a dark scheme (`prefers-color-scheme: dark`)? Light until a window sets it from the desktop
+/// (`bare_os::scheme`). One value for the process: drivers and tests stay light.
+static DARK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Set the colour scheme that `prefers-color-scheme` matches.
+pub fn set_prefers_dark(dark: bool) {
+    DARK.store(dark, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The colour scheme that `prefers-color-scheme` matches: `"dark"` or `"light"`.
+pub fn color_scheme() -> &'static str {
+    if DARK.load(std::sync::atomic::Ordering::Relaxed) { "dark" } else { "light" }
+}
+
 pub fn media_matches(prelude: &str, viewport: (f32, f32)) -> bool {
     let prelude = prelude.trim();
     prelude.is_empty()
@@ -109,7 +123,7 @@ fn feature(inner: &str, (w, h): (f32, f32), depth: usize) -> bool {
             "resolution" => compare(1.0, dppx(&value)),
             _ if min || max => false,
             "orientation" => value == if h >= w { "portrait" } else { "landscape" },
-            "prefers-color-scheme" => value == "light",
+            "prefers-color-scheme" => value == color_scheme(),
             "prefers-reduced-motion" => value == "no-preference",
             "hover" | "any-hover" => value == "hover",
             "pointer" | "any-pointer" => value == "fine",

@@ -21,7 +21,7 @@ use crate::browser::*;
 use crate::browser_navigation_url as nu;
 use crate::browser_scoped::*;
 use crate::eng::{Eng, Ops};
-use crate::sw_hub::{EvKind, Hub, RegSnap, Script, Start, ToClient, WSnap};
+use crate::sw_hub::{EvKind, FetchReply, FetchReq, Hub, RegSnap, Script, Start, ToClient, WSnap};
 use bare_js_api::{Args, Engine, HostFn, Local, Persistent, Type};
 use bare_net::parallel::Task;
 use std::cell::{Cell, RefCell};
@@ -78,6 +78,12 @@ fn become_client<E: Eng>(d: &Dom<E>, control: bool) -> u64 {
     *d.sw.hub.borrow_mut() = Some(hub);
     d.kids.sw_on.set(true);
     id
+}
+
+/// An agent clicked or closed a service worker notification of this page's origin: the page becomes a client, so its turns can host
+/// the worker that gets the event.
+pub(crate) fn become_host<E: Eng>(d: &Dom<E>) {
+    become_client(d, false);
 }
 
 /// A document loaded: when a registration with an active worker matches its URL, the page is a controlled client. One length check
@@ -286,10 +292,91 @@ fn sw_host<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>)
             }
             Ok(s.undefined())
         }
-        // focus(uuid) -> bool: needs a user activation (a notification click), which no event gives yet
-        17 => Ok(s.boolean(false)),
+        // focus(uuid) -> bool: the shim calls it only in a `notificationclick` (Chrome's "allow window interaction")
+        17 => {
+            let uuid = d.arg_str_s(s, a, 1)?;
+            let ok = hub.borrow_mut().focus(&uuid);
+            Ok(s.boolean(ok))
+        }
+        // show(registration id, title, options)
+        20 => {
+            let (reg, title, opts) = (num::<E>(s, a, 1) as u64, arg_s::<E>(s, a, 2), arg_s::<E>(s, a, 3));
+            crate::browser_notification::show_persistent(d, s, reg, title, opts)?;
+            Ok(s.undefined())
+        }
+        // notes(registration id, tag) -> [Notification]
+        21 => {
+            let tag = d.arg_str_s(s, a, 2)?;
+            let list = hub.borrow().notes_of(num::<E>(s, a, 1) as u64, &tag);
+            let mut out = Vec::with_capacity(list.len());
+            for n in &list {
+                out.push(crate::browser_notification::persistent(d, s, n)?);
+            }
+            s.new_array(&out)
+        }
+        // fetch(url, method, headers, body, mode, credentials, redirect) -> the fetch id, or 0: no fetch event (go to the network)
+        30 => {
+            let client = d.sw.client.get();
+            let Some(to) = hub.borrow().fetch_ver(client) else { return Ok(s.number(0.0)) };
+            let mut t = [String::new(), String::new(), String::new(), String::new(), String::new(), String::new()];
+            for (k, i) in [(0, 1), (1, 2), (2, 3), (3, 5), (4, 6), (5, 7)] {
+                let v = arg_s::<E>(s, a, i);
+                if !matches!(s.type_of(v), Type::Undefined | Type::Null) {
+                    t[k] = d.string_arg_s(s, v)?;
+                }
+            }
+            let body = {
+                let v = arg_s::<E>(s, a, 4);
+                s.bytes(v).map(<[u8]>::to_vec)
+            };
+            let [url, method, headers, mode, credentials, redirect] = t;
+            let id = hub.borrow_mut().fetch(to, client, FetchReq { id: 0, url, method, headers, body, mode, credentials, redirect });
+            Ok(s.number(id as f64))
+        }
+        // net(input, init): `fetch` with no fetch event
+        31 => {
+            let args = {
+                let (x, y) = (arg_s::<E>(s, a, 1), arg_s::<E>(s, a, 2));
+                [s.engine().raw(x), s.engine().raw(y)]
+            };
+            old_v::<E>(s, |it| crate::browser_fetch::fetch_args(d, it, &args))
+        }
+        // fetchReply(id, kind, status, statusText, headers, body, url): kind 0 fallback, 1 error, 2 a response
+        32 => {
+            let id = num::<E>(s, a, 1) as u64;
+            let reply = match num::<E>(s, a, 2) as u8 {
+                0 => FetchReply::Fallback,
+                2 => {
+                    let status = num::<E>(s, a, 3) as u16;
+                    let (status_text, headers) = (d.arg_str_s(s, a, 4)?, d.arg_str_s(s, a, 5)?);
+                    let body = {
+                        let v = arg_s::<E>(s, a, 6);
+                        s.bytes(v).map(<[u8]>::to_vec).unwrap_or_default()
+                    };
+                    s.charge((body.len() / 64) as u64)?;
+                    FetchReply::Resp { status, status_text, headers, body, url: d.arg_str_s(s, a, 7)? }
+                }
+                _ => FetchReply::Error,
+            };
+            hub.borrow_mut().fetch_reply(id, reply);
+            Ok(s.undefined())
+        }
         _ => Ok(s.undefined()),
     }
+}
+
+/// Does a `fetch()` of this page go to a `fetch` event? One `Cell` read for a page that is not a service worker client.
+#[inline]
+pub(crate) fn intercepts<E: Eng>(d: &Dom<E>) -> bool {
+    d.sw.client.get() != 0 && hub_of(d).borrow().fetch_ver(d.sw.client.get()).is_some()
+}
+
+/// `fetch(input, init)` of a controlled page: the shim makes the request and waits for the worker.
+#[cold]
+pub(crate) fn fetch<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, input: Local<'s>, init: Local<'s>) -> Res<'s, Local<'s>> {
+    let h = old_v::<E>(s, |it| helper(d, it))?;
+    let f = s.get_str(h, "fetch")?;
+    s.call(f, h, &[input, init])
 }
 
 /// Clone `a[i]` with the transfer list `a[i + 1]` for another page.
@@ -391,8 +478,18 @@ impl<E: Eng> Browser<E> {
         }
         let items = hub.borrow_mut().take_inbox(client);
         // A page with no shim yet reads the state when it makes it: the changes are not needed.
-        let items = if dom.sw.helper.borrow().is_some() { items } else { Vec::new() };
+        let shim = dom.sw.helper.borrow().is_some();
         for item in items {
+            if let ToClient::Focus = item {
+                work += 1;
+                if let Err(e) = self.set_background(false) {
+                    crate::browser_console::push_text(&dom, &mut self.it, crate::browser_console::ConsoleLevel::Error, &format!("service worker: focus failed: {e:?}"));
+                }
+                continue;
+            }
+            if !shim {
+                continue;
+            }
             work += 1;
             if let Err(e) = self.sync_item(item) {
                 crate::browser_console::push_text(&dom, &mut self.it, crate::browser_console::ConsoleLevel::Error, &format!("service worker: a change was dropped: {e:?}"));
@@ -428,6 +525,12 @@ impl<E: Eng> Browser<E> {
                     ToClient::Reg { snap, found } => vec![s.string("reg")?, reg_snap::<E>(s, &snap)?, s.boolean(found)],
                     ToClient::State { ver, state } => vec![s.string("state")?, s.number(ver as f64), s.string(state.name())?],
                     ToClient::Ctrl(w) => vec![s.string("ctrl")?, w_snap::<E>(s, &w)?],
+                    ToClient::Focus => return Ok(None),
+                    ToClient::Fetched { id, reply } => match reply {
+                        FetchReply::Fallback => vec![s.string("fetched")?, s.number(id as f64), s.string("fallback")?],
+                        FetchReply::Error => vec![s.string("fetched")?, s.number(id as f64), s.string("error")?],
+                        FetchReply::Resp { status, status_text, headers, body, url } => vec![s.string("fetched")?, s.number(id as f64), s.string("resp")?, s.number(f64::from(status)), s.string(&status_text)?, s.string(&headers)?, s.new_uint8_array(body)?, s.string(&url)?],
+                    },
                     ToClient::Msg { from, origin, mut data } => {
                         let bytes = 16usize.saturating_add(data.cost());
                         let got = dom.receive_clone(s, &mut data)?;
@@ -463,7 +566,7 @@ impl<E: Eng> Browser<E> {
             let snaps = hub.borrow().snaps_of(ver);
             let Some((reg, me)) = snaps else { continue };
             let client = match &ev.kind {
-                EvKind::Message { client, .. } => hub.borrow().client(*client).map(|c| (c.uuid.clone(), c.url.clone(), c.nested, c.hidden)),
+                EvKind::Message { client, .. } | EvKind::Fetch { client, .. } => hub.borrow().client(*client).map(|c| (c.uuid.clone(), c.url.clone(), c.nested, c.hidden)),
                 _ => None,
             };
                 let r = self.it.host_scope_o(|it| {
@@ -491,6 +594,23 @@ impl<E: Eng> Browser<E> {
                             };
                             args.push(c);
                             "message"
+                        }
+                        EvKind::Note { click, note, action } => {
+                            let n = crate::browser_notification::persistent(&dom, s, &note)?;
+                            args.push(n);
+                            args.push(s.string(&action)?);
+                            if click { "notificationclick" } else { "notificationclose" }
+                        }
+                        EvKind::Fetch { req, .. } => {
+                            let body = match req.body {
+                                Some(b) => s.new_uint8_array(b)?,
+                                None => s.null(),
+                            };
+                            let items = [s.string(&req.url)?, s.string(&req.method)?, s.string(&req.headers)?, body, s.string(&req.mode)?, s.string(&req.credentials)?, s.string(&req.redirect)?, s.number(req.id as f64)];
+                            args.push(s.new_array(&items)?);
+                            let uuid = client.as_ref().map_or(String::new(), |c| c.0.clone());
+                            args.push(s.string(&uuid)?);
+                            "fetch"
                         }
                     };
                     args[1] = s.string(kind)?;
@@ -551,9 +671,13 @@ pub(crate) fn worker_doc<E: Eng>(d: &Dom<E>, ver: u64) -> Result<(String, String
     Ok((v.url.clone(), EMPTY.to_string(), Some(v.text.to_string())))
 }
 
-/// The script of `ver` ran in its new worker page (`ok`: no throw).
-pub(crate) fn evaluated<E: Eng>(d: &Dom<E>, ver: u64, ok: bool) {
-    hub_of(d).borrow_mut().evaluated(ver, ok);
+/// The script of `ver` ran in its new worker page `b` (`ok`: no throw). The hub notes whether it added a `fetch` listener.
+pub(crate) fn evaluated<E: Eng>(d: &Dom<E>, b: &Browser<E>, ver: u64, ok: bool) {
+    let has = b.dom.st.borrow().listeners.get(&Target::Window).is_some_and(|l| l.iter().any(|l| &*l.ty == "fetch"));
+    let hub = hub_of(d);
+    let mut h = hub.borrow_mut();
+    h.set_has_fetch(ver, has);
+    h.evaluated(ver, ok);
 }
 
 /// After a turn of the worker page `b` of `ver`: move the events that ended to the hub, at `now` on the clock of the host. Gives true

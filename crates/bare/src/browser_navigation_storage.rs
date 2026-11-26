@@ -95,6 +95,8 @@ pub struct StorageState {
     pub permissions: Vec<(String, String, Permission)>,
     /// The service worker registrations with an active worker (`sw_hub.rs`).
     pub service_workers: Vec<crate::sw_hub::SavedReg>,
+    /// The Cache API caches of each origin (`cache_store.rs`).
+    pub caches: Vec<crate::cache_store::SavedCache>,
 }
 
 /// The `localStorage` and `sessionStorage` data of all origins. Clones share the data.
@@ -111,6 +113,8 @@ pub struct WebStorage {
     perms: Rc<RefCell<Perms>>,
     /// The service workers of the session (`sw_hub.rs`). A new tab shares them.
     sw: Rc<RefCell<crate::sw_hub::Hub>>,
+    /// The Cache API caches of each origin (`cache_store.rs`). A new tab and a worker thread share them.
+    caches: Arc<Mutex<crate::cache_store::Caches>>,
     lim: StorageLimits,
 }
 
@@ -139,13 +143,14 @@ struct Idbs {
 /// The `indexedDB` stores of a session, sent to a worker thread (`WebStorage::idb_share`).
 pub(crate) struct IdbShare {
     idb: Arc<Mutex<Idbs>>,
+    caches: Arc<Mutex<crate::cache_store::Caches>>,
     lim: StorageLimits,
 }
 
 impl IdbShare {
     /// The storage of a worker thread: the `indexedDB` stores of the session, and its own empty `localStorage` and cookie jar.
     pub(crate) fn storage(self) -> WebStorage {
-        WebStorage { idb: self.idb, ..WebStorage::new(self.lim) }
+        WebStorage { idb: self.idb, caches: self.caches, ..WebStorage::new(self.lim) }
     }
 }
 
@@ -157,17 +162,22 @@ impl Default for WebStorage {
 
 impl WebStorage {
     pub fn new(lim: StorageLimits) -> WebStorage {
-        WebStorage { local: Default::default(), session: Default::default(), cookies: Default::default(), idb: Default::default(), perms: Default::default(), sw: Default::default(), lim }
+        WebStorage { local: Default::default(), session: Default::default(), cookies: Default::default(), idb: Default::default(), perms: Default::default(), sw: Default::default(), caches: Default::default(), lim }
     }
 
     /// The same `localStorage` data with a new, empty `sessionStorage` (a new tab).
     pub fn new_session(&self) -> WebStorage {
-        WebStorage { local: self.local.clone(), session: Default::default(), cookies: self.cookies.clone(), idb: self.idb.clone(), perms: self.perms.clone(), sw: self.sw.clone(), lim: self.lim }
+        WebStorage { local: self.local.clone(), session: Default::default(), cookies: self.cookies.clone(), idb: self.idb.clone(), perms: self.perms.clone(), sw: self.sw.clone(), caches: self.caches.clone(), lim: self.lim }
     }
 
     /// The service workers of this session.
     pub(crate) fn sw_hub(&self) -> Rc<RefCell<crate::sw_hub::Hub>> {
         self.sw.clone()
+    }
+
+    /// The Cache API caches of this session.
+    pub(crate) fn caches(&self) -> std::sync::MutexGuard<'_, crate::cache_store::Caches> {
+        self.caches.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// The revision of the saved service worker registrations: it moves at each change.
@@ -177,7 +187,7 @@ impl WebStorage {
 
     /// The `indexedDB` stores of this session, for a worker on another thread (`WebStorage` is not `Send`).
     pub(crate) fn idb_share(&self) -> IdbShare {
-        IdbShare { idb: self.idb.clone(), lim: self.lim }
+        IdbShare { idb: self.idb.clone(), caches: self.caches.clone(), lim: self.lim }
     }
 
     /// The `indexedDB` store of `origin`, made when it is new.
@@ -324,7 +334,7 @@ impl WebStorage {
 
     /// A copy of the cookies (an expired one is skipped) and of both storage areas. Origins are sorted.
     pub fn export(&self) -> StorageState {
-        StorageState { cookies: self.export_cookies(), local: self.export_area(false), session: self.export_area(true), permissions: self.export_permissions(), service_workers: self.sw.borrow().export() }
+        StorageState { cookies: self.export_cookies(), local: self.export_area(false), session: self.export_area(true), permissions: self.export_permissions(), service_workers: self.sw.borrow().export(), caches: self.caches().export() }
     }
 
     /// The cookies of `export`.
@@ -372,6 +382,7 @@ impl WebStorage {
             self.set_permission(origin, name, Some(*v));
         }
         self.sw.borrow_mut().import(&st.service_workers);
+        self.caches().import(&st.caches);
         for (session, list) in [(false, &st.local), (true, &st.session)] {
             for (origin, items) in list {
                 for (k, v) in items {

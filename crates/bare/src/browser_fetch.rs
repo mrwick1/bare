@@ -2158,6 +2158,9 @@ pub(crate) fn gate_reader_closed<'s, E: Eng>(_: &Dom<E>, _: &mut Sc<'s, E>, _: L
 
 pub(crate) fn fetch<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let (input, init) = (arg_s::<E>(s, a, 0), arg_s::<E>(s, a, 1));
+    if crate::browser_sw::intercepts(d) {
+        return crate::browser_sw::fetch(d, s, input, init);
+    }
     let args = [s.engine().raw(input), s.engine().raw(init)];
     old_v::<E>(s, |it| fetch_args(d, it, &args))
 }

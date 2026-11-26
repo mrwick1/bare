@@ -1058,8 +1058,10 @@ impl Server {
             "list" | "wait" => return self.note_list(args, op == "wait"),
             "click" | "close" => {
                 let id = args.get("id").and_then(Value::as_u64).ok_or(format!("op {op} needs id (a number from list)"))?;
+                let action = args.get("action").and_then(Value::as_str).unwrap_or("").to_string();
                 let live = self.live_mut(args)?;
-                return match live.session.act_on_notification(id, op == "close")? {
+                return match live.session.act_on_notification(id, op == "close", action.clone())? {
+                    None if !action.is_empty() => Err(format!("no live notification #{id} with action {action:?}: call notifications to see the list")),
                     None => Err(format!("no live notification #{id}: call notifications to see the list")),
                     Some(true) => Ok(format!("clicked #{id}: the page cancelled the click")),
                     Some(false) if op == "click" => Ok(format!("clicked #{id}")),
@@ -1108,7 +1110,10 @@ impl Server {
                 k => format!("{k} #{} {} {}{}", e.id, q(&e.title), q(&e.body), if e.tag.is_empty() { String::new() } else { format!(" tag={}", q(&e.tag)) }),
             })
             .collect();
-        out.extend(list.iter().map(|n| format!("live #{} {} {} {}", n.id, q(&n.title), q(&n.body), n.origin)));
+        out.extend(list.iter().map(|n| {
+            let actions: String = n.actions.iter().map(|a| format!(" action={}:{}", q(&a.action), q(&a.title))).collect();
+            format!("live #{} {} {} {}{actions}", n.id, q(&n.title), q(&n.body), n.origin)
+        }));
         Ok(live.red.clean(&if out.is_empty() { "no notification events and no live notifications".to_string() } else { out.join("\n") }))
     }
 
@@ -1852,8 +1857,8 @@ fn tools() -> Value {
         },
         {
             "name": "notifications",
-            "description": "Web notifications of the live page (new Notification). op list (default): the events since the last list or wait (shown, replaced, closed, clicked, permission-requested), then the live notifications, one line each with #id, title and body. op wait: the same, at the first new event; timeout_ms (default 30000). op click id=N: the user clicks it (a trusted click; the page usually focuses its chat). op close id=N: the user closes it. op grant, deny or reset: the notification permission of origin (default: the origin of the page). With no decision a page sees \"denied\". A profile keeps the decision. A page reads the permission when it asks: reload it or use its own \"turn on\" link after a grant. An act receipt names each new notification. op background on=true (default) or on=false: the page goes to the background (as another tab in front: visibilityState hidden, hasFocus false, blur and visibilitychange; timers run at whole seconds, network messages are not delayed) or comes back. Many chat pages notify only when hidden. A click on a notification that the page does not cancel brings it back. A new document starts in front.",
-            "inputSchema": {"type": "object", "properties": {"session": S, "op": {"type": "string", "enum": ["list", "wait", "click", "close", "grant", "deny", "reset", "background"]}, "id": {"type": "integer"}, "origin": {"type": "string"}, "timeout_ms": {"type": "integer"}, "on": {"type": "boolean"}}},
+            "description": "Web notifications of the live page (new Notification). op list (default): the events since the last list or wait (shown, replaced, closed, clicked, permission-requested), then the live notifications, one line each with #id, title and body. op wait: the same, at the first new event; timeout_ms (default 30000). op click id=N: the user clicks it (a trusted click; the page usually focuses its chat). A service worker notification (registration.showNotification) is in the same list; its buttons show as action=\"name\":\"title\", and op click id=N action=name clicks a button. Its click or close runs notificationclick or notificationclose in the service worker. op close id=N: the user closes it. op grant, deny or reset: the notification permission of origin (default: the origin of the page). With no decision a page sees \"denied\". A profile keeps the decision. A page reads the permission when it asks: reload it or use its own \"turn on\" link after a grant. An act receipt names each new notification. op background on=true (default) or on=false: the page goes to the background (as another tab in front: visibilityState hidden, hasFocus false, blur and visibilitychange; timers run at whole seconds, network messages are not delayed) or comes back. Many chat pages notify only when hidden. A click on a notification that the page does not cancel brings it back. A new document starts in front.",
+            "inputSchema": {"type": "object", "properties": {"session": S, "op": {"type": "string", "enum": ["list", "wait", "click", "close", "grant", "deny", "reset", "background"]}, "id": {"type": "integer"}, "action": {"type": "string"}, "origin": {"type": "string"}, "timeout_ms": {"type": "integer"}, "on": {"type": "boolean"}}},
         },
         {
             "name": "console",
