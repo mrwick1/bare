@@ -1002,6 +1002,7 @@ impl<'a> Fc<'a> {
         code.tables = self.tables;
         code.sites = self.sites;
         code.roots = roots;
+        code.shrink();
         Ok(Compiled { code, children: self.children, strict: self.strict, unsupported: self.unsupported, inline: self.inline })
     }
 }
