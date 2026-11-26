@@ -1,4 +1,4 @@
-//! Web APIs that are written in JavaScript and made at the first read of one of their names: `Element.prototype.animate` and `Animation`
+//! Web APIs that are written in JavaScript and made at the first read of one of their names: `Element.prototype.animate`, `getAnimations` and `Animation`
 //! (`shims/animation.js`), `Path2D` (`shims/path2d.js`), `indexedDB` and the `IDB*` interfaces (`shims/idb.js`), `EventSource` (`shims/eventsource.js`),
 //! `WebSocket` and `CloseEvent` (`shims/websocket.js`, the network side in `browser_websocket.rs`), `FileReader` (`shims/filereader.js`),
 //! `FileReaderSync` (`shims/filereadersync.js`, in a worker only),
@@ -22,7 +22,7 @@ use bare_js_api::{Args, HostFn, Local, Type};
 
 /// `(names that ask for it, the global that the source defines first, source)`.
 const SHIMS: [(&[&str], &str, &str); 12] = [
-    (&["animate", "Animation"], "Animation", include_str!("shims/animation.js")),
+    (&["animate", "Animation", "getAnimations"], "Animation", include_str!("shims/animation.js")),
     (&["Path2D"], "Path2D", include_str!("shims/path2d.js")),
     (&["EventSource"], "EventSource", include_str!("shims/eventsource.js")),
     (&["WebSocket", "CloseEvent"], "WebSocket", include_str!("shims/websocket.js")),

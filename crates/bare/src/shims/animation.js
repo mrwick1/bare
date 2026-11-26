@@ -1,5 +1,6 @@
-// `Animation` and `Element.prototype.animate`: no timeline, no effect. An animation that plays ends at once (one timer), so
-// `finished` resolves and `onfinish` runs. Made at the first read of `Animation` or `animate` (`browser_shims.rs`).
+// `Animation`, `Element.prototype.animate` and `getAnimations`: no timeline, no effect. An animation that plays ends at once (one timer), so
+// `finished` resolves and `onfinish` runs. `getAnimations` gives an empty list: CSS transitions are not `Animation` objects here.
+// Made at the first read of `Animation`, `animate` or `getAnimations` (`browser_shims.rs`).
 (function () {
   'use strict';
   var S = new WeakMap(), P = Promise;
@@ -120,5 +121,8 @@
       return a;
     },
     writable: true, enumerable: true, configurable: true
+  });
+  [Element.prototype, Document.prototype].forEach(function (o) {
+    Object.defineProperty(o, 'getAnimations', { value: function getAnimations() { return []; }, writable: true, enumerable: true, configurable: true });
   });
 })();
