@@ -490,6 +490,8 @@ mod browser_worker_run_tests;
 #[cfg(test)]
 mod browser_worker_port_transfer_tests;
 #[cfg(test)]
+mod browser_script_names_tests;
+#[cfg(test)]
 mod browser_worker_scope_tests;
 #[cfg(test)]
 mod browser_worker_import_tests;

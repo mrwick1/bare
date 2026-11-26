@@ -2168,10 +2168,15 @@ impl<E: Eng> Browser<E> {
     }
 
     pub fn run_script(&mut self, source: &str) -> R<E, E::Raw> {
+        self.run_script_named(source, "")
+    }
+
+    /// [`Browser::run_script`] for a script with a URL: its stack frames show `name` (empty: `<anonymous>`).
+    pub fn run_script_named(&mut self, source: &str, name: &str) -> R<E, E::Raw> {
         let mut ids = bare_observe::process::context();
         ids.document = self.observe_document;
         let _context = bare_observe::process::enter(ids);
-        let r = self.it.run_script_o(source);
+        let r = if name.is_empty() { self.it.run_script_o(source) } else { self.it.run_script_named_o(source, name) };
         self.observe_stats();
         // `BARE_RECLAIM_STRESS=1 cargo test`: collect and reclaim after each script, freed nodes poisoned (`browser_reclaim.rs`).
         #[cfg(test)]
