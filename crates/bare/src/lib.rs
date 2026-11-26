@@ -233,7 +233,7 @@ mod browser_worker;
 mod browser_sw;
 mod sw_hub;
 mod browser_notification;
-pub use browser_notification::{NotificationEvent, NotificationInfo};
+pub use browser_notification::{NotificationAction, NotificationEvent, NotificationInfo};
 pub use sw_hub::SavedReg;
 mod browser_wasm;
 #[cfg(test)]
@@ -511,6 +511,8 @@ mod browser_sw_register_tests;
 mod browser_sw_lifecycle_tests;
 #[cfg(test)]
 mod browser_sw_message_tests;
+#[cfg(test)]
+mod browser_sw_notification_tests;
 #[cfg(test)]
 mod browser_background_tests;
 #[cfg(test)]

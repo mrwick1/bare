@@ -201,6 +201,7 @@ fwd_try! {
     (&mut) fn restyle() -> Rc<Styles>;
     (&mut) fn set_viewport(width: f32, height: f32) -> usize;
     (&mut) fn click_notification(id: u64) -> Option<bool>;
+    (&mut) fn click_notification_action(id: u64, action: &str) -> Option<bool>;
     (&mut) fn set_background(on: bool) -> ();
     (&mut) fn close_notification(id: u64) -> bool;
     (&mut) fn set_permission(origin: &str, name: &str, to: Option<crate::browser_navigation::Permission>) -> usize;

@@ -574,12 +574,12 @@ impl Session {
         self.host.run(|p| p.browser().map(|b| b.notifications())).ok().flatten().unwrap_or_default()
     }
 
-    /// The user clicks (`close` false) or closes the live notification `id`. `Ok(None)`: no live notification `id`. A click gives
-    /// whether the page cancelled it.
-    pub fn act_on_notification(&mut self, id: u64, close: bool) -> Result<Option<bool>, String> {
+    /// The user clicks (`close` false) or closes the live notification `id`. A click with `action` clicks that button of a service
+    /// worker notification. `Ok(None)`: no live notification `id` (or no such button). A click gives whether the page cancelled it.
+    pub fn act_on_notification(&mut self, id: u64, close: bool, action: String) -> Result<Option<bool>, String> {
         self.host.run(move |p| {
             let Some(b) = p.browser() else { return Err(p.no_document()) };
-            let r = if close { b.close_notification(id).map(|ok| ok.then_some(false)) } else { b.click_notification(id) };
+            let r = if close { b.close_notification(id).map(|ok| ok.then_some(false)) } else { b.click_notification_action(id, &action) };
             let r = r.map_err(|e| format!("{e:?}"));
             p.touched();
             r

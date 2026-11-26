@@ -16,7 +16,10 @@
 //!   active version, when the active one controls no client, or after `skipWaiting()`. Then `activate` runs.
 //! - A page that a registration does not control pays nothing: `has_regs` is one length check.
 
+use crate::browser_notification::{NotificationAction, NotificationEvent, NotificationInfo};
 use bare_js_api::Cloned;
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 /// A worker with no event in flight stops after this time (ms of the host page clock), as in Chrome.
@@ -114,6 +117,8 @@ pub(crate) enum ToClient {
     Ctrl(Option<WSnap>),
     /// A message from a worker.
     Msg { from: WSnap, origin: String, data: Cloned },
+    /// `WindowClient.focus()` in a `notificationclick`: the page comes to the front.
+    Focus,
 }
 
 pub(crate) struct Client {
@@ -135,6 +140,35 @@ pub(crate) enum EvKind {
     Install,
     Activate,
     Message { client: u64, data: Cloned },
+    /// The user clicked (`click`, with the `action` button or "") or closed a notification of the registration.
+    Note { click: bool, note: Rc<PNote>, action: String },
+}
+
+/// A notification of a registration (`showNotification`). It lives in the session until a close.
+pub(crate) struct PNote {
+    pub id: u64,
+    pub reg: u64,
+    pub origin: String,
+    pub title: String,
+    pub body: String,
+    pub tag: String,
+    pub icon: String,
+    pub badge: String,
+    pub lang: String,
+    pub dir: &'static str,
+    pub silent: Option<bool>,
+    pub renotify: bool,
+    pub require: bool,
+    pub timestamp: f64,
+    pub actions: Vec<NotificationAction>,
+    /// The structured clone of `options.data` with no transfer, so it can be read again; `None` for null.
+    pub data: Option<RefCell<Cloned>>,
+}
+
+impl PNote {
+    fn event(&self, kind: &'static str) -> NotificationEvent {
+        NotificationEvent { kind, id: self.id, origin: self.origin.clone(), title: self.title.clone(), body: self.body.clone(), tag: self.tag.clone(), at_ms: self.timestamp }
+    }
 }
 
 pub(crate) struct Ev {
@@ -203,6 +237,12 @@ pub(crate) struct Hub {
     next: u64,
     /// Moves when what the profile keeps changes.
     pub rev: u64,
+    /// The live notifications of the registrations, oldest first.
+    notes: Vec<Rc<PNote>>,
+    /// The event log of those notifications, drained per origin by an agent.
+    log: Vec<NotificationEvent>,
+    /// The id of the last notification of the session: a page notification and a registration notification share the numbers.
+    note_last: u64,
 }
 
 /// The origin of a URL: `scheme://host[:port]`.
@@ -470,6 +510,9 @@ impl Hub {
     /// Remove registration `i`: each of its versions becomes redundant.
     fn clear(&mut self, i: usize) {
         let mut r = self.regs.remove(i);
+        let (gone, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut self.notes).into_iter().partition(|n| n.reg == r.id);
+        self.notes = keep;
+        self.log.extend(gone.iter().map(|n| n.event("closed")));
         let vs: Vec<Ver> = [r.installing.take(), r.waiting.take(), r.active.take()].into_iter().flatten().collect();
         for v in vs {
             self.push_state(&r.origin, v.id, St::Redundant);
@@ -666,6 +709,105 @@ impl Hub {
         let origin = c.origin.clone();
         c.inbox.push(ToClient::Msg { from, origin, data });
         Ok(())
+    }
+
+    // ------------------------------------------------------------------------------------------ notifications
+
+    /// The id of a new notification of the session.
+    pub(crate) fn note_id(&mut self) -> u64 {
+        self.note_last += 1;
+        self.note_last
+    }
+
+    /// Does registration `reg` have an active version?
+    pub(crate) fn has_active(&self, reg: u64) -> bool {
+        self.regs.iter().any(|r| r.id == reg && r.active.is_some())
+    }
+
+    /// Show `n` (its id from `note_id`). A live notification of the origin with the same tag leaves with no event ("replaced").
+    pub(crate) fn show_note(&mut self, n: PNote) {
+        if !n.tag.is_empty()
+            && let Some(i) = self.notes.iter().position(|o| o.origin == n.origin && o.tag == n.tag)
+        {
+            let old = self.notes.remove(i);
+            self.log.push(old.event("replaced"));
+        }
+        self.log.push(n.event("shown"));
+        self.notes.push(Rc::new(n));
+    }
+
+    /// The live notifications of registration `reg` with tag `tag` (all with ""), oldest first.
+    pub(crate) fn notes_of(&self, reg: u64, tag: &str) -> Vec<Rc<PNote>> {
+        self.notes.iter().filter(|n| n.reg == reg && (tag.is_empty() || n.tag == tag)).cloned().collect()
+    }
+
+    /// Take the live notification `id` of `origin` out of the list and log "closed".
+    fn take_note(&mut self, id: u64, origin: &str) -> Option<Rc<PNote>> {
+        let i = self.notes.iter().position(|n| n.id == id && n.origin == origin)?;
+        let n = self.notes.remove(i);
+        self.log.push(n.event("closed"));
+        Some(n)
+    }
+
+    /// `close()` of a notification object: no event.
+    pub(crate) fn close_note(&mut self, id: u64, origin: &str) {
+        self.take_note(id, origin);
+    }
+
+    /// The user clicks the live notification `id` of `origin`, on the button `action` ("" for the notification). The active worker
+    /// of its registration gets `notificationclick`. False when no such notification or button.
+    pub(crate) fn click_note(&mut self, id: u64, origin: &str, action: &str) -> bool {
+        let Some(n) = self.notes.iter().find(|n| n.id == id && n.origin == origin).cloned() else { return false };
+        if !action.is_empty() && !n.actions.iter().any(|a| a.action == action) {
+            return false;
+        }
+        self.log.push(n.event("clicked"));
+        self.note_event(n, true, action.to_string());
+        true
+    }
+
+    /// The user closes the live notification `id` of `origin`: it leaves, and the worker gets `notificationclose`.
+    pub(crate) fn user_close_note(&mut self, id: u64, origin: &str) -> bool {
+        let Some(n) = self.take_note(id, origin) else { return false };
+        self.note_event(n, false, String::new());
+        true
+    }
+
+    fn note_event(&mut self, note: Rc<PNote>, click: bool, action: String) {
+        let Some(ver) = self.regs.iter().find(|r| r.id == note.reg).and_then(|r| r.active.as_ref()).map(|v| v.id) else { return };
+        let id = self.id();
+        self.events.push(Ev { id, ver, kind: EvKind::Note { click, note, action } });
+    }
+
+    /// The live notifications of `origin`, as an agent sees them.
+    pub(crate) fn note_infos(&self, origin: &str) -> Vec<NotificationInfo> {
+        self.notes
+            .iter()
+            .filter(|n| n.origin == origin)
+            .map(|n| NotificationInfo { id: n.id, origin: n.origin.clone(), title: n.title.clone(), body: n.body.clone(), tag: n.tag.clone(), icon: n.icon.clone(), silent: n.silent == Some(true), at_ms: n.timestamp, actions: n.actions.clone() })
+            .collect()
+    }
+
+    /// Drain the event log entries of `origin`.
+    pub(crate) fn take_log(&mut self, origin: &str) -> Vec<NotificationEvent> {
+        if self.log.is_empty() {
+            return Vec::new();
+        }
+        let (mine, rest) = std::mem::take(&mut self.log).into_iter().partition(|e| e.origin == origin);
+        self.log = rest;
+        mine
+    }
+
+    pub(crate) fn log_count(&self, origin: &str) -> usize {
+        self.log.iter().filter(|e| e.origin == origin).count()
+    }
+
+    /// `WindowClient.focus()` of the client `uuid`: its page comes to the front at its next turn. False when no such client.
+    pub(crate) fn focus(&mut self, uuid: &str) -> bool {
+        let Some(c) = self.clients.iter_mut().find(|c| c.uuid == uuid) else { return false };
+        c.hidden = false;
+        c.inbox.push(ToClient::Focus);
+        true
     }
 
     // ------------------------------------------------------------------------------------------ the profile
