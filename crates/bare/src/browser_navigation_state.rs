@@ -68,7 +68,8 @@ impl<E: Eng> CloneHost<E::Vm> for BrowserClone<'_, E> {
     }
 
     fn data_clone_error<'s>(&mut self, s: &mut Scope<'s, E::Vm>, what: Refused) -> bare_js_api::Error<'s> {
-        let what = match what {
+        let what = match &what {
+            Refused::Named(name) => name,
             Refused::Function => "A function",
             Refused::Symbol => "Symbol",
             Refused::Object => "An object",

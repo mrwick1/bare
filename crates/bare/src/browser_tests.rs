@@ -246,9 +246,9 @@ fn utf16_round_trips_and_lone_surrogates_are_gated() {
         assert!(b.document().borrow().dump().contains("\"a\u{1F600}b\""));
         assert_eq!(js(&mut b, "document.body.lastChild.data === 'a\\ud83d\\ude00b'"), "true");
         // a lone surrogate would be changed to U+FFFD by UTF-8: it is refused, not changed
-        assert_eq!(js(&mut b, "document.createTextNode('\\ud83d')"), "unsupported:lone surrogate in a DOM string (the native document is UTF-8)");
-        assert_eq!(js(&mut b, "document.body.setAttribute('x', 'a\\ude00')"), "unsupported:lone surrogate in a DOM string (the native document is UTF-8)");
-        assert_eq!(js(&mut b, "document.body.textContent = '\\ud800'"), "unsupported:lone surrogate in a DOM string (the native document is UTF-8)");
+        assert_eq!(js(&mut b, "document.createTextNode('\\ud83d')"), "throw:NotSupportedError:lone surrogate in a DOM string (the native document is UTF-8)");
+        assert_eq!(js(&mut b, "document.body.setAttribute('x', 'a\\ude00')"), "throw:NotSupportedError:lone surrogate in a DOM string (the native document is UTF-8)");
+        assert_eq!(js(&mut b, "document.body.textContent = '\\ud800'"), "throw:NotSupportedError:lone surrogate in a DOM string (the native document is UTF-8)");
         // the failed set changed nothing
         assert!(b.document().borrow().dump().contains("\"a\u{1F600}b\""));
     });
@@ -260,8 +260,8 @@ fn create_element_ns_is_gated() {
         let mut b = browser();
         assert_eq!(js(&mut b, "document.createElementNS('http://www.w3.org/1999/xhtml', 'section').tagName"), "SECTION");
         assert_eq!(js(&mut b, "document.createElementNS('http://www.w3.org/2000/svg', 'svg').namespaceURI"), "http://www.w3.org/2000/svg");
-        assert_eq!(js(&mut b, "document.createElementNS(null, 'x')"), "unsupported:createElementNS with a null namespace");
-        assert_eq!(js(&mut b, "document.createElementNS('http://www.w3.org/1999/xhtml', 'x:y')"), "unsupported:createElementNS in the HTML namespace with a prefix or capital letters (names are lowercase in the native document)");
+        assert_eq!(js(&mut b, "document.createElementNS(null, 'x')"), "throw:NotSupportedError:createElementNS with a null namespace");
+        assert_eq!(js(&mut b, "document.createElementNS('http://www.w3.org/1999/xhtml', 'x:y')"), "throw:NotSupportedError:createElementNS in the HTML namespace with a prefix or capital letters (names are lowercase in the native document)");
         assert_eq!(js(&mut b, "[typeof document.createDocumentFragment, typeof document.body.innerHTML, typeof document.body.classList, typeof document.body.namespaceURI, typeof document.getElementsByTagName].join()"), "function,string,object,string,function");
     });
 }
@@ -392,7 +392,7 @@ fn listener_exceptions_are_reported_and_dispatch_continues() {
         assert_eq!(js(&mut b, "var ev = new Event('ok'); s.dispatchEvent(ev); s.dispatchEvent(ev)"), "true");
         // an Unsupported thing in a listener stops dispatch too
         js(&mut b, "s.addEventListener('uns', function () { document.createElementNS('x', 'y') }); s.addEventListener('uns', L('never2'));");
-        assert_eq!(js(&mut b, "s.dispatchEvent(new Event('uns')); log.join()"), "unsupported:createElementNS with a namespace other than HTML, SVG or MathML");
+        assert_eq!(js(&mut b, "s.dispatchEvent(new Event('uns')); log.join()"), "throw:NotSupportedError:createElementNS with a namespace other than HTML, SVG or MathML");
         // reports are capped; the oldest is dropped and counted
         let mut small = browser_with(PAGE, BrowserLimits { max_reports: 3, ..Default::default() });
         js(&mut small, "var s = document.getElementById('s'); s.addEventListener('t', function () { throw 1 });");
@@ -1165,7 +1165,7 @@ fn cssom_does_not_expose_flattened_imports() {
             crate::browser_computed::SheetPart { text: "p { color: red }".into(), layer: None },
             crate::browser_computed::SheetPart { text: "div { color: blue }".into(), layer: None },
         ]).unwrap();
-        assert!(js(&mut b,"document.styleSheets[0].cssRules.length").starts_with("unsupported:CSSOM of flattened imported sheets"));
+        assert!(js(&mut b,"document.styleSheets[0].cssRules.length").starts_with("throw:NotSupportedError:CSSOM of flattened imported sheets"));
     });
 }
 

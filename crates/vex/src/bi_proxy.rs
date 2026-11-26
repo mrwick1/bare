@@ -52,6 +52,11 @@ impl Realm {
         base
     }
 
+    /// The target of a proxy, or `None` for a revoked proxy. It makes no error object.
+    pub(crate) fn proxy_target_raw(&self, proxy: Obj) -> Option<Obj> {
+        Self::obj(proxy.slot(&self.shapes, TARGET))
+    }
+
     pub(crate) fn proxy_target(&mut self, proxy: Obj) -> R<Obj> {
         Self::obj(proxy.slot(&self.shapes, TARGET)).ok_or_else(|| self.error(ErrKind::Type, "Proxy has been revoked"))
     }

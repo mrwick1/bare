@@ -178,11 +178,11 @@ fn an_unconfigured_browser_refuses_the_network() {
         let srv = serve(|_| ok("{}"));
         let mut b = Browser::new(tree::parse("<body></body>"), BrowserLimits::default(), EvalLimits::default(), HeapLimits::default()).unwrap();
         let r = js(&mut b, &format!("fetch('http://127.0.0.1:{}/x')", srv.port));
-        assert_eq!(r, "unsupported:fetch without a configured document origin (Browser::configure_fetch)");
+        assert_eq!(r, "throw:NotSupportedError:fetch without a configured document origin (Browser::configure_fetch)");
         assert_eq!(js(&mut b, "typeof Headers + typeof Request + typeof Response + typeof fetch"), "functionfunctionfunctionfunction");
         // A configured browser with no base URL is the same.
         let mut b = mk(None, FetchLimits::default());
-        assert!(js(&mut b, &format!("fetch('http://127.0.0.1:{}/x')", srv.port)).starts_with("unsupported:fetch without"));
+        assert!(js(&mut b, &format!("fetch('http://127.0.0.1:{}/x')", srv.port)).starts_with("throw:NotSupportedError:fetch without"));
         assert_eq!(b.pending_fetches(), 0);
         assert!(b.take_fetch_diagnostics().iter().any(|d| d.contains("no document origin")));
         assert_eq!(srv.recs().len(), 0);
@@ -233,7 +233,6 @@ fn post_json_sends_exact_bytes_and_engine_made_framing() {
 }
 
 #[test]
-#[ignore = "vex: left: ([48, 44, 50, 53, 53, 44, 49, 48], 'POST', ['text/plain;charset=UTF-8'])"]
 fn bytes_and_string_bodies_get_the_right_content_type() {
     big(|| {
         let srv = serve(|_| ok("{}"));
@@ -284,7 +283,7 @@ fn headers_follow_the_standard() {
         assert_eq!(js(&mut b, "new Headers().append('bad name', 'x')"), "throw:TypeError:Invalid header name");
         assert_eq!(js(&mut b, "new Headers().append('x', 'a\\nb')"), "throw:TypeError:Invalid header value");
         assert_eq!(js(&mut b, "new Headers().append('x', '\\u0100')"), "throw:TypeError:Invalid header value");
-        assert!(js(&mut b, "new Headers().append('x', '\\u00e9')").starts_with("unsupported:non-ASCII"));
+        assert!(js(&mut b, "new Headers().append('x', '\\u00e9')").starts_with("throw:NotSupportedError:non-ASCII"));
         assert_eq!(js(&mut b, "new Headers([['a']])"), "throw:TypeError:Invalid header pair: a header is [name, value]");
         assert_eq!(js(&mut b, "new Headers('abc')"), "throw:TypeError:Headers init is not an object or a sequence");
         assert_eq!(js(&mut b, "new Headers(null)"), "throw:TypeError:Failed to construct 'Headers': The provided value is not of type 'HeadersInit'");
@@ -402,7 +401,7 @@ fn response_constructor_request_and_clone() {
             // Stream gates are fatal for that layer. Check each independent gate in its own realm.
             let mut gate_browser = at(1);
             let r = js(&mut gate_browser, src);
-            assert_eq!(r, format!("unsupported:{what}"), "{src}");
+            assert_eq!(r, format!("throw:NotSupportedError:{what}"), "{src}");
         }
         assert_eq!(js(&mut b, "new Request('/x', {signal: {}})"), "throw:TypeError:Failed to construct 'Request': Failed to read the 'signal' property from 'RequestInit': Failed to convert value to 'AbortSignal'.");
         assert_eq!(js(&mut b, "new Request('/x', {body: {getReader: function () {}}, method: 'POST'})"), "throw:TypeError:Failed to construct 'Request': a ReadableStream body is not supported. bare sends a request body in one piece: pass a string, Blob, ArrayBuffer or FormData.");
@@ -820,7 +819,7 @@ fn headers_iterate_through_the_shared_engine() {
         assert_eq!(js(&mut b, "var o = {k: 'v'}; Object.defineProperty(o, S, {value: undefined}); JSON.stringify([...new Headers(o)])"), r#"[["k","v"]]"#, "a hidden symbol key is skipped");
         assert_eq!(js(&mut b, "var o2 = {k: 'v'}; o2[S] = undefined; new Headers(o2)"), "throw:TypeError:Cannot convert a Symbol value to a string");
         assert_eq!(js(&mut b, "new Headers(new Map([['bad name', 'x']]))"), "throw:TypeError:Invalid header name");
-        assert!(js(&mut b, "new Headers(new Map([['x', '\\u00e9']]))").starts_with("unsupported:non-ASCII"));
+        assert!(js(&mut b, "new Headers(new Map([['x', '\\u00e9']]))").starts_with("throw:NotSupportedError:non-ASCII"));
         // WebIDL sequence conversion does not close iterators on errors.
         assert_eq!(js(&mut b, "var closed = 0, inner = 0; var pair = {[S]() { var n = 0; return {next() { return {done: false, value: 'v' + n++}; }, return() { inner++; return {}; }}; }}; try { new Headers({[S]() { return {next() { return {done: false, value: pair}; }, return() { closed++; return {}; }}; }}) } catch (e) { e.name + closed + inner }"), "TypeError00");
         assert_eq!(js(&mut b, "closed = 0; try { new Headers({[S]() { return {next() { return {done: false, value: 'x'}; }, return() { closed++; return {}; }}; }}) } catch (e) { e.name + closed }"), "TypeError0");
@@ -1028,7 +1027,6 @@ fn unescape(s: &str) -> String {
 }
 
 #[test]
-#[ignore = "vex: left: '104,105'"]
 fn bodies_are_the_bytes_that_chrome_sends() {
     big(|| {
         let srv = serve(|_| ok("{}"));
@@ -1076,7 +1074,6 @@ fn each_request_has_a_new_random_boundary() {
 }
 
 #[test]
-#[ignore = "vex: left: 'true|text/plain;charset=UTF-8'"]
 fn request_and_response_take_blob_form_and_params_bodies() {
     big(|| {
         let mut b = at(1);

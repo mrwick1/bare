@@ -138,7 +138,7 @@ fn bad_arguments_are_type_errors() {
         assert!(js(&mut b, "new WritableStreamDefaultController()").starts_with("throw:TypeError"));
         assert!(js(&mut b, "WritableStream.prototype.getWriter.call({})").starts_with("throw:TypeError"));
         // A size function on the readable side is the gate of the host stream.
-        assert_eq!(js(&mut b, "new TransformStream({}, undefined, { size: function () { return 1; } })"), "unsupported:ReadableStream strategy.size (custom queuing strategy)");
+        assert_eq!(js(&mut b, "new TransformStream({}, undefined, { size: function () { return 1; } })"), "throw:NotSupportedError:ReadableStream strategy.size (custom queuing strategy)");
     });
 }
 

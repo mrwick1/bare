@@ -43,11 +43,14 @@ pub struct CloneOpts<'a, 's> {
 }
 
 /// What the engine refuses. The host makes the `DataCloneError` text.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refused {
     Function,
     Symbol,
     Object,
+    /// An object of a kind that does not clone, with Chrome's name for it: `#<Promise>`, `[object Generator]` or `HTMLDivElement
+    /// object`.
+    Named(String),
     DetachedBuffer,
     DetachedTransfer,
 }

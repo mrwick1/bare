@@ -118,6 +118,8 @@ pub mod browser_fetch;
 pub mod browser_console;
 #[cfg(test)]
 mod browser_console_tests;
+#[cfg(test)]
+mod browser_unsupported_throws_tests;
 mod browser_css_ns;
 #[cfg(test)]
 mod browser_css_ns_tests;
@@ -167,6 +169,8 @@ mod browser_navigation_url_colon_tests;
 mod browser_navigation_tests;
 #[cfg(test)]
 mod browser_clone_tests;
+#[cfg(test)]
+mod browser_clone_names_tests;
 #[cfg(test)]
 mod browser_history_state_cap_tests;
 #[cfg(test)]
@@ -470,6 +474,8 @@ mod browser_worker_scope_tests;
 mod browser_worker_import_tests;
 #[cfg(test)]
 mod browser_worker_gc_tests;
+#[cfg(test)]
+mod browser_worker_fetch_upload_tests;
 mod browser_remote_window;
 mod browser_port_hub;
 

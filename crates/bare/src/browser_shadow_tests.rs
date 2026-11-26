@@ -25,6 +25,7 @@ fn browser() -> Browser {
 fn js(b: &mut Browser, src: &str) -> String {
     match b.run_script(src) {
         Ok(v) => b.it.display(v),
+        Err(Error::Throw(v)) if crate::eng_new::is_object(v) && b.it.get_str(v, "name") == "NotSupportedError" => "unsupported".to_string(),
         Err(Error::Throw(v)) if crate::eng_new::is_object(v) => format!("throw:{}:{}", b.it.get_str(v, "name"), b.it.get_str(v, "message")),
         Err(Error::Throw(v)) => format!("throw-value:{}", b.it.display(v)),
         Err(Error::Limit(l)) => format!("limit:{l:?}"),
@@ -249,9 +250,9 @@ fn unsupported_option_values_are_refused_before_anything_changes() {
     {
         let opts = "{mode: 'open', slotAssignment: 'manual'}";
         let before = b.stats().nodes;
-        let out = js(&mut b, &format!("var h = document.createElement('div'); try {{ h.attachShadow({opts}); 'attached' }} catch (e) {{ 'caught' }}"));
-        // `Unsupported` is not a JS exception: `catch` cannot see it, and the run ends with it.
-        assert_eq!(out, "unsupported", "{opts}");
+        let out = js(&mut b, &format!("var h = document.createElement('div'); try {{ h.attachShadow({opts}); 'attached' }} catch (e) {{ e.name }}"));
+        // A gate is a `NotSupportedError` that `catch` sees (`docs/internal/design-unsupported-throws.md`).
+        assert_eq!(out, "NotSupportedError", "{opts}");
         assert_eq!(b.stats().nodes, before + 1, "{opts}: only the host was made");
         assert_eq!(js(&mut b, "h.shadowRoot === null && !('x' in h)"), "true", "{opts}");
         assert_eq!(js(&mut b, "try { h.attachShadow({mode: 'open'}).mode } catch (e) { 'dup' }"), "open", "{opts}: a later valid call still works");
@@ -621,7 +622,7 @@ fn composed_dispatch_that_would_cross_a_root_is_refused_before_any_listener_runs
     }
     // The event is not left dispatching, and an event that stays inside is fine; a composed event from the host (no root crossing) works.
     assert_eq!(js(&mut b, "var e = new Event('c', {composed: true}); host.dispatchEvent(e); [log.join(), e.eventPhase, e.composedPath().length].join()"), "host,0,0");
-    assert_eq!(js(&mut b, "var e2 = new Event('c', {composed: true}); try { leaf.dispatchEvent(e2); } catch (x) {} 1"), "unsupported");
+    assert_eq!(js(&mut b, "var e2 = new Event('c', {composed: true}); try { leaf.dispatchEvent(e2); } catch (x) {} 1"), "1");
 }
 
 #[test]

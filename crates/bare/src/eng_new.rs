@@ -450,6 +450,13 @@ impl Ops<New> for Realm {
     fn api_unerr(&mut self, e: bare_js_api::Error<'_>) -> Fault<New> {
         fault(self, e)
     }
+    fn take_gate(&mut self) -> bool {
+        if matches!(HOST_FAULT.get(), Some(Fault::Heap(_))) {
+            return false;
+        }
+        HOST_FAULT.set(None);
+        true
+    }
     fn h_set_proto(&mut self, o: NV, proto: Option<NV>) -> Result<bool, Fault<New>> {
         run(self, |r| {
             let ol = lc(r, o.0);
@@ -618,9 +625,8 @@ impl Ops<New> for Realm {
         let e = self.iter_fail(it, e);
         fault(self, e)
     }
-    fn bytes_of(&self, _v: Value) -> Option<&[u8]> {
-        // Vex has no ArrayBuffer, TypedArray or DataView cells yet.
-        None
+    fn bytes_of(&self, v: Value) -> Option<&[u8]> {
+        self.value_bytes(v)
     }
     fn set_wall_clock(&mut self, c: WallClock) -> Result<(), Fault<New>> {
         let clock = match c {
