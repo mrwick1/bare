@@ -508,6 +508,8 @@ mod browser_sw_register_tests;
 #[cfg(test)]
 mod browser_sw_lifecycle_tests;
 #[cfg(test)]
+mod browser_sw_message_tests;
+#[cfg(test)]
 mod browser_background_tests;
 #[cfg(test)]
 mod browser_create_document_tests;
