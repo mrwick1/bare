@@ -755,6 +755,12 @@ impl Session {
         // A live session on the real clock takes the body of an HTML document in pieces (`Feed`). On the benchmark clock a document is one task with a
         // due time, so a run does the same work each time (see `vclock.rs`): there the text is never cut by the race of two threads.
         let feed = (self.cfg.live && !bare_net::vclock::on()).then(|| Arc::new(Feed::default()));
+        // A service worker answers: its document is ready at once.
+        if let Some(res) = self.sw_document(&url, body.as_ref()) {
+            let task = self.fork().spawn(move |_| res);
+            self.loading = Some((next, Loading::Task(task)));
+            return SessionResult { stop: SessionStop::Page(Stop::Settled), pages: Vec::new(), urls: Vec::new(), tasks: 0, rounds: 0 };
+        }
         let worker = feed.clone();
         let task = self.fork().spawn(move |c| {
             let mut lost = worker.as_deref().map(|f| Lost(f, false));
@@ -883,6 +889,60 @@ impl Session {
     /// Why the session cannot go on (`run` and `resume` give this stop and run nothing), or `None`.
     pub fn ended(&self) -> Option<&SessionStop> {
         self.used.ended.as_ref()
+    }
+
+    /// A navigation to `url` that a service worker with a `fetch` listener controls: the worker answers it. `None`: the navigation goes
+    /// to the network. One length check when the session has no registration.
+    fn sw_document(&mut self, url: &str, body: Option<&Body>) -> Option<Result<DocumentResponse, String>> {
+        let ver = {
+            let hub = self.store.sw_hub();
+            let h = hub.borrow();
+            if !h.has_regs() {
+                return None;
+            }
+            h.nav_ver(url.split('#').next().unwrap_or(""))?
+        };
+        self.sw_navigate(ver, url, body)
+    }
+
+    /// The worker runs in a blank page of the target URL (the new document does not exist yet). That page ends after the reply.
+    #[cold]
+    fn sw_navigate(&mut self, ver: u64, url: &str, body: Option<&Body>) -> Option<Result<DocumentResponse, String>> {
+        use crate::sw_hub::{FetchReply, FetchReq};
+        let bare = url.split('#').next().unwrap_or("").to_string();
+        let mut b = Browser::<New>::make(tree::parse(""), self.cfg.browser, self.cfg.eval, self.cfg.heap).ok()?.with_session_wall_clock(self.cfg.virtual_clock);
+        if self.cfg.virtual_clock {
+            b.use_virtual_clock();
+        }
+        b.attach_storage(self.store.clone());
+        b.set_document_url(&bare).ok()?;
+        crate::browser_sw::become_host(&b.dom);
+        b.set_child_env(crate::browser_child::KidEnv { eval: self.cfg.eval, heap: self.cfg.heap, session: self.cfg.limits.clone(), downloads: None });
+        let mut headers = String::from("accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\nupgrade-insecure-requests:1");
+        if let Some(b) = body {
+            headers.push_str("\ncontent-type:");
+            headers.push_str(&b.content_type);
+        }
+        let method = if body.is_some() { "POST" } else { "GET" };
+        let req = FetchReq { id: 0, url: bare.clone(), method: method.into(), headers, body: body.map(|b| b.bytes.clone()), mode: "navigate".into(), credentials: "include".into(), redirect: "manual".into() };
+        let hub = self.store.sw_hub();
+        let fid = hub.borrow_mut().fetch(ver, 0, req);
+        let (client, fetch) = (self.fork(), (self.fork(), self.cfg.fetch));
+        let r = b.run_page(PageConfig { url: bare.clone(), client, limits: self.cfg.page.clone(), fetch: Some(fetch) });
+        self.used.tasks += r.tasks;
+        self.used.rounds += r.rounds;
+        let reply = hub.borrow_mut().take_nav(fid);
+        drop(b);
+        match reply {
+            FetchReply::Fallback => None,
+            FetchReply::Error => Some(Err("network error".into())),
+            FetchReply::Resp { status, headers, body, url: got, .. } => {
+                let ct = headers.split('\n').filter_map(|l| l.split_once(':')).find(|(k, _)| k.eq_ignore_ascii_case("content-type")).map(|(_, v)| v.to_string());
+                let at = if got.is_empty() { url.to_string() } else { got };
+                let html = if is_html(ct.as_deref()) { Ok(encoding::decode(&body, ct.as_deref())) } else { non_html_document(ct.as_deref(), &at, &body) };
+                Some(html.map(|html| DocumentResponse { url: at, html, status, isolation_requested: None }))
+            }
+        }
     }
 
     fn drive(&mut self, next: Option<Next>, steps: &[Input]) -> SessionResult {
@@ -1039,7 +1099,11 @@ impl Session {
                     let mut base = self.fork();
                     let doc = match fetched.take() {
                         Some(d) => d,
-                        None => load_document(&mut base, &url, from.as_deref(), body.as_ref(), &lim, deadline, None, false, None, false).map(|doc| (doc.url, tree::parse(&doc.html), doc.isolation_requested)),
+                        None => match self.sw_document(&url, body.as_ref()) {
+                            Some(r) => r,
+                            None => load_document(&mut base, &url, from.as_deref(), body.as_ref(), &lim, deadline, None, false, None, false),
+                        }
+                        .map(|doc| (doc.url, tree::parse(&doc.html), doc.isolation_requested)),
                     };
                     let (url, dom, isolation_requested) = match doc {
                         Ok(d) => d,
