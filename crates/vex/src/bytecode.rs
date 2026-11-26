@@ -606,6 +606,11 @@ pub struct Recipes {
 }
 
 impl Recipes {
+    fn shrink(&mut self) {
+        self.ends.shrink_to_fit();
+        self.keys.shrink_to_fit();
+    }
+
     pub fn push(&mut self, keys: &[u32]) -> usize {
         self.keys.extend_from_slice(keys);
         self.ends.push(self.keys.len() as u32);
@@ -804,6 +809,22 @@ impl Code {
         let rest = self.tables.get(t as usize..)?;
         let &[sent, mode, len] = rest.get(..3)? else { return None };
         Some(SaveList { sent, mode, regs: rest.get(3..)?.get(..len as usize)? })
+    }
+
+    /// Drop the spare capacity of the tables. The compiler calls it when the code is complete: the tables grew by push, and a large
+    /// site keeps about 400,000 codes (`design-code-memory.md`, C3).
+    pub fn shrink(&mut self) {
+        self.words.shrink_to_fit();
+        self.numbers.shrink_to_fit();
+        self.atoms.shrink_to_fit();
+        self.funcs.shrink_to_fit();
+        self.recipes.shrink();
+        self.data.shrink_to_fit();
+        self.tables.shrink_to_fit();
+        self.sites.shrink_to_fit();
+        self.loops.shrink_to_fit();
+        self.handlers.shrink_to_fit();
+        self.lines.shrink_to_fit();
     }
 
     /// The code is a stub: one `Op::Lazy` word (`script.rs`: `stub`).
@@ -1052,3 +1073,7 @@ mod tests;
 #[cfg(test)]
 #[path = "bytecode_single_encode_tests.rs"]
 mod single_encode_tests;
+
+#[cfg(test)]
+#[path = "code_shrink_tests.rs"]
+mod shrink_tests;

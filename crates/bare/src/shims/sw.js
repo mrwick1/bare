@@ -907,6 +907,8 @@
             sw(OP.done, id, true);
             return;
           }
+          // A navigation: its request has the mode "navigate", which `new Request` refuses.
+          if (a[4] === "navigate") Object.defineProperty(req, "mode", { value: "navigate", configurable: true });
           var ev = new FetchEvent("fetch", { request: req, clientId: b });
           F.get(ev).id = a[7];
           fire(id, ev);
