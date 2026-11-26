@@ -5,11 +5,13 @@
 //! <profile>/profile.lock   the process id of the holder; the holder keeps an OS lock on the file
 //! <profile>/cookies.bin    all cookies, session cookies too (as Chrome keeps them for a session restore)
 //! <profile>/local.bin      the `localStorage` items of all origins
+//! <profile>/permissions.bin the permission decisions of all origins (`browser_notification.rs`)
 //! <profile>/idb/*.log      the IndexedDB log of each origin (`browser_idb_log.rs`)
 //!
 //! file    = 8 bytes magic, payload, u32 CRC-32 of the bytes before it
 //! cookies = u32 count, (str name, str value, str domain, str path, u8 flags, u8 same site, f64 expires ms or NaN)*
 //! local   = u32 origins, (str origin, u32 items, (str key, str value)*)*
+//! perms   = u32 count, (str origin, str name, u8 decision)*      decision: 1 granted, 2 denied
 //! str     = u32 length, UTF-8 bytes
 //! ```
 //!
@@ -25,7 +27,7 @@
 //! (`Page::tick`), and at drop. The IndexedDB logs follow the same timing; at drop and at `flush` they get an `fsync` too.
 //! sessionStorage is not saved, as in all browsers.
 
-use crate::browser_navigation_storage::{OriginItems, StorageState, WebStorage};
+use crate::browser_navigation_storage::{OriginItems, Permission, StorageState, WebStorage};
 use bare_net::cookie::{Cookie, SameSite};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -38,6 +40,7 @@ pub const DEFAULT: &str = "default";
 const EVERY: Duration = Duration::from_secs(1);
 const COOKIES: (&str, &[u8; 8]) = ("cookies.bin", b"bareck01");
 const LOCAL: (&str, &[u8; 8]) = ("local.bin", b"barels01");
+const PERMS: (&str, &[u8; 8]) = ("permissions.bin", b"barepm01");
 
 /// An open profile: its directory and its lock. Clones share the lock, which ends with the last clone.
 #[derive(Clone)]
@@ -119,7 +122,7 @@ impl Profile {
         &self.dir
     }
 
-    /// The saved cookies and `localStorage` (no file: nothing). A damaged file is an error that names it.
+    /// The saved cookies, `localStorage` and permissions (no file: nothing). A damaged file is an error that names it.
     pub fn load(&self) -> Result<StorageState, String> {
         let mut st = StorageState::default();
         if let Some(b) = self.read(COOKIES)? {
@@ -127,6 +130,9 @@ impl Profile {
         }
         if let Some(b) = self.read(LOCAL)? {
             st.local = decode_local(&b).ok_or_else(|| self.damaged(LOCAL.0))?;
+        }
+        if let Some(b) = self.read(PERMS)? {
+            st.permissions = decode_perms(&b).ok_or_else(|| self.damaged(PERMS.0))?;
         }
         Ok(st)
     }
@@ -171,8 +177,8 @@ impl Profile {
 pub struct Saver {
     profile: Profile,
     store: WebStorage,
-    /// The revisions that are on disk: the cookies, `localStorage` and the IndexedDB commits.
-    saved: (u64, u64, u64),
+    /// The revisions that are on disk: the cookies, `localStorage`, the permissions and the IndexedDB commits.
+    saved: (u64, u64, u64, u64),
     idb: Arc<crate::browser_idb::log::Disk>,
     last: Option<Instant>,
     /// A write failed: the first failure goes to stderr, the next ones are quiet.
@@ -186,13 +192,13 @@ impl Saver {
     pub fn new(profile: Profile, store: WebStorage) -> Saver {
         let idb = crate::browser_idb::log::Disk::new(&profile);
         store.use_idb_disk(idb.clone());
-        let (c, l) = store.revisions();
-        Saver { saved: (c, l, 0), profile, store, idb, last: None, failed: false, writes: 0 }
+        let (c, l, p) = store.revisions();
+        Saver { saved: (c, l, p, 0), profile, store, idb, last: None, failed: false, writes: 0 }
     }
 
-    fn revisions(&self) -> (u64, u64, u64) {
-        let (c, l) = self.store.revisions();
-        (c, l, self.idb.rev.load(std::sync::atomic::Ordering::Relaxed))
+    fn revisions(&self) -> (u64, u64, u64, u64) {
+        let (c, l, p) = self.store.revisions();
+        (c, l, p, self.idb.rev.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     /// Write what changed, unless the last write was less than a second ago. Gives when to call again: a change waits for that time.
@@ -218,7 +224,7 @@ impl Saver {
         self.store.flush_idb(true);
     }
 
-    fn write(&mut self, rev: (u64, u64, u64)) {
+    fn write(&mut self, rev: (u64, u64, u64, u64)) {
         let mut done = Ok(());
         if rev.0 != self.saved.0 {
             done = self.profile.write(COOKIES, encode_cookies(&self.store.export_cookies()));
@@ -228,7 +234,11 @@ impl Saver {
             done = self.profile.write(LOCAL, encode_local(&self.store.export_area(false)));
             self.writes += 1;
         }
-        if rev.2 != self.saved.2 {
+        if rev.2 != self.saved.2 && done.is_ok() {
+            done = self.profile.write(PERMS, encode_perms(&self.store.export_permissions()));
+            self.writes += 1;
+        }
+        if rev.3 != self.saved.3 {
             // A log reports its own write failure.
             self.store.flush_idb(false);
         }
@@ -287,6 +297,19 @@ fn encode_local(list: &OriginItems) -> Vec<u8> {
     out
 }
 
+fn encode_perms(list: &[(String, String, Permission)]) -> Vec<u8> {
+    let mut out = (list.len() as u32).to_le_bytes().to_vec();
+    for (origin, name, v) in list {
+        put_str(&mut out, origin);
+        put_str(&mut out, name);
+        out.push(match v {
+            Permission::Granted => 1,
+            Permission::Denied => 2,
+        });
+    }
+    out
+}
+
 struct Reader<'b>(&'b [u8]);
 
 impl Reader<'_> {
@@ -341,6 +364,22 @@ fn decode_local(b: &[u8]) -> Option<OriginItems> {
             items.push((r.str()?, r.str()?));
         }
         out.push((origin, items));
+    }
+    r.0.is_empty().then_some(out)
+}
+
+fn decode_perms(b: &[u8]) -> Option<Vec<(String, String, Permission)>> {
+    let mut r = Reader(b);
+    let n = r.u32()?;
+    let mut out = Vec::with_capacity(n.min(1024) as usize);
+    for _ in 0..n {
+        let (origin, name) = (r.str()?, r.str()?);
+        let v = match r.take(1)?[0] {
+            1 => Permission::Granted,
+            2 => Permission::Denied,
+            _ => return None,
+        };
+        out.push((origin, name, v));
     }
     r.0.is_empty().then_some(out)
 }

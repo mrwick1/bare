@@ -131,6 +131,7 @@ fwd! {
     (&) fn settle_blocker(limit: f64) -> Option<(String, f64)>;
     (&) fn document() -> Rc<RefCell<Document>>;
     (&) fn document_url() -> Option<String>;
+    (&) fn document_origin() -> String;
     (&) fn fetches_since(t: std::time::Instant) -> usize;
     (&) fn has_children(node: NodeId) -> bool;
     (&) fn has_download_request() -> bool;
@@ -194,6 +195,7 @@ fwd_try! {
     (&mut) fn render_with(styles: Rc<Styles>, old: Option<Frame>) -> Frame;
     (&mut) fn restyle() -> Rc<Styles>;
     (&mut) fn set_viewport(width: f32, height: f32) -> usize;
+    (&mut) fn set_permission(origin: &str, name: &str, to: Option<crate::browser_navigation::Permission>) -> usize;
     (&mut) fn ui_drag_select(caret: u32) -> UiOutcome;
     (&mut) fn ui_insert_text(text: &str) -> UiOutcome;
     (&mut) fn ui_key(k: KeyInput, down: bool) -> UiOutcome;

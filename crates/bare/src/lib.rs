@@ -18,6 +18,8 @@ mod browser_idb;
 pub mod profile;
 #[cfg(test)]
 mod profile_tests;
+#[cfg(test)]
+mod profile_permissions_tests;
 mod profile_record;
 mod browser_shadow;
 mod browser_events;

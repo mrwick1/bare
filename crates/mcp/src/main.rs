@@ -556,7 +556,7 @@ impl Server {
             return fail(Failure::args(e), &red);
         }
         // The tools that act on a live session: the lookup of the session is the source of `missing_session`, before any argument is used.
-        if matches!(name, "step" | "close" | "snapshot" | "find" | "read" | "links" | "act" | "downloads" | "eval" | "console" | "network" | "diagnose" | "screenshot" | "storage" | "save_state")
+        if matches!(name, "step" | "close" | "snapshot" | "find" | "read" | "links" | "act" | "downloads" | "eval" | "console" | "network" | "diagnose" | "screenshot" | "storage" | "save_state" | "notifications")
             && !self.live.contains_key(&session_name(&args))
         {
             return fail(Failure::no_session(&session_name(&args)), &red);
@@ -579,6 +579,7 @@ impl Server {
             "eval" => self.eval(&args).map_err(Failure::from),
             "console" => self.console(&args).map_err(Failure::from),
             "network" => self.network(&args).map_err(Failure::from),
+            "notifications" => self.notifications(&args).map_err(Failure::from),
             "diagnose" => self.diagnose(&args).map_err(Failure::from),
             "sessions" => Ok(self.sessions()),
             "sessions_probe" => self.live_mut(&args).and_then(|l| l.session.collect()).and_then(|_| self.late(&args)).map_err(Failure::from),
@@ -1039,6 +1040,32 @@ impl Server {
         let pending = live.session.pending()?;
         v.extend(pending.iter().filter(|w| !w.url.is_empty() && contains.as_deref().is_none_or(|c| w.url.contains(c))).take(max).map(|w| format!("pending {}", bare_drive::diag::waiting(w))));
         Ok(live.red.clean(&if v.is_empty() { "no requests".to_string() } else { v.join("\n") }))
+    }
+
+    /// Web notifications of the live page (`docs/internal/design-notifications.md`). `grant`, `deny`, `reset`: the notification
+    /// permission of `origin` (default: the origin of the page). A profile keeps it.
+    fn notifications(&mut self, args: &Value) -> Result<String, String> {
+        use bare_drive::Permission;
+        let op = args.get("op").and_then(Value::as_str).unwrap_or("list");
+        let to = match op {
+            "grant" => Some(Permission::Granted),
+            "deny" => Some(Permission::Denied),
+            "reset" => None,
+            _ => return Err(format!("op: {op} is not grant, deny or reset")),
+        };
+        // An origin is scheme://host[:port]: a whole URL is cut there.
+        let origin = args.get("origin").and_then(Value::as_str).map(|u| match u.find("://") {
+            Some(i) => u[..i + 3 + u[i + 3..].find(['/', '?', '#']).unwrap_or(u.len() - i - 3)].to_ascii_lowercase(),
+            None => u.to_ascii_lowercase(),
+        });
+        let live = self.live_mut(args)?;
+        let origin = live.session.set_permission(origin, "notifications".into(), to)?;
+        let state = match to {
+            Some(Permission::Granted) => "granted",
+            Some(Permission::Denied) => "denied",
+            None => "no decision (the page sees denied)",
+        };
+        Ok(format!("notifications for {origin}: {state}"))
     }
 
     /// A report of what is wrong with the page, to paste into a bare issue.
@@ -1764,6 +1791,11 @@ fn tools() -> Value {
             "name": "eval",
             "description": "Run JavaScript in the live page and return its value as text. A string shows as is. An array or object shows as compact JSON, cut at 4000 chars (a cycle is \"[Circular]\"). A DOM node shows as <tag#id.class>, a NodeList as a list of those, a function as function name(), a Map or Set as a list, a Date as its ISO string. A Promise is awaited up to the time limit. Statements give the value of the last one; with a top-level await or return, statements need a return. let and const last one call; keep a value for later in window.x. A syntax error names its line. A thrown error shows as Name: message. A navigation the code starts is followed; the reply then ends with navigated: URL.",
             "inputSchema": {"type": "object", "properties": {"session": S, "js": {"type": "string"}}, "required": ["js"]},
+        },
+        {
+            "name": "notifications",
+            "description": "Web notifications of the live page. op grant, deny or reset: the notification permission of origin (default: the origin of the page). With no decision a page sees \"denied\". A profile keeps the decision. A page reads the permission when it asks: reload it or use its own \"turn on\" link after a grant.",
+            "inputSchema": {"type": "object", "properties": {"session": S, "op": {"type": "string", "enum": ["grant", "deny", "reset"]}, "origin": {"type": "string"}}, "required": ["op"]},
         },
         {
             "name": "console",

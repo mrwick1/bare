@@ -10,5 +10,8 @@ pub mod snap;
 pub mod state;
 pub mod steps;
 pub mod suite;
+pub use bare::browser_navigation::Permission;
 pub use bare::{DownloadState, Downloads};
 pub use bare::profile;
+#[cfg(test)]
+mod state_permissions_tests;

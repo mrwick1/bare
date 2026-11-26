@@ -345,6 +345,11 @@ fn status_hset<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Ar
 }
 
 impl<E: Eng> crate::browser::Browser<E> {
+    /// The origin of the document, serialized ("null" with no URL).
+    pub fn document_origin(&self) -> String {
+        crate::browser_basics::doc_origin(&self.dom)
+    }
+
     /// Set (or with `None`, remove) the decision for permission `name` of `origin`, in the storage of the session (a profile saves
     /// it). A trusted `change` event fires at each live `PermissionStatus` of this page whose state moved, in creation order. Gives
     /// the number of events fired.
