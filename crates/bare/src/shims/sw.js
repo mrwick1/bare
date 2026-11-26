@@ -21,6 +21,9 @@
     focus: 17,
     show: 20,
     notes: 21,
+    fetch: 30,
+    net: 31,
+    fetchReply: 32,
   };
   var UVC = ["imports", "all", "none"];
   var TOKEN = {};
@@ -71,6 +74,23 @@
       enumerable: true,
       configurable: true,
     });
+  }
+  // Headers cross as `name:value` lines.
+  function lines(h) {
+    var out = [];
+    h.forEach(function (v, k) {
+      out.push(k + ":" + v);
+    });
+    return out.join("\n");
+  }
+  function headers(t) {
+    var h = new Headers();
+    if (t)
+      t.split("\n").forEach(function (l) {
+        var i = l.indexOf(":");
+        h.append(l.slice(0, i), l.slice(i + 1));
+      });
+    return h;
   }
   function reject(name, message) {
     return Promise.reject(new DOMException(message, name));
@@ -380,8 +400,52 @@
       sw(OP.regs, 0).forEach(function (r) {
         readyCheck(registration(r));
       });
+    // A `fetch()` of a controlled page: the worker gets a `fetch` event. With no reply it goes to the network.
+    var pend = new Map();
+    function pageFetch(input, init) {
+      var r;
+      try {
+        r = new Request(input, init);
+      } catch (e) {
+        return Promise.reject(e);
+      }
+      var get = r.method === "GET" || r.method === "HEAD";
+      return (get ? Promise.resolve(null) : r.arrayBuffer()).then(function (b) {
+        b = b && new Uint8Array(b);
+        var again = {
+          method: r.method,
+          headers: r.headers,
+          body: b,
+          mode: r.mode,
+          credentials: r.credentials,
+          redirect: r.redirect,
+          signal: r.signal,
+        };
+        var id = sw(OP.fetch, r.url, r.method, lines(r.headers), b, r.mode, r.credentials, r.redirect);
+        if (!id) return sw(OP.net, r.url, again);
+        return new Promise(function (resolve, rejectIt) {
+          pend.set(id, { resolve: resolve, reject: rejectIt, url: r.url, init: again });
+        });
+      });
+    }
+    function fetched(id, kind, status, text, h, body, url) {
+      var p = pend.get(id);
+      if (!p) return;
+      pend.delete(id);
+      if (kind === "fallback") p.resolve(sw(OP.net, p.url, p.init));
+      else if (kind === "error") p.reject(new TypeError("Failed to fetch"));
+      else {
+        var ok = status >= 200 && status <= 599 ? status : 200;
+        var empty = ok === 204 || ok === 205 || ok === 304;
+        var resp = new Response(empty ? null : body, { status: ok, statusText: text, headers: headers(h) });
+        // A response with no URL takes the request URL (Fetch, "main fetch").
+        Object.defineProperty(resp, "url", { value: url || p.url, configurable: true });
+        p.resolve(resp);
+      }
+    }
     return {
       container: container,
+      fetch: pageFetch,
       // One change from the session. The host runs the microtasks after each one.
       sync: function (kind, a, b, c, d) {
         if (kind === "job") settle(a, b, c, d);
@@ -395,7 +459,7 @@
           container.dispatchEvent(new Event("controllerchange"));
         } else if (kind === "msg") {
           return [container, worker(a)];
-        }
+        } else if (kind === "fetched") fetched(a, b, c, d, arguments[5], arguments[6], arguments[7]);
       },
     };
   }
@@ -509,6 +573,88 @@
     tag(ExtendableEvent, "ExtendableEvent");
     tag(ExtendableMessageEvent, "ExtendableMessageEvent");
     tag(NotificationEvent, "NotificationEvent");
+    var F = new WeakMap();
+    class FetchEvent extends ExtendableEvent {
+      constructor(type, init) {
+        if (!(init && init.request instanceof Request))
+          throw new TypeError(
+            "Failed to construct 'FetchEvent': Failed to read the 'request' property from 'FetchEventInit': Required member is undefined.",
+          );
+        super(type, init);
+        var done;
+        F.set(this, {
+          request: init.request,
+          clientId: init.clientId === undefined ? "" : String(init.clientId),
+          resultingClientId: init.resultingClientId === undefined ? "" : String(init.resultingClientId),
+          handled: new Promise(function (r) {
+            done = r;
+          }),
+          done: done,
+          responded: false,
+        });
+      }
+      get request() {
+        return fs(this).request;
+      }
+      get clientId() {
+        return fs(this).clientId;
+      }
+      get resultingClientId() {
+        return fs(this).resultingClientId;
+      }
+      get replacesClientId() {
+        fs(this);
+        return "";
+      }
+      get handled() {
+        return fs(this).handled;
+      }
+      get preloadResponse() {
+        fs(this);
+        return Promise.resolve(undefined);
+      }
+      respondWith(p) {
+        var f = fs(this);
+        var s = E.get(this);
+        if (f.responded)
+          throw new DOMException(
+            "Failed to execute 'respondWith' on 'FetchEvent': The event has already been responded to.",
+            "InvalidStateError",
+          );
+        if (!s.active)
+          throw new DOMException(
+            "Failed to execute 'respondWith' on 'FetchEvent': The event handler is already finished.",
+            "InvalidStateError",
+          );
+        f.responded = true;
+        this.stopImmediatePropagation();
+        var id = f.id;
+        this.waitUntil(
+          Promise.resolve(p)
+            .then(function (r) {
+              if (!(r instanceof Response)) throw new TypeError("not a Response");
+              return r.arrayBuffer().then(function (b) {
+                sw(OP.fetchReply, id, 2, r.status, r.statusText, lines(r.headers), new Uint8Array(b), r.url);
+              });
+            })
+            .then(
+              function () {
+                f.done();
+              },
+              function () {
+                sw(OP.fetchReply, id, 1);
+                f.done();
+              },
+            ),
+        );
+      }
+    }
+    function fs(o) {
+      var f = F.get(o);
+      if (!f) throw new TypeError("Illegal invocation");
+      return f;
+    }
+    tag(FetchEvent, "FetchEvent");
 
     class Client {
       constructor() {
@@ -710,6 +856,7 @@
     define("ExtendableEvent", ExtendableEvent);
     define("ExtendableMessageEvent", ExtendableMessageEvent);
     define("NotificationEvent", NotificationEvent);
+    define("FetchEvent", FetchEvent);
     define("Client", Client);
     define("WindowClient", WindowClient);
     define("Clients", Clients);
@@ -744,7 +891,28 @@
               origin: new URL(c[1]).origin,
             }),
           );
-        else if (kind === "notificationclick" || kind === "notificationclose")
+        else if (kind === "fetch") {
+          var req;
+          try {
+            req = new Request(a[0], {
+              method: a[1],
+              headers: headers(a[2]),
+              body: a[3],
+              mode: a[4] === "navigate" ? "same-origin" : a[4],
+              credentials: a[5],
+              redirect: a[6],
+            });
+          } catch (e) {
+            // The event ends with no reply: the page goes to the network.
+            sw(OP.done, id, true);
+            return;
+          }
+          var ev = new FetchEvent("fetch", { request: req, clientId: b });
+          F.get(ev).id = a[7];
+          fire(id, ev);
+          // No `respondWith`: the page goes to the network.
+          if (!F.get(ev).responded) sw(OP.fetchReply, a[7], 0);
+        } else if (kind === "notificationclick" || kind === "notificationclose")
           fire(id, new NotificationEvent(kind, { notification: a, action: b }));
         else if (kind === "state") setState(a, b);
       },

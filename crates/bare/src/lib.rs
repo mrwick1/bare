@@ -519,6 +519,8 @@ mod browser_sw_message_tests;
 #[cfg(test)]
 mod browser_sw_notification_tests;
 #[cfg(test)]
+mod browser_sw_fetch_tests;
+#[cfg(test)]
 mod browser_caches_store_tests;
 #[cfg(test)]
 mod browser_background_tests;
