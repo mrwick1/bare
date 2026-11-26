@@ -921,14 +921,16 @@ impl<E: Eng> Dom<E> {
             let f = self.add_fn_s(s, h, name, len, HostFn::Method)?;
             s.define_str(g, name, f, Attrs::ALL)?;
         }
-        // interface objects
+        // interface objects. The tag makes `Object.prototype.toString` give `[object MessagePort]`: code that finds the ports of a
+        // message by their tag puts them in the transfer list.
         for (name, proto, ctor) in [
             ("MessageChannel", channel, Some(message_channel_ctor as HS<E>)),
             ("MessagePort", port, None),
-            ("MessageEvent", event, None),
         ] {
             self.interface_s(s, proto, name, ctor.unwrap_or(illegal), 0, if ctor.is_some() { HostFn::Ctor } else { HostFn::Method })?;
+            self.tag_s(s, proto, name)?;
         }
+        self.interface_s(s, event, "MessageEvent", illegal, 0, HostFn::Method)?;
         let po = self.obj_local(s, port);
         table!(rows1 = [
             Row::method(1, "postMessage", 1, port_post_message).enumerable(),
