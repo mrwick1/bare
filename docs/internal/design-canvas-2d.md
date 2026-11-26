@@ -267,9 +267,9 @@ canvas that nobody reads never allocates pixels.
 ### Encoders
 
 - PNG: RGBA, not premultiplied, `Compression::Fast`, `Sub` filter (default for open question 6: any stable output).
-- JPEG: not built. The `jpeg-encoder` crate (0.7.1) is `(MIT OR Apache-2.0) AND IJG`. IJG is outside the allowed licences. The
-  owner decides later. Until then `image/jpeg` gives PNG, as the standard says for a type that is not supported. The encoder has
-  one place for a JPEG branch.
+- JPEG: the `jpeg-encoder` crate (0.7.1), `(MIT OR Apache-2.0) AND IJG`. The owner accepted IJG on 2026-11-26. The notice is
+  `crates/paint/LICENSE-IJG`. The encoder reads the premultiplied pixels row by row, so the color is on black, as in Chrome. It
+  makes no RGB copy. Quality: a number in 0..1, else 0.92. 4:2:0 below quality 90, else 4:4:4 (the crate default).
 - `toBlob` encodes on the page thread and calls the callback in a new task. Hypothesis for a later step: encode on the picture
   worker threads.
 
