@@ -184,6 +184,27 @@ The RAM analysis of 2026-11-26 (jemalloc heap profiles, 2 runs, owner lines) spl
 - C1 adds a test: a stub's name, length and `toString` before its first call, and `new` on a stub of an arrow.
 - Linux and the Windows VM. Miri on `codes.rs` for C1 and C2.
 
+## 10. Status (2026-11-26)
+
+Each slice was measured on Teams against the main of its day. From C3 on, the metric is glibc malloc "in use" bytes at idle: it varies by about 0.5% between runs, and PSS varies by about 60 MiB.
+
+| Slice                     | PR    | Result                                                  |
+| ------------------------- | ----- | ------------------------------------------------------- |
+| C1 shared stub records    | #1147 | idle PSS about -110 MiB (3 runs each)                   |
+| R1 root map dedupe        | #1157 | idle PSS about -19 MiB (3 runs each, near the noise)    |
+| C3 exact tables (part 1)  | #1167 | malloc in use -11.6 MiB                                 |
+| C4a compact pending entry | #1171 | malloc in use -21.5 MiB                                 |
+| C2 exact chunks           | -     | not built: after C1 the spare room is 8.4 MiB           |
+| C3 part 2 (boxed slices)  | -     | not built: a smaller `Code` record, about 8 B per table |
+| C4b frozen scope chains   | -     | not built: `Level` chains held by `Wait` (about 23 MiB) |
+| C4c parse facts           | -     | not built: see below                                    |
+
+Findings after C1 (jemalloc heap profile, 1 run, malloc live 654 MiB):
+
+- `code_cache.rs:304` makes an `Rc<str>` copy of the source text of each compiled script: 96 MiB, the largest owner. Hypothesis: the large realms load the same bundles, so the same text is kept more than once. Not in this design.
+- The parse facts (`parse.rs` `close_fn`, `FnFacts` and capture spans) are about 37 MiB. They come from the first lazy parse, not from lazy compiles. Part is `Vec` growth slack; `Facts::finish` can drop it. A smaller `FnFacts` (52 B now) is the other lever.
+- The code cache keeps almost no unit on Teams (a unit is kept at its second sight), so it does not duplicate codes or facts.
+
 ## 9. Decisions (owner, 2026-11-26)
 
 1. Build C1, C2, C3, R1 and C4 as separate PRs in that order.
