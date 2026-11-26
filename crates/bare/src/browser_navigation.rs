@@ -460,6 +460,8 @@ impl<E: Eng> Dom<E> {
         let Ok(cur) = self.cur_rec() else { return };
         let resolved = if src.is_empty() { None } else { nu::parse(&src, Some(&cur)).ok() };
         let url = resolved.as_ref().map(|r| r.href()).filter(|u| (u.starts_with("http://") || u.starts_with("https://")) && !u.starts_with("about:"));
+        // A `blob:` URL is always absolute. Only a child page can load it (from the Blob store of this page).
+        let url = url.or_else(|| (kids && crate::browser_web::is_blob_url(&src)).then(|| src.clone()));
         // `srcdoc` wins over `src`: such a frame stays blank.
         let srcdoc = { let doc = self.doc.borrow(); doc.find_atom("srcdoc").is_some_and(|k| doc.attr(n, k).is_some()) };
         let url = url.filter(|_| !srcdoc);

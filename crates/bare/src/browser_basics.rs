@@ -183,7 +183,8 @@ fn prompt<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) 
 /// `window.open(url)`: a tab for a driver (`agent.rs`); else null, a blocked popup. It always gives null: the page gets no window.
 fn open<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let u = text_arg(d, s, a, 0)?;
-    if let Some(url) = d.resolve_http(&u) {
+    // An empty URL is `about:blank`, not the URL of this page.
+    if let Some(url) = d.resolve_http(&u).filter(|_| !u.is_empty()) {
         crate::agent::tab(&url);
     }
     Ok(s.null())

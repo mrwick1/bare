@@ -5,7 +5,9 @@
 //! script sees. Messages between pages work since step 3b ("Messages" below). A `MessagePort` crosses pages since step 3c ("Ports" below).
 //!
 //! Which frames. An iframe that is connected and has a `src` that resolves to an http(s) URL other than `about:blank` gets a child page at
-//! once (rule "eager, after parent work"). It does not matter if the frame is hidden, 0x0, or of the same origin. A frame with no `src`, an
+//! once (rule "eager, after parent work"). It does not matter if the frame is hidden, 0x0, or of the same origin. A `blob:` `src` of this page is
+//! a child page too: its document is the Blob of the store of this page, at the URL of this page. A Blob revoked before the driver reads
+//! it leaves the frame empty. A frame with no `src`, an
 //! empty one, `about:blank` or `srcdoc` is not a child page: it keeps the blank window that shares the parent realm (`browser_frames.rs`).
 //! Known deviation: the `contentDocument` of a same-origin child page is `null` (a browser gives the document). Gmail's same-origin frames
 //! do not read their parent directly (measured), so the owner chose one rule for both origins.
@@ -507,7 +509,8 @@ impl<E: Eng> Kids<E> {
 
     /// `location` of the window of child `id` was set.
     pub(crate) fn navigate(&self, d: &Dom<E>, id: FrameId, url: &str) {
-        let Some(url) = d.resolve_http(url).filter(|u| !u.starts_with("about:")) else { return };
+        let blob = crate::browser_web::is_blob_url(url).then(|| url.trim_matches(|c: char| c <= ' ').to_string());
+        let Some(url) = blob.or_else(|| d.resolve_http(url).filter(|u| !u.starts_with("about:"))) else { return };
         if let Some(Some(s)) = self.slots.borrow_mut().get_mut(id as usize) {
             s.url = url;
             s.dirty = true;
@@ -542,6 +545,13 @@ impl<E: Eng> Kids<E> {
             let site = Url::parse(s.url.split('#').next().unwrap_or("")).ok().map(|u| bare_net::cookie::site_of(&u));
             let label = Url::parse(s.url.split('#').next().unwrap_or("")).map_or_else(|_| "?".to_string(), |u| label(&u));
             let (state, worker) = match s.of {
+                // A `blob:` document is in the store of this page: the child gets its bytes, with no network. A document URL is http(s)
+                // only, so the child gets the URL of this page (a blob URL has the origin of the page that made it), as a worker does.
+                Of::Frame(_) if crate::browser_web::is_blob_url(&s.url) => {
+                    let doc = crate::browser_web::blob_url_read(d, &s.url).ok_or_else(|| "blob URL not found".to_string());
+                    let url = from.clone();
+                    (State::Loading(cfg.client.fork().spawn(move |_| doc.and_then(|(b, ty)| crate::browser_session::blob_document(&url, &b, &ty)))), false)
+                }
                 Of::Frame(_) => (State::Loading(start_load(cfg, s.url.clone(), from.clone())), false),
                 Of::Worker(..) | Of::Service(_) => (State::Start, true),
             };
