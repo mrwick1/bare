@@ -1201,6 +1201,10 @@ fn settle(p: &mut Page, end: Instant) -> (Option<String>, Vec<Log>) {
             if calm >= 2 {
                 break None;
             }
+            // A script that runs on every look (an animation frame loop) keeps `calm` at 0: the limit ends the wait.
+            if at_end {
+                break Some(format!("not ready: scripts still running after {ms} ms"));
+            }
         } else if quiet && !r.ran && r.next.is_none() {
             // Empty and nothing can change it: no task, no request, no timer.
             break Some(format!("not ready: body empty after {ms} ms, 0 requests pending"));
