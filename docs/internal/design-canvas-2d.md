@@ -254,8 +254,8 @@ canvas that nobody reads never allocates pixels.
   `Arc::make_mut`, so it copies only when an op still holds the old pixels.
 - Drop of dead ops: `clearRect` or an opaque fill of the whole canvas, at the identity transform with no clip, drops the ops
   before it and `base`.
-- Memory bound: when `ops` holds more than 64 KiB, the next draw plays them into `base`. The raster cost does not change. It moves
-  earlier.
+- Memory bound: when `ops` holds more than 64 KiB and more than the bitmap (`4 * w * h`), the next draw plays them into `base`.
+  The raster cost does not change. It moves earlier.
 
 ### Memory
 

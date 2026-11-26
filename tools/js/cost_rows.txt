@@ -29,6 +29,10 @@ examples/browser_load svgparse 1
 examples/browser_load svgparse 10
 examples/browser_load rel 1
 examples/browser_load rel 10
+examples/browser_load canvas 1
+examples/browser_load canvas 10
+examples/browser_load canvasidle 1
+examples/browser_load canvasidle 10
 examples/console_load flood 1
 examples/console_load flood 10
 examples/console_load retain 1

@@ -363,6 +363,8 @@ pub(crate) enum Owner<E: Eng> {
     Idle(E::Obj),
     /// A `WebAssembly.Module`, `Instance` or `Global` (`browser_wasm.rs`).
     Wasm(E::Obj),
+    /// An `ImageBitmap`, with an entry in `Dom::bitmaps` (`browser_canvas.rs`).
+    Bitmap(E::Obj),
 }
 
 impl<E: Eng> Owner<E> {
@@ -371,7 +373,7 @@ impl<E: Eng> Owner<E> {
         match self {
             Owner::Target(t) => Some(t),
             Owner::Xhr(o) | Owner::Abort(o) | Owner::Port(o) | Owner::Worker(o) | Owner::Notification(o) | Owner::Mql(o) | Owner::Frame(o) => Some(Target::Obj(o)),
-            Owner::Event(_) | Owner::TokIter(_) | Owner::Resize(_) | Owner::Mo(_) | Owner::Io(_) | Owner::Walk(_) | Owner::Range(_) | Owner::Sel(_) | Owner::Attr(_) | Owner::Web(_) | Owner::Geom(_) | Owner::Idle(_) | Owner::Wasm(_) | Owner::Ctl(_) | Owner::Computed(_) | Owner::Source(_) | Owner::Reserved | Owner::Url(_) | Owner::Params(_) | Owner::Iter(_) | Owner::Loc(_) | Owner::Fetch(_) | Owner::Stream(_) => None,
+            Owner::Event(_) | Owner::TokIter(_) | Owner::Resize(_) | Owner::Mo(_) | Owner::Io(_) | Owner::Walk(_) | Owner::Range(_) | Owner::Sel(_) | Owner::Attr(_) | Owner::Web(_) | Owner::Geom(_) | Owner::Idle(_) | Owner::Wasm(_) | Owner::Bitmap(_) | Owner::Ctl(_) | Owner::Computed(_) | Owner::Source(_) | Owner::Reserved | Owner::Url(_) | Owner::Params(_) | Owner::Iter(_) | Owner::Loc(_) | Owner::Fetch(_) | Owner::Stream(_) => None,
         }
     }
 }
@@ -811,6 +813,8 @@ pub struct Dom<E: Eng = New> {
     pub(crate) dialogs: RefCell<std::collections::HashMap<NodeId, (String, bool)>>,
     /// The bitmaps of the canvases that a script drew on (`browser_canvas.rs`).
     pub(crate) canvases: RefCell<std::collections::HashMap<NodeId, crate::browser_canvas::Raster>>,
+    /// The pixels of each `ImageBitmap`. `None`: closed (`browser_canvas.rs`).
+    pub(crate) bitmaps: RefCell<std::collections::HashMap<E::Obj, Option<bare_paint::raster2d::Image>>>,
     /// The first `<link>` wrapper gave `HTMLLinkElement.prototype` its reflected members (`browser_dom::link_proto`).
     pub(crate) link_done: std::cell::Cell<bool>,
     /// Scroll offsets, page bars and `scroll` events (`browser_scroll.rs`).
@@ -988,7 +992,7 @@ impl<'p, E: Eng> bare_js_api::Host<E::Vm> for Dom<E> {
             Some(Owner::Computed(o)) => crate::browser_computed::trace_owner(self, &st, o, t),
             Some(w @ (Owner::Url(_) | Owner::Params(_) | Owner::Iter(_))) => crate::browser_navigation::trace_owner(self, w, t),
             Some(Owner::Wasm(o)) => crate::browser_wasm::trace(self, o, t),
-            Some(Owner::Loc(_) | Owner::Reserved | Owner::Range(_) | Owner::Geom(_) | Owner::Idle(_)) | None => {}
+            Some(Owner::Loc(_) | Owner::Reserved | Owner::Range(_) | Owner::Geom(_) | Owner::Idle(_) | Owner::Bitmap(_)) | None => {}
         }
     }
 
@@ -1034,6 +1038,9 @@ impl<'p, E: Eng> bare_js_api::Host<E::Vm> for Dom<E> {
                 Some(Owner::Web(o)) => web.push(o),
                 Some(Owner::Geom(o)) => crate::browser_geom::forget(self, o),
                 Some(Owner::Wasm(o)) => crate::browser_wasm::forget(self, o),
+                Some(Owner::Bitmap(o)) => {
+                    self.bitmaps.borrow_mut().remove(&o);
+                }
                 Some(Owner::Idle(o)) => self.idle_forget(o),
                 Some(Owner::Event(o)) => {
                     st.events.remove(&o);
@@ -2088,6 +2095,7 @@ impl<E: Eng> Browser<E> {
             html_on: Default::default(),
             dialogs: Default::default(),
             canvases: Default::default(),
+            bitmaps: Default::default(),
             link_done: Default::default(),
             scrolling: Default::default(),
             resize: Default::default(),

@@ -914,6 +914,11 @@ pub(crate) fn blob_url_bytes<E: Eng>(d: &Dom<E>, url: &str) -> Option<std::sync:
     Some(s.blobs.get(s.urls.get(url.trim_matches(|c: char| c <= ' ').split('#').next()?)?)?.bytes.clone())
 }
 
+/// The shared bytes of `o` if it is a Blob or a File (no copy). For `createImageBitmap(blob)` (`browser_canvas.rs`).
+pub(crate) fn blob_bytes<E: Eng>(d: &Dom<E>, o: E::Obj) -> Option<std::sync::Arc<[u8]>> {
+    Some(d.web.s.borrow().blobs.get(&o)?.bytes.clone())
+}
+
 // ------------------------------------------------------------------------------------------ Blob and File
 
 /// Room for `n` more bytes and one more object.

@@ -1,17 +1,26 @@
-//! A bounded compatibility context. Drawing does not change pixels, so a canvas has no pixels to read: `getImageData` and
-//! `createImageData` give transparent black (zero bytes). `ImageData` is the HTML Standard interface, lazy (`browser_lazy.rs`).
-//! One `ImageData` holds at most [`MAX_BYTES`] (64 MiB) of pixels: a larger one throws a `RangeError` (the same class as a failed
-//! allocation in Chrome; the message is ours). `createPattern` gives `null` for an `<img>` that is not complete and an object
-//! with a no-op `setTransform` for any other element. A gradient is an object with a no-op `addColorStop`.
-//! Deviation: `width`, `height`, `data` and `colorSpace` are own read-only data properties, not prototype accessors.
+//! The 2D context of `<canvas>`, `ImageData`, `ImageBitmap` and `createImageBitmap` (`docs/internal/design-canvas-2d.md`).
 //!
-//! Pixels: `fillRect`, `strokeRect` and `clearRect` draw into the bitmap of the canvas (`Raster`), in a solid `fillStyle` or
-//! `strokeStyle` (a CSS color) with `globalAlpha`. A pixel is in a rectangle when its center is (no anti-aliasing). The other drawing
-//! calls and the transform do nothing yet. Paint shows the bitmap like the picture of an `<img>` (`Document::set_image`).
+//! - Each canvas records its draws (`bare_paint::raster2d::Record`) and rasters them only when something reads the pixels: paint (a
+//!   lazy copy in the document), `getImageData`, `toDataURL`, `toBlob`, `createImageBitmap`, and `drawImage` with the canvas as source.
+//! - Draws: `fillRect`, `strokeRect`, `clearRect` (anti-aliased), `drawImage` (3, 5 and 9 arguments) from an `<img>`, a canvas and an
+//!   `ImageBitmap` (bilinear, or nearest when `imageSmoothingEnabled` is false), `putImageData` with a dirty rectangle. A solid
+//!   `fillStyle` or `strokeStyle` (a CSS color) with `globalAlpha`. Paths, the transform and text do nothing yet.
+//! - Reads: `getImageData` gives the pixels, not premultiplied. `toDataURL` and `toBlob` give PNG for every type: `image/jpeg` waits
+//!   for an encoder (the owner decides). `toBlob` encodes on the page thread and calls back in a new task.
+//! - `ImageData` is the HTML Standard interface, lazy (`browser_lazy.rs`). One `ImageData` holds at most [`MAX_BYTES`] (64 MiB): a
+//!   larger one throws a `RangeError` (the same class as a failed allocation in Chrome; the message is ours).
+//! - A canvas over Chrome's size limits (`raster2d::fits`) has no pixels: it draws nothing and reads as blank.
+//!   `createPattern` gives `null` for an `<img>` that is not complete and an object with a no-op `setTransform` for any other
+//!   element. A gradient is an object with a no-op `addColorStop`.
+//!
+//! Deviation: `width`, `height`, `data` and `colorSpace` of `ImageData` are own read-only data properties, not prototype accessors.
 use crate::eng::Eng;
 use crate::browser::*;
 use crate::browser_scoped::*;
+use bare_html::dom::NodeId;
 use bare_js_api::{Args, Attrs, Elem, HostFn, Local};
+use bare_paint::raster2d::{self, Affine, Draw, Image, Mode, Px, Record, Source};
+use std::sync::{Arc, Mutex};
 
 /// The most bytes (`width * height * 4`) of one `ImageData`.
 const MAX_BYTES: u64 = 64 << 20;
@@ -49,6 +58,8 @@ fn lazy_image_data<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: A
 pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> {
     table!(lazy = [
         Row::both(1, "ImageData", lazy_image_data),
+        Row::both(1, "ImageBitmap", lazy_image_bitmap),
+        Row::method(1, "createImageBitmap", 1, create_image_bitmap),
     ]);
     let g = s.global();
     d.install_rows(s, &[g], &lazy::T::<E>::V)
@@ -147,6 +158,7 @@ fn image_data<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'
 pub(crate) fn members<E: Eng>(d: &Dom<E>, it: &mut E::Vm, p: E::Obj) -> R<E, ()> {
     d.def_method_s(it, p, "getContext", 1, context)?;
     d.def_method_s(it, p, "toDataURL", 0, data_url)?;
+    d.def_method_s(it, p, "toBlob", 1, to_blob)?;
     crate::browser_reflect::reflect!(d, it, p, &["canvas"], { "width" => "width": Long(300, 0), "height" => "height": Long(150, 0) });
     Ok(())
 }
@@ -200,8 +212,6 @@ fn context<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'
         "clip",
         "fillText",
         "strokeText",
-        "drawImage",
-        "putImageData",
         "setLineDash",
     ] {
         d.def_method_l(s, o, name, 0, noop, false)?;
@@ -210,6 +220,8 @@ fn context<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'
     d.def_method_l(s, o, "fillRect", 4, |d, s, t, a| draw(d, s, t, a, Op::Fill), false)?;
     d.def_method_l(s, o, "strokeRect", 4, |d, s, t, a| draw(d, s, t, a, Op::Stroke), false)?;
     d.def_method_l(s, o, "clearRect", 4, |d, s, t, a| draw(d, s, t, a, Op::Clear), false)?;
+    d.def_method_l(s, o, "drawImage", 3, draw_image, false)?;
+    d.def_method_l(s, o, "putImageData", 3, put_image_data, false)?;
     for (name, len, h) in [
         ("createImageData", 1, create_image_data as HS<E>),
         ("getImageData", 4, get_image_data),
@@ -223,8 +235,8 @@ fn context<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'
         d.def_method_l(s, o, name, len, h, false)?;
     }
     // The defaults of the drawing state (HTML, "CanvasFillStrokeStyles", "CanvasCompositing", "CanvasPathDrawingStyles").
-    let (black, one) = (d.js_str_s(s, "#000000")?, s.number(1.0));
-    for (name, v) in [("fillStyle", black), ("strokeStyle", black), ("lineWidth", one), ("globalAlpha", one)] {
+    let (black, one, yes) = (d.js_str_s(s, "#000000")?, s.number(1.0), s.boolean(true));
+    for (name, v) in [("fillStyle", black), ("strokeStyle", black), ("lineWidth", one), ("globalAlpha", one), ("imageSmoothingEnabled", yes)] {
         s.define_str(o, name, v, Attrs { writable: true, enumerable: true, configurable: true })?;
     }
     s.define_str(o, "canvas", this, Attrs { writable: false, enumerable: true, configurable: true })?;
@@ -278,11 +290,6 @@ fn measure<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'
     Ok(o)
 }
 
-fn data_url<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
-    canvas(d, s, this)?;
-    d.js_str_s(s, "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAXpeqz8AAAAASUVORK5CYII=")
-}
-
 fn no<'s, E: Eng>(_: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     Ok(s.boolean(false))
 }
@@ -303,15 +310,44 @@ fn create_image_data<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a:
     sized(d, s, who, w, h)
 }
 
-/// `getImageData(sx, sy, sw, sh)`: a canvas has no pixels, so the result is transparent black.
-fn get_image_data<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+/// `getImageData(sx, sy, sw, sh)`: the pixels of the rectangle, not premultiplied. Pixels outside the canvas are transparent black.
+fn get_image_data<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     let who = "Failed to execute 'getImageData' on 'CanvasRenderingContext2D'";
     if a.len() < 4 {
         return Err(s.type_error(&format!("{who}: 4 arguments required, but only {} present.", a.len())));
     }
-    let (a2, a3) = (arg_s::<E>(s, a, 2), arg_s::<E>(s, a, 3));
-    let (w, h) = (long_abs::<E>(s, a2)?, long_abs::<E>(s, a3)?);
-    sized(d, s, who, w, h)
+    let mut v = [0i64; 4];
+    for (i, x) in v.iter_mut().enumerate() {
+        let l = arg_s::<E>(s, a, i);
+        let n = s.to_number(l)?;
+        *x = if n.is_finite() { n.trunc().clamp(-(1i64 << 40) as f64, (1i64 << 40) as f64) as i64 } else { 0 };
+    }
+    let [mut x, mut y, w, h] = v;
+    if w == 0 || h == 0 {
+        return Err(index_size(d, s, who, "The source width or height is zero or not a number."));
+    }
+    if w < 0 {
+        x += w;
+    }
+    if h < 0 {
+        y += h;
+    }
+    let (w, h) = (w.unsigned_abs().min(u32::MAX as u64) as u32, h.unsigned_abs().min(u32::MAX as u64) as u32);
+    if (w as u64) * (h as u64) * 4 > MAX_BYTES {
+        return Err(s.range_error("Out of memory at ImageData creation"));
+    }
+    let el = s.get_str(this, "canvas")?;
+    let n = d.el_s(s, el)?;
+    let bytes = match record_of(d, s, el, n)? {
+        Some(rec) => lock(&rec).rgba(x, y, w, h),
+        None => vec![0; w as usize * h as usize * 4],
+    };
+    let f = ensure_s(d, s)?;
+    let proto = s.get_str(f, "prototype")?;
+    let p = obj_id::<E>(s, proto).expect("made");
+    let o = d.obj_with_s(s, p)?;
+    let data = s.new_typed_array(Elem::U8C, bytes)?;
+    make_on(d, s, o, w, h, Some(data))
 }
 
 fn sized<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, who: &str, w: u32, h: u32) -> Res<'s, Local<'s>> {
@@ -346,12 +382,18 @@ fn pattern<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>)
     Ok(o)
 }
 
-/// The bitmap of a canvas that a script drew on, `0xAARRGGBB` not premultiplied. The document holds a lazy copy (`Pixels::lazy`) that
-/// paint makes at its first read, so the many calls of one frame copy the pixels once.
+/// The bitmap of a canvas that a script drew on: its record (`bare_paint::raster2d`). The document holds a lazy copy (`Pixels::lazy`)
+/// that paint makes at its first read: the copy plays the record, so a canvas that nobody paints or reads never rasters.
 pub(crate) struct Raster {
-    w: u32,
-    h: u32,
-    px: std::sync::Arc<std::sync::Mutex<Vec<u32>>>,
+    rec: Arc<Mutex<Record>>,
+}
+
+#[cfg(test)]
+impl Raster {
+    /// How many times the record played its ops.
+    pub(crate) fn rasters(&self) -> u64 {
+        lock(&self.rec).rasters
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -374,6 +416,62 @@ fn style_color(v: &str) -> Option<bare_css::color::Color> {
     t.next().is_none().then_some(c?)
 }
 
+fn lock(r: &Mutex<Record>) -> std::sync::MutexGuard<'_, Record> {
+    r.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The size of the canvas element `el` (its `width` and `height`).
+fn size_of<'s, E: Eng>(s: &mut Sc<'s, E>, el: Local<'s>) -> Res<'s, (u32, u32)> {
+    let (w, h) = (s.get_str(el, "width")?, s.get_str(el, "height")?);
+    Ok((long_abs::<E>(s, w)?, long_abs::<E>(s, h)?))
+}
+
+/// The record of the canvas element `el` (node `n`), made at the first use. A new size clears it. `None` for a canvas of no
+/// pixels or over the limits: it draws nothing.
+fn record_of<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, el: Local<'s>, n: NodeId) -> Res<'s, Option<Arc<Mutex<Record>>>> {
+    let (w, h) = size_of::<E>(s, el)?;
+    if w == 0 || h == 0 || !raster2d::fits(w, h) {
+        return Ok(None);
+    }
+    let mut map = d.canvases.borrow_mut();
+    let r = map.entry(n).or_insert_with(|| Raster { rec: Arc::new(Mutex::new(Record::new(w, h))) });
+    {
+        let mut rec = lock(&r.rec);
+        if (rec.w, rec.h) != (w, h) {
+            rec.resize(w, h);
+        }
+    }
+    Ok(Some(r.rec.clone()))
+}
+
+/// Record `draw` on the canvas of the context `this`, and give the document a new lazy copy if paint read the old one.
+fn push<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, draw: Draw) -> Res<'s, ()> {
+    let el = s.get_str(this, "canvas")?;
+    let n = d.el_s(s, el)?;
+    let Some(rec) = record_of(d, s, el, n)? else { return Ok(()) };
+    let (w, h) = {
+        let mut r = lock(&rec);
+        r.push(draw);
+        (r.w, r.h)
+    };
+    let mut doc = d.doc.borrow_mut();
+    if doc.image(n).is_none_or(|b| b.2.is_ready() || (b.0, b.1) != (w, h)) {
+        doc.set_image(n, Some((w, h, bare_html::dom::Pixels::lazy(move || lock(&rec).straight()))));
+    }
+    Ok(())
+}
+
+/// A rectangle as a closed path.
+fn rect_path(x0: f32, y0: f32, x1: f32, y1: f32) -> Vec<(f32, f32)> {
+    vec![(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+}
+
+/// `globalAlpha` of the context, 0 to 1.
+fn global_alpha<'s, E: Eng>(s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, f32> {
+    let ga = s.get_str(this, "globalAlpha")?;
+    Ok(if matches!(s.type_of(ga), bare_js_api::Type::Number) { s.to_number(ga)?.clamp(0.0, 1.0) as f32 } else { 1.0 })
+}
+
 /// `fillRect`, `strokeRect` and `clearRect(x, y, w, h)`. A value that is not finite draws nothing, as the standard says.
 fn draw<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>, op: Op) -> Res<'s, Local<'s>> {
     let mut r = [0f32; 4];
@@ -381,86 +479,422 @@ fn draw<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>,
         let x = arg_s::<E>(s, a, i);
         *v = s.to_number(x)? as f32;
     }
-    let el = s.get_str(this, "canvas")?;
-    let n = d.el_s(s, el)?;
     if r.iter().any(|v| !v.is_finite()) {
         return Ok(s.undefined());
     }
-    let color = match op {
-        Op::Clear => 0,
+    let [x, y, rw, rh] = r;
+    let (x0, x1, y0, y1) = (x.min(x + rw), x.max(x + rw), y.min(y + rh), y.max(y + rh));
+    let draw = match op {
+        Op::Clear => Draw::Fill { path: rect_path(x0, y0, x1, y1), evenodd: false, src: Source::Solid(0), alpha: 1.0, mode: Mode::Clear },
         Op::Fill | Op::Stroke => {
             let v = s.get_str(this, if matches!(op, Op::Fill) { "fillStyle" } else { "strokeStyle" })?;
             let text = if matches!(s.type_of(v), bare_js_api::Type::String) { d.string_arg_s(s, v)? } else { String::new() };
             let Some(c) = style_color(&text) else { return Ok(s.undefined()) };
-            let ga = s.get_str(this, "globalAlpha")?;
-            let ga = if matches!(s.type_of(ga), bare_js_api::Type::Number) { s.to_number(ga)?.clamp(0.0, 1.0) } else { 1.0 };
-            let alpha = (c.a as f64 * ga).round() as u32;
-            if alpha == 0 {
-                return Ok(s.undefined());
-            }
-            alpha << 24 | (c.r as u32) << 16 | (c.g as u32) << 8 | c.b as u32
-        }
-    };
-    let (w, h) = (s.get_str(el, "width")?, s.get_str(el, "height")?);
-    let (w, h) = (long_abs::<E>(s, w)?, long_abs::<E>(s, h)?);
-    if w == 0 || h == 0 || (w as u64) * (h as u64) * 4 > MAX_BYTES {
-        return Ok(s.undefined());
-    }
-    let mut map = d.canvases.borrow_mut();
-    let raster = map.entry(n).or_insert_with(|| Raster { w, h, px: Default::default() });
-    {
-        let mut px = raster.px.lock().unwrap_or_else(|e| e.into_inner());
-        // A new size clears the bitmap (HTML, "the canvas element": setting `width` or `height`).
-        if (raster.w, raster.h) != (w, h) || px.len() != (w * h) as usize {
-            (raster.w, raster.h) = (w, h);
-            *px = vec![0; (w * h) as usize];
-        }
-        let [x, y, rw, rh] = r;
-        let (x0, x1, y0, y1) = (x.min(x + rw), x.max(x + rw), y.min(y + rh), y.max(y + rh));
-        match op {
-            Op::Fill | Op::Clear => fill(&mut px, w, h, (x0, y0, x1, y1), color),
-            Op::Stroke => {
+            let color = raster2d::premul((c.a as u32) << 24 | (c.r as u32) << 16 | (c.g as u32) << 8 | c.b as u32);
+            let alpha = global_alpha::<E>(s, this)?;
+            let path = if matches!(op, Op::Fill) {
+                rect_path(x0, y0, x1, y1)
+            } else {
                 let lw = s.get_str(this, "lineWidth")?;
                 let lw = if matches!(s.type_of(lw), bare_js_api::Type::Number) { s.to_number(lw)? as f32 } else { 1.0 };
                 let k = if lw.is_finite() && lw > 0.0 { lw / 2.0 } else { 0.5 };
-                // The four sides, each a rectangle of the line width centered on the path.
-                for e in [(x0 - k, y0 - k, x1 + k, y0 + k), (x0 - k, y1 - k, x1 + k, y1 + k), (x0 - k, y0 + k, x0 + k, y1 - k), (x1 - k, y0 + k, x1 + k, y1 - k)] {
-                    fill(&mut px, w, h, e, color);
+                if rw == 0.0 && rh == 0.0 {
+                    return Ok(s.undefined());
                 }
-            }
+                // A line when one side is zero (butt caps). Else the outer box and the inner box the other way round: nonzero
+                // leaves the inside empty. The corners are miter joins.
+                if rw == 0.0 || rh == 0.0 {
+                    if rw == 0.0 { rect_path(x0 - k, y0, x1 + k, y1) } else { rect_path(x0, y0 - k, x1, y1 + k) }
+                } else {
+                    let mut p = rect_path(x0 - k, y0 - k, x1 + k, y1 + k);
+                    if x1 - x0 > 2.0 * k && y1 - y0 > 2.0 * k {
+                        p.push((f32::NAN, f32::NAN));
+                        p.extend(rect_path(x0 + k, y0 + k, x1 - k, y1 - k).into_iter().rev());
+                    }
+                    p
+                }
+            };
+            Draw::Fill { path, evenodd: false, src: Source::Solid(color), alpha, mode: Mode::SourceOver }
         }
-    }
-    // Paint reads a lazy copy. A copy that paint made already, or one of another size, is out of date: give a new one.
-    let mut doc = d.doc.borrow_mut();
-    if doc.image(n).is_none_or(|b| b.2.is_ready() || (b.0, b.1) != (w, h)) {
-        let px = raster.px.clone();
-        doc.set_image(n, Some((w, h, bare_html::dom::Pixels::lazy(move || px.lock().unwrap_or_else(|e| e.into_inner()).clone()))));
-    }
+    };
+    push(d, s, this, draw)?;
     Ok(s.undefined())
 }
 
-/// Paint the pixels whose centers are in `(x0, y0, x1, y1)` with `color` over the old ones (source-over). `0` clears them.
-fn fill(px: &mut [u32], w: u32, h: u32, (x0, y0, x1, y1): (f32, f32, f32, f32), color: u32) {
-    let span = |lo: f32, hi: f32, max: u32| ((lo - 0.5).ceil().max(0.0) as u32, ((hi - 0.5).ceil().max(0.0) as u32).min(max));
-    let ((cx0, cx1), (cy0, cy1)) = (span(x0, x1, w), span(y0, y1, h));
-    let a = color >> 24;
-    for y in cy0..cy1 {
-        for p in &mut px[(y * w + cx0) as usize..(y * w + cx1) as usize] {
-            *p = if color == 0 || a == 255 { color } else { over(color, *p) };
+// ------------------------------------------------------------------------------------------ pictures
+
+/// A picture source of `drawImage` and `createImageBitmap`. `Ok(None)`: an `<img>` with no picture (nothing to draw). A canvas of
+/// no pixels is an `InvalidStateError`, a closed `ImageBitmap` too. Another value is a `TypeError` with `ty` as the type list.
+fn image_of<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>, who: &str, ty: &str) -> Res<'s, Option<Image>> {
+    if let Some(n) = d.node_of_s(s, v).filter(|&n| d.is_element(n)) {
+        if d.doc.borrow().is_html(n, "img") {
+            return Ok(d.doc.borrow().image(n).map(|(w, h, px)| Image { w: *w, h: *h, px: Px::Straight(px.clone()) }));
+        }
+        if d.doc.borrow().is_html(n, "canvas") {
+            let Some(rec) = record_of(d, s, v, n)? else {
+                return Err(d.dom_err_s(s, "InvalidStateError", &format!("{who}: The image argument is a canvas element with a width or height of 0.")));
+            };
+            return Ok(Some(lock(&rec).image()));
         }
     }
+    if let Some(o) = obj_id::<E>(s, v)
+        && let Some(b) = d.bitmaps.borrow().get(&o)
+    {
+        return match b {
+            Some(img) => Ok(Some(img.clone())),
+            None => Err(d.dom_err_s(s, "InvalidStateError", &format!("{who}: The image source is detached."))),
+        };
+    }
+    Err(s.type_error(&format!("{who}: The provided value is not of type '{ty}'.")))
 }
 
-/// `src` over `dst`, both `0xAARRGGBB` not premultiplied.
-fn over(src: u32, dst: u32) -> u32 {
-    let (sa, da) = ((src >> 24) as f32 / 255.0, (dst >> 24) as f32 / 255.0);
-    let oa = sa + da * (1.0 - sa);
-    if oa <= 0.0 {
-        return 0;
+/// Where the source rectangle `src` (x, y, w, h, in picture pixels) of a `iw` by `ih` picture lands in `dst`: the source clipped to
+/// the picture and the destination clipped in the same proportion (HTML, `drawImage`). Gives the destination path, the transform from
+/// canvas to picture and the clamp box. `None`: nothing to draw.
+fn place(iw: u32, ih: u32, src: [f64; 4], dst: [f64; 4]) -> Option<(Vec<(f32, f32)>, Affine, (u32, u32, u32, u32))> {
+    let norm = |[x, y, w, h]: [f64; 4]| [x.min(x + w), y.min(y + h), w.abs(), h.abs()];
+    let ([sx, sy, sw, sh], [dx, dy, dw, dh]) = (norm(src), norm(dst));
+    if sw == 0.0 || sh == 0.0 || dw == 0.0 || dh == 0.0 {
+        return None;
     }
-    let ch = |sh: u32| {
-        let (s, d) = (((src >> sh) & 255) as f32, ((dst >> sh) & 255) as f32);
-        (((s * sa + d * da * (1.0 - sa)) / oa).round() as u32).min(255) << sh
+    let (kx, ky) = (dw / sw, dh / sh);
+    let (cx0, cy0, cx1, cy1) = (sx.max(0.0), sy.max(0.0), (sx + sw).min(iw as f64), (sy + sh).min(ih as f64));
+    if cx1 <= cx0 || cy1 <= cy0 {
+        return None;
+    }
+    let (px0, py0) = (dx + (cx0 - sx) * kx, dy + (cy0 - sy) * ky);
+    let (px1, py1) = (dx + (cx1 - sx) * kx, dy + (cy1 - sy) * ky);
+    let inv = Affine([1.0 / kx, 0.0, 0.0, 1.0 / ky, sx - dx / kx, sy - dy / ky]);
+    let clamp = (cx0.floor() as u32, cy0.floor() as u32, (cx1.ceil() as u32).min(iw), (cy1.ceil() as u32).min(ih));
+    Some((rect_path(px0 as f32, py0 as f32, px1 as f32, py1 as f32), inv, clamp))
+}
+
+const DRAW_TYPES: &str = "(CSSImageValue or HTMLCanvasElement or HTMLImageElement or HTMLVideoElement or ImageBitmap or OffscreenCanvas or SVGImageElement or VideoFrame)";
+
+/// `drawImage(image, dx, dy)`, `(image, dx, dy, dw, dh)` and `(image, sx, sy, sw, sh, dx, dy, dw, dh)`.
+fn draw_image<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let who = "Failed to execute 'drawImage' on 'CanvasRenderingContext2D'";
+    if a.len() < 3 {
+        return Err(s.type_error(&format!("{who}: 3 arguments required, but only {} present.", a.len())));
+    }
+    let n = if a.len() >= 9 { 9 } else if a.len() >= 5 { 5 } else { 3 };
+    if a.len() != n && !matches!(a.len(), 3 | 5 | 9) && a.len() < 9 {
+        return Err(s.type_error(&format!("{who}: Valid arities are: [3, 5, 9], but {} arguments provided.", a.len())));
+    }
+    let a0 = arg_s::<E>(s, a, 0);
+    let img = image_of(d, s, a0, who, DRAW_TYPES)?;
+    let mut v = [0f64; 8];
+    for i in 1..n {
+        let x = arg_s::<E>(s, a, i);
+        v[i - 1] = s.to_number(x)?;
+    }
+    let Some(img) = img else { return Ok(s.undefined()) };
+    if v[..n - 1].iter().any(|x| !x.is_finite()) {
+        return Ok(s.undefined());
+    }
+    let (iw, ih) = (img.w as f64, img.h as f64);
+    let (src, dst) = match n {
+        3 => ([0.0, 0.0, iw, ih], [v[0], v[1], iw, ih]),
+        5 => ([0.0, 0.0, iw, ih], [v[0], v[1], v[2], v[3]]),
+        _ => ([v[0], v[1], v[2], v[3]], [v[4], v[5], v[6], v[7]]),
     };
-    ((oa * 255.0).round() as u32) << 24 | ch(16) | ch(8) | ch(0)
+    let Some((path, inv, clamp)) = place(img.w, img.h, src, dst) else { return Ok(s.undefined()) };
+    let smooth = s.get_str(this, "imageSmoothingEnabled")?;
+    let smooth = s.as_bool(smooth) != Some(false);
+    let alpha = global_alpha::<E>(s, this)?;
+    push(d, s, this, Draw::Fill { path, evenodd: false, src: Source::Image { img, inv, clamp, smooth }, alpha, mode: Mode::SourceOver })?;
+    Ok(s.undefined())
+}
+
+/// Is `v` an `ImageData` (is `ImageData.prototype` on its prototype chain)?
+fn is_image_data<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, v: Local<'s>) -> Res<'s, bool> {
+    if !is_object::<E>(s, v) {
+        return Ok(false);
+    }
+    let f = ensure_s(d, s)?;
+    let proto = s.get_str(f, "prototype")?;
+    let want = obj_id::<E>(s, proto);
+    let mut at = s.get_prototype_of(v)?;
+    while let Some(p) = at {
+        if obj_id::<E>(s, p) == want {
+            return Ok(true);
+        }
+        at = s.get_prototype_of(p)?;
+    }
+    Ok(false)
+}
+
+/// `putImageData(imagedata, dx, dy, dirtyX?, dirtyY?, dirtyWidth?, dirtyHeight?)`: the pixels replace the canvas pixels, with no
+/// blend, transform or clip.
+fn put_image_data<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let who = "Failed to execute 'putImageData' on 'CanvasRenderingContext2D'";
+    if a.len() < 3 {
+        return Err(s.type_error(&format!("{who}: 3 arguments required, but only {} present.", a.len())));
+    }
+    let data = arg_s::<E>(s, a, 0);
+    if !is_image_data(d, s, data)? {
+        return Err(s.type_error(&format!("{who}: parameter 1 is not of type 'ImageData'.")));
+    }
+    let mut v = [0f64; 6];
+    for (i, x) in v.iter_mut().enumerate().take(if a.len() >= 7 { 6 } else { 2 }) {
+        let l = arg_s::<E>(s, a, i + 1);
+        *x = s.to_number(l)?;
+    }
+    let (w, h, bytes) = {
+        let (wv, hv, dv) = (s.get_str(data, "width")?, s.get_str(data, "height")?, s.get_str(data, "data")?);
+        let (w, h) = (long_abs::<E>(s, wv)?, long_abs::<E>(s, hv)?);
+        let Some(b) = s.bytes(dv) else { return Err(d.dom_err_s(s, "InvalidStateError", &format!("{who}: The source data has been detached."))) };
+        (w, h, b.to_vec())
+    };
+    if v.iter().any(|x| !x.is_finite()) {
+        return Ok(s.undefined());
+    }
+    let (dx, dy) = (v[0].trunc(), v[1].trunc());
+    // The dirty rectangle, normalized and clipped to the image data (HTML, "putImageData").
+    let (mut x0, mut y0, mut x1, mut y1) = (0.0, 0.0, w as f64, h as f64);
+    if a.len() >= 7 {
+        let [dxr, dyr, dw, dh] = [v[2].trunc(), v[3].trunc(), v[4].trunc(), v[5].trunc()];
+        (x0, x1) = (dxr.min(dxr + dw).max(0.0), dxr.max(dxr + dw).min(w as f64));
+        (y0, y1) = (dyr.min(dyr + dh).max(0.0), dyr.max(dyr + dh).min(h as f64));
+    }
+    if x1 <= x0 || y1 <= y0 || bytes.len() < w as usize * h as usize * 4 {
+        return Ok(s.undefined());
+    }
+    let (pw, ph) = ((x1 - x0) as u32, (y1 - y0) as u32);
+    let mut px = Vec::with_capacity(pw as usize * ph as usize);
+    for y in y0 as usize..y1 as usize {
+        for x in x0 as usize..x1 as usize {
+            let i = (y * w as usize + x) * 4;
+            px.push(raster2d::premul(u32::from_be_bytes([bytes[i + 3], bytes[i], bytes[i + 1], bytes[i + 2]])));
+        }
+    }
+    push(d, s, this, Draw::Put { x: (dx + x0) as i32, y: (dy + y0) as i32, w: pw, h: ph, px })?;
+    Ok(s.undefined())
+}
+
+// ------------------------------------------------------------------------------------------ encoders
+
+/// The bytes of the canvas `el` in `ty` and its type. `None`: a canvas of no pixels (`data:,` and a `null` Blob).
+/// PNG for every type. `image/jpeg` is the place of a JPEG encoder: none is built yet (the licence of `jpeg-encoder` waits for an owner
+/// decision, `docs/internal/design-canvas-2d.md` section 6), so it gives PNG, as the standard says for a type it does not support.
+fn encode<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, el: Local<'s>, ty: &str, _quality: Option<f64>) -> Res<'s, Option<(Vec<u8>, &'static str)>> {
+    let n = d.el_s(s, el)?;
+    let Some(rec) = record_of(d, s, el, n)? else { return Ok(None) };
+    let (w, h, rgba) = {
+        let mut r = lock(&rec);
+        let (w, h) = (r.w, r.h);
+        (w, h, r.rgba(0, 0, w, h))
+    };
+    let png = |rgba: &[u8]| bare_paint::png::encode_rgba(w, h, rgba).ok();
+    let out = match ty.to_ascii_lowercase().as_str() {
+        "image/jpeg" => png(&rgba).map(|b| (b, "image/png")),
+        _ => png(&rgba).map(|b| (b, "image/png")),
+    };
+    Ok(out)
+}
+
+/// The type and quality arguments of `toDataURL` and `toBlob` at `at` and `at + 1`.
+fn type_args<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, a: Args<'s>, at: usize) -> Res<'s, (String, Option<f64>)> {
+    let t = arg_s::<E>(s, a, at);
+    let ty = if matches!(s.type_of(t), bare_js_api::Type::Undefined) { "image/png".to_string() } else { d.string_arg_s(s, t)? };
+    let q = arg_s::<E>(s, a, at + 1);
+    let q = if matches!(s.type_of(q), bare_js_api::Type::Number) { Some(s.to_number(q)?).filter(|q| (0.0..=1.0).contains(q)) } else { None };
+    Ok((ty, q))
+}
+
+fn data_url<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    canvas(d, s, this)?;
+    let (ty, q) = type_args(d, s, a, 0)?;
+    let url = match encode(d, s, this, &ty, q)? {
+        Some((bytes, mime)) => format!("data:{mime};base64,{}", crate::browser_encoding::base64(&bytes)),
+        None => "data:,".to_string(),
+    };
+    d.js_str_s(s, &url)
+}
+
+/// `toBlob(callback, type, quality)`: the callback gets the Blob (or `null` for a canvas of no pixels) in a new task.
+fn to_blob<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    canvas(d, s, this)?;
+    let who = "Failed to execute 'toBlob' on 'HTMLCanvasElement'";
+    if a.is_empty() {
+        return Err(s.type_error(&format!("{who}: 1 argument required, but only 0 present.")));
+    }
+    let cb = arg_s::<E>(s, a, 0);
+    if !s.is_callable(cb) {
+        return Err(s.type_error(&format!("{who}: The callback provided as parameter 1 is not a function.")));
+    }
+    let (ty, q) = type_args(d, s, a, 1)?;
+    let blob = match encode(d, s, this, &ty, q)? {
+        Some((bytes, mime)) => old_v::<E>(s, |it| crate::browser_web::blob_from_bytes(d, it, bytes, mime.to_string()))?,
+        None => s.null(),
+    };
+    crate::browser_scheduler::queue_call(d, s, cb, blob)?;
+    Ok(s.undefined())
+}
+
+// ------------------------------------------------------------------------------------------ ImageBitmap
+
+/// The `ImageBitmap` constructor (no script can call it), made at the first use and kept in a hidden property of the global.
+#[cold]
+#[inline(never)]
+fn bitmap_ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, Local<'s>> {
+    let g = s.global();
+    let f = s.get_str(g, "__bareImageBitmap")?;
+    if is_object::<E>(s, f) {
+        return Ok(f);
+    }
+    let proto = s.new_object()?;
+    let f = d.add_fn_s(s, illegal, "ImageBitmap", 0, HostFn::Ctor)?;
+    let fixed = Attrs { writable: false, enumerable: false, configurable: false };
+    s.define_str(f, "prototype", proto, fixed)?;
+    s.define_str(proto, "constructor", f, Attrs { writable: true, enumerable: false, configurable: true })?;
+    d.def_get_l(s, proto, "width", |d, s, t, _| bitmap_size(d, s, t, false), None)?;
+    d.def_get_l(s, proto, "height", |d, s, t, _| bitmap_size(d, s, t, true), None)?;
+    d.def_method_l(s, proto, "close", 0, bitmap_close, false)?;
+    let p = obj_id::<E>(s, proto).expect("an object");
+    old::<E, _>(s, |it| crate::browser_lazy::tag(d, it, p, "ImageBitmap"))?;
+    s.define_str(g, "__bareImageBitmap", f, fixed)?;
+    Ok(f)
+}
+
+fn illegal<'s, E: Eng>(_: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    Err(s.type_error("Illegal constructor"))
+}
+
+fn lazy_image_bitmap<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let v = match a.get(0) {
+        Some(v) => v,
+        None => bitmap_ctor(d, s)?,
+    };
+    let g = s.global();
+    s.define_str(g, "ImageBitmap", v, Attrs { writable: true, enumerable: false, configurable: true })?;
+    Ok(if a.is_empty() { v } else { s.undefined() })
+}
+
+fn bitmap_entry<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>) -> Res<'s, (E::Obj, Option<(u32, u32)>)> {
+    let o = obj_id::<E>(s, this).filter(|o| d.bitmaps.borrow().contains_key(o));
+    let Some(o) = o else { return Err(s.type_error("Illegal invocation")) };
+    let size = d.bitmaps.borrow()[&o].as_ref().map(|i| (i.w, i.h));
+    Ok((o, size))
+}
+
+fn bitmap_size<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, height: bool) -> Res<'s, Local<'s>> {
+    let (_, size) = bitmap_entry(d, s, this)?;
+    let (w, h) = size.unwrap_or((0, 0));
+    Ok(s.number(if height { h } else { w } as f64))
+}
+
+fn bitmap_close<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    let (o, _) = bitmap_entry(d, s, this)?;
+    d.bitmaps.borrow_mut().insert(o, None);
+    Ok(s.undefined())
+}
+
+fn new_bitmap<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, img: Image) -> Res<'s, Local<'s>> {
+    let f = bitmap_ctor(d, s)?;
+    let proto = s.get_str(f, "prototype")?;
+    let p = obj_id::<E>(s, proto).expect("made");
+    let o = d.obj_s(s, p)?;
+    d.bitmaps.borrow_mut().insert(o, Some(img));
+    d.own_obj(s.engine(), o, crate::browser::Owner::Bitmap(o));
+    Ok(d.obj_local(s, o))
+}
+
+/// `createImageBitmap(image, options?)` and `createImageBitmap(image, sx, sy, sw, sh, options?)`. The image is an `<img>`, a canvas,
+/// an `ImageBitmap`, an `ImageData` or a `Blob`. A Blob is decoded on the page thread. The options `resizeWidth`, `resizeHeight`,
+/// `resizeQuality` ("pixelated" samples the nearest pixel) and `imageOrientation: "flipY"` work. `premultiplyAlpha` and
+/// `colorSpaceConversion` are ignored.
+fn create_image_bitmap<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let p = s.new_promise()?;
+    let r = make_bitmap(d, s, a);
+    crate::browser_web::settle::<E>(s, p, r)
+}
+
+fn make_bitmap<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let who = "Failed to execute 'createImageBitmap' on 'Window'";
+    if a.is_empty() {
+        return Err(s.type_error(&format!("{who}: 1 argument required, but only 0 present.")));
+    }
+    let src = arg_s::<E>(s, a, 0);
+    let ty = "(Blob or HTMLCanvasElement or HTMLImageElement or HTMLVideoElement or ImageBitmap or ImageData or OffscreenCanvas or SVGImageElement or VideoFrame)";
+    let img = if let Some(o) = obj_id::<E>(s, src)
+        && let Some(bytes) = crate::browser_web::blob_bytes(d, o)
+    {
+        let Ok(i) = bare_image::decode(&bytes) else {
+            return Err(d.dom_err_s(s, "InvalidStateError", &format!("{who}: The source image could not be decoded.")));
+        };
+        Image { w: i.width, h: i.height, px: Px::Straight(bare_html::dom::Pixels::from(i.pixels.to_vec())) }
+    } else if is_image_data(d, s, src)? {
+        let (wv, hv, dv) = (s.get_str(src, "width")?, s.get_str(src, "height")?, s.get_str(src, "data")?);
+        let (w, h) = (long_abs::<E>(s, wv)?, long_abs::<E>(s, hv)?);
+        let Some(b) = s.bytes(dv) else { return Err(d.dom_err_s(s, "InvalidStateError", &format!("{who}: The source data has been detached."))) };
+        let px = b.chunks_exact(4).map(|p| raster2d::premul(u32::from_be_bytes([p[3], p[0], p[1], p[2]]))).collect();
+        Image { w, h, px: Px::Premul(Arc::new(px)) }
+    } else {
+        match image_of(d, s, src, who, ty)? {
+            Some(i) => i,
+            None => return Err(d.dom_err_s(s, "InvalidStateError", &format!("{who}: The image element contains no image data."))),
+        }
+    };
+    // The crop rectangle and the options.
+    let crop = a.len() >= 5;
+    let mut c = [0.0, 0.0, img.w as f64, img.h as f64];
+    if crop {
+        for (i, x) in c.iter_mut().enumerate() {
+            let v = arg_s::<E>(s, a, i + 1);
+            *x = s.to_number(v)?.trunc();
+        }
+        if c[2] == 0.0 || !c[2].is_finite() {
+            return Err(s.range_error(&format!("{who}: The crop rect width is 0.")));
+        }
+        if c[3] == 0.0 || !c[3].is_finite() {
+            return Err(s.range_error(&format!("{who}: The crop rect height is 0.")));
+        }
+        c = [c[0].min(c[0] + c[2]), c[1].min(c[1] + c[3]), c[2].abs(), c[3].abs()];
+    }
+    let opts = arg_s::<E>(s, a, if crop { 5 } else { 1 });
+    let (mut rw, mut rh, mut pixelated, mut flip) = (None, None, false, false);
+    if is_object::<E>(s, opts) {
+        for (name, out) in [("resizeWidth", &mut rw), ("resizeHeight", &mut rh)] {
+            let v = s.get_str(opts, name)?;
+            if !matches!(s.type_of(v), bare_js_api::Type::Undefined) {
+                let x = s.to_number(v)?;
+                if !(x.is_finite() && x >= 1.0 && x <= 4294967295.0) {
+                    return Err(d.dom_err_s(s, "InvalidStateError", &format!("{who}: The {name} provided is 0.")));
+                }
+                *out = Some(x.trunc());
+            }
+        }
+        let q = s.get_str(opts, "resizeQuality")?;
+        pixelated = matches!(s.type_of(q), bare_js_api::Type::String) && d.string_arg_s(s, q)? == "pixelated";
+        let o = s.get_str(opts, "imageOrientation")?;
+        flip = matches!(s.type_of(o), bare_js_api::Type::String) && d.string_arg_s(s, o)? == "flipY";
+    }
+    let (ow, oh) = match (rw, rh) {
+        (Some(w), Some(h)) => (w, h),
+        (Some(w), None) => (w, (w * c[3] / c[2]).ceil()),
+        (None, Some(h)) => ((h * c[2] / c[3]).ceil(), h),
+        (None, None) => (c[2], c[3]),
+    };
+    let (ow, oh) = (ow as u32, oh as u32);
+    if !raster2d::fits(ow, oh) {
+        return Err(d.dom_err_s(s, "InvalidStateError", &format!("{who}: The ImageBitmap could not be allocated.")));
+    }
+    // No crop, resize or flip: share the pixels of the source.
+    let same = [c[0], c[1]] == [0.0, 0.0] && (ow, oh) == (img.w, img.h) && !flip;
+    let img = if same {
+        img
+    } else {
+        let mut r = Record::new(ow, oh);
+        if let Some((mut path, mut inv, clamp)) = place(img.w, img.h, c, [0.0, 0.0, ow as f64, oh as f64]) {
+            if flip {
+                // The point (x, y) shows what (x, oh - y) shows without the flip.
+                inv = inv.then(&Affine([1.0, 0.0, 0.0, -1.0, 0.0, oh as f64]));
+                path.iter_mut().for_each(|p| p.1 = oh as f32 - p.1);
+            }
+            r.push(Draw::Fill { path, evenodd: false, src: Source::Image { img, inv, clamp, smooth: !pixelated }, alpha: 1.0, mode: Mode::SourceOver });
+        }
+        r.image()
+    };
+    new_bitmap(d, s, img)
 }

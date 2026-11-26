@@ -1,6 +1,6 @@
 //! Load test for the DOM/JS bridge. One case at one scale per process.
 //!
-//!   browser_load CASE SCALE      CASE: mutation | event | lookup | svg | svgparse | rel      SCALE: 1, 10, 100
+//!   browser_load CASE SCALE      CASE: mutation | event | lookup | svg | svgparse | rel | canvas | canvasidle      SCALE: 1, 10, 100
 //!
 //! mutation: SCALE*1000 elements are made, filled, appended to a list, and old ones removed in blocks.
 //! event: SCALE*1000 bubbling events through a 4 level tree with 3 listeners on the path. Half start in JS,
@@ -9,7 +9,8 @@
 //! cloned (every 10th) and removed in blocks. svgparse: a page of SCALE*500 inline SVG icons that the parser makes, then
 //! namespace and attribute reads on the first SCALE*50 (attached wrappers stay alive, so the wrapper cap bounds the reads). Each icon has an SVG title with HTML markup, an SVG style with a character reference and markup, and a CDATA section.
 //! rel: SCALE*1000 `link` elements get a `rel` by a string and by an object (ToString), are read and lowercased, removed (every
-//! third), cloned (every seventh) and kept as a list of at most 1000. Each case runs in small scripts, with a VM collect between them, and checks its
+//! third), cloned (every seventh) and kept as a list of at most 1000. canvas: SCALE*1000 rectangles and one scaled `drawImage` on a
+//! 512x512 canvas, read once with `getImageData`: the record and one raster. canvasidle: the same draws and no read: the record only. Each case runs in small scripts, with a VM collect between them, and checks its
 //! result against the same computation in Rust. Prints time, CPU, peak RSS, allocations and what the realm holds.
 //! `tools/js/browser_load.sh` runs the matrix under caps.
 
@@ -293,6 +294,26 @@ fn exec(name: &str, scale: usize) {
             expect("rel count", run(&mut b, "ul.childElementCount"), count.to_string());
             expect("rel last", run(&mut b, "ul.lastElementChild.rel"), last);
         }
+        "canvas" | "canvasidle" => {
+            let n = 1000 * scale;
+            run(&mut b, "var c = document.createElement('canvas'); c.width = 512; c.height = 512; var x = c.getContext('2d');
+                var s = document.createElement('canvas'); s.width = 64; s.height = 64; var y = s.getContext('2d'); y.fillStyle = '#c03020'; y.fillRect(0, 0, 32, 64);
+                function chunk(start, count) {
+                  for (var i = start; i < start + count; i++) {
+                    x.fillStyle = i % 2 ? '#336699' : 'rgba(200, 100, 0, 0.5)';
+                    x.fillRect(i % 500 + 0.5, (i * 7) % 500, 12, 12);
+                  }
+                }");
+            for start in (0..n).step_by(CHUNK) {
+                run(&mut b, &format!("chunk({start}, {CHUNK})"));
+            }
+            run(&mut b, "x.drawImage(s, 0, 0, 64, 64, 200, 200, 300, 300)");
+            if name == "canvas" {
+                // The image covers (300, 300) with its left half: the color of `y.fillStyle`.
+                expect("canvas", run(&mut b, "var d = x.getImageData(0, 0, 512, 512).data; d.length + ':' + [d[(300 * 512 + 300) * 4], d[(300 * 512 + 300) * 4 + 3]].join()"), "1048576:192,255".into());
+            }
+            collect(&mut b);
+        }
         _ => die(format!("unknown case {name}")),
     }
     let run_ms = t.elapsed().as_secs_f64() * 1e3;
@@ -316,7 +337,7 @@ fn exec(name: &str, scale: usize) {
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     if a.len() != 3 {
-        die("usage: browser_load mutation|event|lookup|svg|svgparse|rel 1|10|100".into());
+        die("usage: browser_load mutation|event|lookup|svg|svgparse|rel|canvas|canvasidle 1|10|100".into());
     }
     let scale: usize = a[2].parse().unwrap_or_else(|_| die("scale".into()));
     // the evaluator recurses: run on a big stack
