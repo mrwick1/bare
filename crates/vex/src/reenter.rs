@@ -35,7 +35,7 @@ use crate::value::Value;
 /// A JS stack and a feedback vector for one nested call.
 pub(crate) struct Machine {
     pub(crate) stack: Vec<Value>,
-    pub(crate) fbs: Vec<Feedback>,
+    pub(crate) fbs: Vec<Option<Box<Feedback>>>,
 }
 
 /// The nested calls are bounded by Rust stack space, as in V8, and not by a count. Each one is a frame of `Vm::run` and of the native

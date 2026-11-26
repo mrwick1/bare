@@ -542,6 +542,9 @@ mod conversion_tests;
 mod fn_source_tests;
 
 #[cfg(test)]
+#[path = "feedback_slots_tests.rs"]
+mod feedback_slots_tests;
+#[cfg(test)]
 #[path = "proto_ic_tests.rs"]
 mod proto_ic_tests;
 #[cfg(test)]
