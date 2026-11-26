@@ -12,11 +12,18 @@
 //!    timer), a key repeat, or the drop of the free buffer `IDLE` after the last frame, and none when none waits. An idle
 //!    window uses no CPU, and holds one buffer: the one that the compositor shows.
 //!
+//! Clipboard: the seat also gives a data device. `Control::set_clipboard` makes a data source that the window owns, and the window
+//! writes its data to the pipes of the programs that paste (`Send`). `Control::read_clipboard` reads the offer of the selection, one
+//! MIME type after the other (`ReadJob`). The pipe fds join the `poll` set only while a read or a write is open, so an idle window
+//! still wakes for nothing. A read waits for `poll` to say that the pipe is readable, so the blocking `read` does not block. A write
+//! sends 4096 bytes at most after `poll` says that the pipe is writable: a pipe that has room for one page takes that atomically.
+//!
 //! Input: the seat gives a pointer and a keyboard (smithay-client-toolkit, with xkbcommon for the layout). Their handlers
 //! only queue `Event`s in `State::pending`. The loop hands the queue to `App::event` after the Wayland events of the round
 //! are read, and before the draw, so many events make one frame. The one timer is the key repeat: while a key is held, the
 //! `poll` timeout is the time to the next repeat (`input::Repeat`), and it is `None` again as soon as the key goes up.
 
+use crate::clipboard::{ReadJob, offer_for};
 use crate::input::{self, Cursor, Event, Mods, Repeat};
 use crate::redraw::{Redraw, next_size};
 use crate::slots::{Pick, Slots};
@@ -33,6 +40,13 @@ use smithay_client_toolkit::seat::{
     keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers, RepeatInfo},
     pointer::{AxisScroll, CursorIcon, PointerEvent, PointerEventKind, PointerHandler, ThemeSpec, ThemedPointer},
 };
+use smithay_client_toolkit::data_device_manager::{
+    DataDeviceManagerState, ReadPipe, WritePipe,
+    data_device::{DataDevice, DataDeviceHandler},
+    data_offer::{DataOfferHandler, DragOffer, SelectionOffer},
+    data_source::{CopyPasteSource, DataSourceHandler},
+};
+use smithay_client_toolkit::reexports::client::protocol::{wl_data_device::WlDataDevice, wl_data_device_manager::DndAction, wl_data_source::WlDataSource};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, FrameCallbackData},
     output::{OutputHandler, OutputState},
@@ -56,6 +70,26 @@ use std::time::{Duration, Instant};
 
 /// An idle window drops its free buffer after this time with no frame. The compositor holds the other one, the frame on screen.
 const IDLE: Duration = Duration::from_secs(1);
+
+/// A paste bigger than this is dropped: a source that never ends must not fill the memory.
+const MAX_PASTE: usize = 64 << 20;
+/// What a write to a pipe sends at once (`PIPE_BUF`).
+const CHUNK: usize = 4096;
+
+/// The read of one MIME type of the selection that is open.
+struct Reading {
+    job: ReadJob,
+    offer: SelectionOffer,
+    /// The type, the pipe and the bytes so far.
+    cur: Option<(String, ReadPipe, Vec<u8>)>,
+}
+
+/// Our data on its way to a program that pastes.
+struct Send {
+    pipe: WritePipe,
+    data: Arc<[u8]>,
+    done: usize,
+}
 
 /// A handle that wakes the loop from another thread and asks for a new frame.
 #[derive(Clone)]
@@ -100,6 +134,17 @@ struct State {
     window: XdgWindow,
     pointer: Option<ThemedPointer>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
+    qh: QueueHandle<State>,
+    /// The clipboard. Each part is `None` when the compositor has no data device manager (or no seat yet).
+    ddm: Option<DataDeviceManagerState>,
+    device: Option<DataDevice>,
+    /// The source that we own and its data. The source is `None` after another program copied.
+    source: Option<CopyPasteSource>,
+    own: Vec<(String, Arc<[u8]>)>,
+    /// The serial of the last key press: the compositor wants one for `set_selection`.
+    serial: u32,
+    reading: Option<Reading>,
+    writes: Vec<Send>,
     /// Events that the handlers queued, for `App::event`.
     pending: Vec<Event>,
     mods: Mods,
@@ -160,6 +205,15 @@ impl Window {
             window,
             pointer: None,
             keyboard: None,
+            qh: qh.clone(),
+            // A compositor with no data device manager still gets a window: copy and paste do nothing.
+            ddm: DataDeviceManagerState::bind(&globals, &qh).ok(),
+            device: None,
+            source: None,
+            own: Vec::new(),
+            serial: 0,
+            reading: None,
+            writes: Vec::new(),
             pending: Vec::new(),
             mods: Mods::default(),
             buttons: 0,
@@ -207,6 +261,10 @@ impl Window {
             if self.state.exit {
                 break;
             }
+            // A clipboard answer that `obey` queued is delivered in the next round, not after a sleep.
+            if !self.state.pending.is_empty() {
+                continue;
+            }
             // Send what we wrote. If the socket is full, also wait until it can be written.
             let flushed = match self.conn.flush() {
                 Ok(()) => true,
@@ -216,17 +274,25 @@ impl Window {
             // `None`: events were read while we prepared. Dispatch them first.
             let Some(guard) = self.queue.prepare_read() else { continue };
             let wl_fd = guard.connection_fd();
-            let mut fds = [
-                PollFd::new(&wl_fd, if flushed { PollFlags::IN } else { PollFlags::IN | PollFlags::OUT }),
-                PollFd::new(&self.wake_rx, PollFlags::IN),
-            ];
+            let wl_flags = if flushed { PollFlags::IN } else { PollFlags::IN | PollFlags::OUT };
+            let mut base;
+            let mut more;
+            // The pipes of the clipboard are in the set only while one is open.
+            let fds: &mut [PollFd] = if self.state.io_open() {
+                more = vec![PollFd::new(&wl_fd, wl_flags), PollFd::new(&self.wake_rx, PollFlags::IN)];
+                self.state.io_fds(&mut more);
+                &mut more
+            } else {
+                base = [PollFd::new(&wl_fd, wl_flags), PollFd::new(&self.wake_rx, PollFlags::IN)];
+                &mut base
+            };
             // Sleep until an event, the next key repeat when a key is held, or the next work of the app.
             let now = Instant::now();
             app.round(now - woke);
             let idle = self.state.idle_at().map(|t| t.saturating_duration_since(now));
             let wait = [self.state.repeat.wait(now), next.map(|t| t.saturating_duration_since(now)), idle].into_iter().flatten().min();
             let timeout = wait.map(|d| Timespec { tv_sec: d.as_secs() as _, tv_nsec: d.subsec_nanos() as _ });
-            let polled = poll(&mut fds, timeout.as_ref());
+            let polled = poll(fds, timeout.as_ref());
             woke = Instant::now();
             match polled {
                 Ok(_) => {}
@@ -234,6 +300,7 @@ impl Window {
                 Err(e) => return Err(Error(format!("poll: {e}"))),
             }
             let (wl, wake) = (!fds[0].revents().is_empty(), fds[1].revents().contains(PollFlags::IN));
+            let io: Vec<PollFlags> = fds[2..].iter().map(|f| f.revents()).collect();
             self.state.stats.wakeups += 1;
             if wl {
                 match guard.read() {
@@ -243,6 +310,9 @@ impl Window {
                 }
             } else {
                 drop(guard);
+            }
+            if !io.is_empty() {
+                self.state.io_ready(&io);
             }
             if wake {
                 let mut sink = [0u8; 64];
@@ -314,6 +384,131 @@ impl State {
         if let Some(c) = ctl.cursor {
             self.cursor = c;
             self.apply_cursor();
+        }
+        if let Some(data) = ctl.set_clipboard {
+            self.copy(data);
+        }
+        if let Some(groups) = ctl.read_clipboard {
+            self.paste(&groups);
+        }
+    }
+
+    /// Become the owner of the selection, with `data`.
+    fn copy(&mut self, data: Vec<(String, Arc<[u8]>)>) {
+        let (Some(ddm), Some(device)) = (&self.ddm, &self.device) else { return };
+        let own = offer_for(&data);
+        if own.is_empty() {
+            return;
+        }
+        let source = ddm.create_copy_paste_source(&self.qh, own.iter().map(|(m, _)| m));
+        source.set_selection(device, self.serial);
+        // The old source is destroyed here. Its `cancelled` event comes later, for a source that is no longer ours.
+        self.source = Some(source);
+        self.own = own;
+    }
+
+    /// Read the selection for `Control::read_clipboard`. The answer is one `Event::Clipboard`, queued in `pending`.
+    fn paste(&mut self, groups: &[Vec<String>]) {
+        let want: Vec<Vec<&str>> = groups.iter().map(|g| g.iter().map(String::as_str).collect()).collect();
+        let want: Vec<&[&str]> = want.iter().map(Vec::as_slice).collect();
+        self.reading = None;
+        if self.source.is_some() {
+            // Our own selection: no pipe, the data is here.
+            let own: Vec<String> = self.own.iter().map(|(m, _)| m.clone()).collect();
+            let mut job = ReadJob::new(&own, &want);
+            while let Some(m) = job.next() {
+                let bytes = self.own.iter().find(|(o, _)| *o == m).map(|(_, b)| b.to_vec()).unwrap_or_default();
+                job.push(&m, bytes);
+            }
+            self.pending.push(Event::Clipboard { items: job.items() });
+            return;
+        }
+        match self.device.as_ref().and_then(|d| d.data().selection_offer()) {
+            Some(offer) => {
+                let offered = offer.with_mime_types(|m| m.to_vec());
+                self.reading = Some(Reading { job: ReadJob::new(&offered, &want), offer, cur: None });
+                self.advance_read();
+            }
+            None => self.pending.push(Event::Clipboard { items: Vec::new() }),
+        }
+    }
+
+    /// Start the read of the next type, or answer when all are read.
+    fn advance_read(&mut self) {
+        while let Some(r) = &mut self.reading {
+            let Some(mime) = r.job.next() else {
+                let r = self.reading.take().expect("checked above");
+                self.pending.push(Event::Clipboard { items: r.job.items() });
+                return;
+            };
+            // The request goes out with the next flush of the loop, before the poll.
+            if let Ok(pipe) = r.offer.receive(mime.clone()) {
+                r.cur = Some((mime, pipe, Vec::new()));
+                return;
+            }
+        }
+    }
+
+    /// Whether a clipboard pipe is open.
+    fn io_open(&self) -> bool {
+        self.reading.as_ref().is_some_and(|r| r.cur.is_some()) || !self.writes.is_empty()
+    }
+
+    /// Add the open pipes to the poll set: the read pipe first, then the write pipes, in the order of `io_ready`.
+    fn io_fds<'a>(&'a self, out: &mut Vec<PollFd<'a>>) {
+        if let Some((_, pipe, _)) = self.reading.as_ref().and_then(|r| r.cur.as_ref()) {
+            out.push(PollFd::new(pipe, PollFlags::IN));
+        }
+        for w in &self.writes {
+            out.push(PollFd::new(&w.pipe, PollFlags::OUT));
+        }
+    }
+
+    /// Do the reads and writes that `poll` said are ready. `ready` is in the order of `io_fds`.
+    fn io_ready(&mut self, ready: &[PollFlags]) {
+        let mut ready = ready.iter();
+        if self.reading.as_ref().is_some_and(|r| r.cur.is_some()) {
+            if !ready.next().expect("one entry for each pipe").is_empty() {
+                self.read_chunk();
+            }
+        }
+        self.writes.retain_mut(|w| {
+            let r = ready.next().expect("one entry for each pipe");
+            if r.is_empty() {
+                return true;
+            }
+            if r.intersects(PollFlags::ERR | PollFlags::HUP | PollFlags::NVAL) {
+                return false;
+            }
+            let end = (w.done + CHUNK).min(w.data.len());
+            match w.pipe.write(&w.data[w.done..end]) {
+                Ok(n) => {
+                    w.done += n;
+                    w.done < w.data.len()
+                }
+                Err(e) => e.kind() == std::io::ErrorKind::Interrupted,
+            }
+        });
+    }
+
+    /// Read what the open pipe has now. The end of the pipe finishes the type.
+    fn read_chunk(&mut self) {
+        let Some(r) = &mut self.reading else { return };
+        let Some((_, pipe, buf)) = &mut r.cur else { return };
+        let mut chunk = [0u8; 65536];
+        let n = match pipe.read(&mut chunk) {
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => return,
+            Err(_) => 0,
+        };
+        buf.extend_from_slice(&chunk[..n]);
+        let too_big = buf.len() > MAX_PASTE;
+        if n == 0 || too_big {
+            let (mime, _, bytes) = r.cur.take().expect("checked above");
+            if !too_big {
+                r.job.push(&mime, bytes);
+            }
+            self.advance_read();
         }
     }
 
@@ -468,7 +663,11 @@ impl SeatHandler for State {
     fn seat_state(&mut self) -> &mut SeatState {
         &mut self.seat
     }
-    fn new_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
+    fn new_seat(&mut self, _: &Connection, qh: &QueueHandle<Self>, seat: wl_seat::WlSeat) {
+        if self.device.is_none() {
+            self.device = self.ddm.as_ref().map(|m| m.get_data_device(qh, &seat));
+        }
+    }
 
     fn new_capability(&mut self, _: &Connection, qh: &QueueHandle<Self>, seat: wl_seat::WlSeat, capability: Capability) {
         match capability {
@@ -554,7 +753,9 @@ impl PointerHandler for State {
 }
 
 impl KeyboardHandler for State {
-    fn enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: &wl_surface::WlSurface, _: u32, _: &[u32], _: &[Keysym]) {}
+    fn enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: &wl_surface::WlSurface, serial: u32, _: &[u32], _: &[Keysym]) {
+        self.serial = serial;
+    }
 
     fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: &wl_surface::WlSurface, _: u32) {
         // All held keys are released when the window loses the keyboard focus, and the repeat stops.
@@ -563,7 +764,8 @@ impl KeyboardHandler for State {
         self.mods = Mods::default();
     }
 
-    fn press_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, e: KeyEvent) {
+    fn press_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, serial: u32, e: KeyEvent) {
+        self.serial = serial;
         let ev = self.key_event(e.raw_code, e.keysym, e.utf8.clone(), true, false);
         if input::repeats(input::code_of(e.raw_code)) {
             self.repeat.press(e.raw_code, Instant::now());
@@ -594,6 +796,45 @@ impl KeyboardHandler for State {
             RepeatInfo::Disable => Repeat::new(0, 0),
         };
     }
+}
+
+impl DataDeviceHandler for State {
+    // Drag and drop is not here. The selection is read from the device when the app asks.
+    fn enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice, _: f64, _: f64, _: &wl_surface::WlSurface) {}
+    fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {}
+    fn motion(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice, _: f64, _: f64) {}
+    fn selection(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {}
+    fn drop_performed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {}
+}
+
+impl DataOfferHandler for State {
+    fn source_actions(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &mut DragOffer, _: DndAction) {}
+    fn selected_action(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &mut DragOffer, _: DndAction) {}
+}
+
+impl DataSourceHandler for State {
+    fn accept_mime(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource, _: Option<String>) {}
+
+    fn send_request(&mut self, _: &Connection, _: &QueueHandle<Self>, source: &WlDataSource, mime: String, pipe: WritePipe) {
+        // A request for a source that is gone, or for a type that we do not have, gets a closed pipe: the reader sees no data.
+        if self.source.as_ref().is_some_and(|s| s.inner() == source) {
+            if let Some((_, data)) = self.own.iter().find(|(m, _)| *m == mime) {
+                self.writes.push(Send { pipe, data: data.clone(), done: 0 });
+            }
+        }
+    }
+
+    fn cancelled(&mut self, _: &Connection, _: &QueueHandle<Self>, source: &WlDataSource) {
+        // Another program copied. A `cancelled` for an older source of ours changes nothing.
+        if self.source.as_ref().is_some_and(|s| s.inner() == source) {
+            self.source = None;
+            self.own.clear();
+        }
+    }
+
+    fn dnd_dropped(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource) {}
+    fn dnd_finished(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource) {}
+    fn action(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource, _: DndAction) {}
 }
 
 delegate_dispatch2!(State);
