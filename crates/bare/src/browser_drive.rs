@@ -142,13 +142,13 @@ impl<E: Eng> Browser<E> {
             return None;
         }
         let frame = self.render().ok()?;
-        crate::page::caret_in(self, &frame, node, x, y)
+        crate::page::caret_in(self, &frame, node, x, y, 0.0)
     }
 
     /// The window point of the boundary `at` of the text of a field, or its center when it has no layout.
     fn text_point(&mut self, node: NodeId, at: u32) -> R<E, (f64, f64)> {
         if let Ok(frame) = self.render()
-            && let Some(p) = crate::page::point_in(self, &frame, node, at)
+            && let Some(p) = crate::page::point_in(self, &frame, node, at, 0.0)
         {
             return Ok(p);
         }

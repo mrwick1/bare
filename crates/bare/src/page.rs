@@ -17,8 +17,10 @@
 //! navigations that they start), and the window sleeps until the next one (`App::tick`). A page with no queued task wakes for nothing.
 //!
 //! Gaps: a file path has no session, so only a URL window is interactive; checkbox and radio boxes and `<input>` button
-//! labels are not drawn (the paint crate draws controls, S4 topic 3); a textarea draws the lines that end with a line feed (no wrap, no scroll,
-//! and a click maps to the line under the pointer); a long value scrolls to keep the caret in view but a
+//! labels are not drawn (the paint crate draws controls, S4 topic 3); a textarea wraps its lines at the box width (at a space, else at a
+//! letter) and scrolls by `area_top`: the caret stays in view, and the wheel scrolls a focused textarea before the page. Up, Down, Home and
+//! End move by visual line (`line_move`). Gaps there: the driver (`browser_drive.rs`) maps a press with no scroll; Up and Down do not keep
+//! the x across moves. A long single-line value scrolls to keep the caret in view but a
 //! click is mapped with the same scroll, so a click right after a scroll can be off by a few pixels at the field edge.
 
 use crate::eng::Eng;
@@ -133,6 +135,8 @@ pub struct Page {
     pub whole: usize,
     /// The text fields of `frame` in `band`, with their fragments, found when its display list was built.
     inputs: Vec<(NodeId, u32)>,
+    /// For each textarea that scrolled: how far down it is, and the caret that it kept in view last (`u32::MAX`: none yet).
+    area_top: std::collections::HashMap<NodeId, (f32, u32)>,
     /// Listener errors and render errors, kept for tests. The first of each also goes to stderr, unless `quiet`.
     pub errors: Vec<String>,
     /// Print nothing (a test driver: it reports the errors itself, through its redacting filter).
@@ -191,8 +195,83 @@ struct Field {
     /// What is drawn: the value, or bullets for a password.
     text: String,
     scroll: f32,
-    /// A textarea: the lines of `text` are drawn one under the other from the top of the box.
+    /// A textarea: the lines of `text` are wrapped at `w` and drawn one under the other from the top of the box, scrolled by `top`.
     area: bool,
+    /// The size of the content box (a textarea: without the scrollbar that layout reserves).
+    w: f32,
+    h: f32,
+}
+
+/// One visual line of a textarea: the UTF-16 offsets `start..end` of its text and the byte range `from..to` of the same text. A space
+/// where the line wraps stays at the end of its line. `last`: a line feed or the end of the value follows it.
+struct Vline {
+    start: u32,
+    end: u32,
+    from: usize,
+    to: usize,
+    last: bool,
+}
+
+impl Vline {
+    /// The caret offset in this line that is nearest to `x` pixels from its left. On a wrapped line it stays before the space that wraps.
+    fn stop(&self, text: &str, x: f32, m: &Metrics) -> u32 {
+        (self.start + offset_at(&text[self.from..self.to], x, m)).min(self.last_stop(text))
+    }
+
+    /// The last caret offset of this line: its `end`, or the one before a space that wraps.
+    fn last_stop(&self, text: &str) -> u32 {
+        self.end - (!self.last && text[self.from..self.to].ends_with(' ')) as u32
+    }
+}
+
+/// The visual lines of a textarea text: each line feed ends a line, and a line that is wider than `w` breaks after its last space that
+/// fits, or else before the character that does not fit. Each line holds at least one character.
+fn wrap(text: &str, w: f32, m: &Metrics) -> Vec<Vline> {
+    let mut out = Vec::new();
+    let (mut u, mut b) = (0u32, 0usize);
+    for hard in text.split('\n') {
+        let ((mut ls, mut lb), (mut cu, mut cb)) = ((u, b), (u, b));
+        let (mut x, mut brk) = (0.0, None);
+        for c in hard.chars() {
+            let cw = m.px(font::width_of(m.face, c));
+            // A space that does not fit hangs at the end of its line.
+            if c != ' ' && x + cw > w && cu > ls {
+                let (bu, bb) = brk.take().unwrap_or((cu, cb));
+                out.push(Vline { start: ls, end: bu, from: lb, to: bb, last: false });
+                (ls, lb) = (bu, bb);
+                x = x_of(&text[lb..cb], u32::MAX, m);
+            }
+            x += cw;
+            cu += c.len_utf16() as u32;
+            cb += c.len_utf8();
+            if c == ' ' {
+                brk = Some((cu, cb));
+            }
+        }
+        out.push(Vline { start: ls, end: cu, from: lb, to: cb, last: true });
+        (u, b) = (cu + 1, cb + 1);
+    }
+    out
+}
+
+/// How far a textarea is scrolled, after its caret may have moved: from the scroll `top` and the caret `seen` last, the new pair. The caret
+/// `end` comes into view if it is not the one seen last, and the scroll stays inside the text.
+fn reveal(f: &Field, end: Option<u32>, (mut top, seen): (f32, u32)) -> (f32, u32) {
+    let (lines, lh) = (wrap(&f.text, f.w, &f.m), f.m.normal_line_height());
+    if let Some(e) = end.filter(|&e| e != seen) {
+        let i = line_of(&lines, e) as f32;
+        if i * lh < top {
+            top = i * lh;
+        } else if (i + 1.0) * lh > top + f.h {
+            top = (i + 1.0) * lh - f.h;
+        }
+    }
+    (top.ceil().clamp(0.0, (lines.len() as f32 * lh - f.h).max(0.0).ceil()), end.unwrap_or(seen))
+}
+
+/// The line that holds the boundary `at`: a boundary where a line wraps belongs to the line after it.
+fn line_of(lines: &[Vline], at: u32) -> usize {
+    lines.iter().position(|l| at < l.end || (at == l.end && l.last)).unwrap_or(lines.len() - 1)
 }
 
 /// The box of `n` in `f`, if it has one.
@@ -201,7 +280,7 @@ fn box_of(f: &Frame, n: NodeId) -> Option<&Fragment> {
 }
 
 /// The text field geometry of `n`, an `<input>` or a `<textarea>` with the box `frag`.
-fn field(f: &Frame, doc: &Document, n: NodeId, frag: &Fragment, text: &str, focus_end: Option<u32>) -> Option<Field> {
+fn field(f: &Frame, doc: &Document, n: NodeId, frag: &Fragment, text: &str, focus_end: Option<u32>, top: f32) -> Option<Field> {
     let style = f.styles.style(n)?;
     let px = |p| style.px(p).max(0.0);
     let m = Metrics::of(style);
@@ -211,11 +290,16 @@ fn field(f: &Frame, doc: &Document, n: NodeId, frag: &Fragment, text: &str, focu
     let h = (frag.rect.h - px(Property::BorderTopWidth) - px(Property::BorderBottomWidth) - px(Property::PaddingTop) - px(Property::PaddingBottom)).max(0.0);
     let line = m.normal_line_height();
     let area = doc.is_html(n, "textarea");
-    let baseline = if area { (y0 + m.ascent).round() as i32 } else { (y0 + (h - line) / 2.0 + m.ascent).round() as i32 };
+    // The scrollbar of a textarea takes room inside its box: the text wraps before it.
+    let (w, h) = match f.areas.get(n).filter(|_| area) {
+        Some(a) => (w - (a.pad.w - a.client().0), h - (a.pad.h - a.client().1)),
+        None => (w, h),
+    };
+    let baseline = if area { (y0 + m.ascent - top).round() as i32 } else { (y0 + (h - line) / 2.0 + m.ascent).round() as i32 };
     let shown = if !area && input_kind(doc, n) == "password" { "•".repeat(text.chars().count()) } else { text.to_string() };
     let scroll = focus_end.filter(|_| !area).map_or(0.0, |e| (x_of(&shown, e, &m) - w + 1.0).max(0.0));
     let clip = IRect { x0: x.floor() as i32, y0: y0.floor() as i32, x1: (x + w).ceil() as i32, y1: (y0 + h).ceil() as i32 };
-    Some(Field { x, baseline, clip, m, color: argb(style.color(Property::TextColor)), text: shown, scroll, area })
+    Some(Field { x, baseline, clip, m, color: argb(style.color(Property::TextColor)), text: shown, scroll, area, w, h })
 }
 
 /// Move the geometry of field `n` to where it is drawn now: the page and the scroll containers around it have offsets, and
@@ -248,53 +332,72 @@ fn place(f: &Frame, doc: &Document, scroll: &Scroll, n: NodeId, fld: &mut Field)
     fld.clip = clip.map_or(moved, |k| moved.intersect(k));
 }
 
-/// The caret offset for a press at (`x`, `y`) in text field `n`, on the layout `fr`.
-pub(crate) fn caret_in<E: Eng>(b: &mut Browser<E>, fr: &Frame, n: NodeId, x: f64, y: f64) -> Option<u32> {
+/// The caret offset for a press at (`x`, `y`) in text field `n`, on the layout `fr`. `top`: how far a textarea is scrolled.
+pub(crate) fn caret_in<E: Eng>(b: &mut Browser<E>, fr: &Frame, n: NodeId, x: f64, y: f64, top: f32) -> Option<u32> {
     let value = b.input_value(n)?;
     let focus_end = b.input_selection(n).map(|s| s.1);
     let doc = b.document();
     let doc = doc.borrow();
-    let mut f = field(fr, &doc, n, box_of(fr, n)?, &value, focus_end)?;
+    let mut f = field(fr, &doc, n, box_of(fr, n)?, &value, focus_end, top)?;
     place(fr, &doc, &b.scroll(), n, &mut f);
     if f.area {
-        // The line under the pointer (the last one for a point below the text), then the offset inside it.
+        // The visual line under the pointer (the last one for a point below the text), then the offset inside it.
+        let lines = wrap(&f.text, f.w, &f.m);
         let line = ((y as f32 - (f.baseline as f32 - f.m.ascent)) / f.m.normal_line_height()).floor().max(0.0) as usize;
-        let (mut start, mut pick) = (0, ("", 0));
-        for (i, t) in f.text.split('\n').enumerate() {
-            pick = (t, start);
-            if i == line {
-                break;
-            }
-            start += t.encode_utf16().count() as u32 + 1;
-        }
-        return Some(pick.1 + offset_at(pick.0, x as f32 - f.x, &f.m));
+        return Some(lines[line.min(lines.len() - 1)].stop(&f.text, x as f32 - f.x, &f.m));
     }
     Some(offset_at(&f.text, x as f32 - f.x + f.scroll, &f.m))
 }
 
 /// The window point of the boundary `at` of the text of field `n`, on the layout `fr`: the inverse of `caret_in`.
-pub(crate) fn point_in<E: Eng>(b: &mut Browser<E>, fr: &Frame, n: NodeId, at: u32) -> Option<(f64, f64)> {
+pub(crate) fn point_in<E: Eng>(b: &mut Browser<E>, fr: &Frame, n: NodeId, at: u32, top: f32) -> Option<(f64, f64)> {
     let value = b.input_value(n)?;
     let focus_end = b.input_selection(n).map(|s| s.1);
     let doc = b.document();
     let doc = doc.borrow();
-    let mut f = field(fr, &doc, n, box_of(fr, n)?, &value, focus_end)?;
+    let mut f = field(fr, &doc, n, box_of(fr, n)?, &value, focus_end, top)?;
     place(fr, &doc, &b.scroll(), n, &mut f);
     let top = f.baseline as f32 - f.m.ascent;
     let lh = f.m.normal_line_height();
     if f.area {
-        let (mut line, mut start) = (0, 0);
-        for t in f.text.split('\n') {
-            let end = start + t.encode_utf16().count() as u32;
-            if at <= end {
-                return Some(((f.x + x_of(t, at - start, &f.m)) as f64, (top + (line as f32 + 0.5) * lh) as f64));
-            }
-            line += 1;
-            start = end + 1;
-        }
-        return None;
+        let lines = wrap(&f.text, f.w, &f.m);
+        let i = line_of(&lines, at);
+        let l = &lines[i];
+        return Some(((f.x + x_of(&f.text[l.from..l.to], at.saturating_sub(l.start), &f.m)) as f64, (top + (i as f32 + 0.5) * lh) as f64));
     }
     Some(((f.x - f.scroll + x_of(&f.text, at, &f.m)) as f64, (top + lh / 2.0) as f64))
+}
+
+/// The caret offset that `key` (Up, Down, Home or End) gives in textarea `n`, from the visual lines, on the layout `fr`. Up and Down keep
+/// the x of the caret; on the first line Up goes to the start of the value, and on the last Down goes to its end. `None`: not a textarea.
+pub(crate) fn line_move<E: Eng>(b: &mut Browser<E>, fr: &Frame, n: NodeId, key: &str) -> Option<u32> {
+    let value = b.input_value(n)?;
+    let sel = b.input_selection(n)?;
+    let doc = b.document();
+    let doc = doc.borrow();
+    let f = field(fr, &doc, n, box_of(fr, n)?, &value, None, 0.0).filter(|f| f.area)?;
+    let lines = wrap(&f.text, f.w, &f.m);
+    let at = if sel.2 == "backward" { sel.0 } else { sel.1 };
+    let i = line_of(&lines, at);
+    let l = &lines[i];
+    let x = || x_of(&f.text[l.from..l.to], at.saturating_sub(l.start), &f.m);
+    Some(match key {
+        "Home" => l.start,
+        "End" => l.last_stop(&f.text),
+        "ArrowUp" if i == 0 => 0,
+        "ArrowUp" => lines[i - 1].stop(&f.text, x(), &f.m),
+        _ if i + 1 == lines.len() => l.end,
+        _ => lines[i + 1].stop(&f.text, x(), &f.m),
+    })
+}
+
+/// How far textarea `n` can scroll, on the layout `fr`: the height of its visual lines less the height of its box.
+pub(crate) fn area_max<E: Eng>(b: &mut Browser<E>, fr: &Frame, n: NodeId) -> Option<f32> {
+    let value = b.input_value(n)?;
+    let doc = b.document();
+    let doc = doc.borrow();
+    let f = field(fr, &doc, n, box_of(fr, n)?, &value, None, 0.0).filter(|f| f.area)?;
+    Some((wrap(&f.text, f.w, &f.m).len() as f32 * f.m.normal_line_height() - f.h).max(0.0).ceil())
 }
 
 impl Page {
@@ -329,6 +432,7 @@ impl Page {
             check_frames: std::env::var_os("BARE_CHECK_FRAMES").is_some_and(|v| v == "1"),
             whole: 4096,
             inputs: Vec::new(),
+            area_top: Default::default(),
             errors: Vec::new(),
             quiet: false,
             woken: None,
@@ -875,8 +979,34 @@ impl Page {
     /// The caret offset for a press at `x` in text field `n`.
     fn caret_at(&mut self, n: NodeId, x: f64, y: f64) -> Option<u32> {
         self.frame_now()?;
+        let top = self.area_top.get(&n).map_or(0.0, |t| t.0);
         let Page { source, frame, .. } = self;
-        crate::any!(source.browser()?, b => caret_in(b, frame.as_ref()?, n, x, y))
+        crate::any!(source.browser()?, b => caret_in(b, frame.as_ref()?, n, x, y, top))
+    }
+
+    /// The caret offset for Up, Down, Home or End in the focused textarea, from its visual lines. `None`: another key or element.
+    fn line_target(&mut self, key: &str, m: Mods) -> Option<u32> {
+        if !matches!(key, "ArrowUp" | "ArrowDown" | "Home" | "End") || m.ctrl || m.alt || m.meta {
+            return None;
+        }
+        self.frame_now()?;
+        let n = self.browser()?.active_element().ok().flatten()?;
+        let Page { source, frame, .. } = self;
+        crate::any!(source.browser()?, b => line_move(b, frame.as_ref()?, n, key))
+    }
+
+    /// Scroll the focused textarea under the pointer by the wheel, if it can move that way. Gives whether it did.
+    fn area_wheel(&mut self, target: Option<NodeId>, dy: f32) -> bool {
+        let Some(n) = target else { return false };
+        if self.frame_now().is_none() || self.browser().and_then(|b| b.active_element().ok().flatten()) != Some(n) {
+            return false;
+        }
+        let Page { source, frame, area_top, .. } = self;
+        let Some(max) = source.browser().and_then(|b| crate::any!(b, b => area_max(b, frame.as_ref()?, n))) else { return false };
+        let (top, seen) = area_top.get(&n).copied().unwrap_or((0.0, u32::MAX));
+        let to = (top + dy).clamp(0.0, max).round();
+        area_top.insert(n, (to, seen));
+        to != top
     }
 
     /// Which document is the page now? A node of an old one means nothing after a navigation.
@@ -913,6 +1043,7 @@ impl Page {
     pub(crate) fn release_frame(&mut self) {
         self.frame = None;
         self.painter.list = Default::default();
+        self.area_top.clear();
         (self.built, self.listed, self.controls, self.inputs, self.ext, self.last_hit, self.key) = (false, false, Vec::new(), Vec::new(), (false, Vec::new()), None, (0, [0; 8]));
     }
 
@@ -1017,7 +1148,9 @@ impl Page {
             Event::Wheel { x, y, dx, dy, .. } => {
                 // Only a scroll container can take the wheel before the page: with none, the hit test would find nothing to use.
                 let target = if self.frame_now().is_some_and(|f| !f.areas.list.is_empty()) { self.hit(x, y) } else { None };
-                if self.scroll_with(|g, s| g.wheel(s, target, dx as f32, dy as f32)) {
+                if self.area_wheel(target, dy as f32) {
+                    h.redraw = true;
+                } else if self.scroll_with(|g, s| g.wheel(s, target, dx as f32, dy as f32)) {
                     h.redraw = true;
                     self.send_scroll_events();
                 }
@@ -1027,7 +1160,8 @@ impl Page {
                 let key_name = key.clone();
                 let before = if tab { self.browser().and_then(|b| b.active_element().ok().flatten()) } else { None };
                 let k = KeyInput { key, code: code.to_string(), text, repeat, mods: mods(m) };
-                let r = self.browser().map(|b| b.ui_key(k, pressed));
+                let caret = if pressed { self.line_target(&k.key, k.mods) } else { None };
+                let r = self.browser().map(|b| b.ui_key_at(k, pressed, caret));
                 if let Some(r) = r {
                     h.redraw = self.after(r);
                 }
@@ -1072,7 +1206,7 @@ impl Page {
         self.rehover();
         self.frame_now();
         let mut drew = true;
-        let Page { source, frame, painter, built, listed, controls, inputs, band, ext, whole, .. } = self;
+        let Page { source, frame, painter, built, listed, controls, inputs, band, ext, whole, area_top, .. } = self;
         let b = source.browser();
         if let (Some(b), Some(f)) = (b, frame.as_ref()) {
             let focus = b.active_element().ok().flatten();
@@ -1128,7 +1262,17 @@ impl Page {
                 let sel = b.input_selection(n);
                 let focused = focus == Some(n);
                 let end = sel.filter(|_| focused).map(|s| if s.2 == "backward" { s.0 } else { s.1 });
-                let Some(mut fld) = field(f, &doc, n, &f.layout.fragments[j as usize], &value, end) else { continue };
+                let frag = &f.layout.fragments[j as usize];
+                let Some(mut fld) = field(f, &doc, n, frag, &value, end, area_top.get(&n).map_or(0.0, |t| t.0)) else { continue };
+                if fld.area {
+                    // Keep the caret in view when it moved. Else the scroll stays where the wheel put it.
+                    let kept = area_top.get(&n).copied().unwrap_or((0.0, u32::MAX));
+                    let now = reveal(&fld, end, kept);
+                    if now != kept {
+                        area_top.insert(n, now);
+                        fld = field(f, &doc, n, frag, &value, end, now.0).expect("made above");
+                    }
+                }
                 place(f, &doc, &scroll, n, &mut fld);
                 Page::draw_field(painter, canvas, &fld, sel.filter(|_| focused));
             }
@@ -1188,24 +1332,29 @@ impl Page {
         }
     }
 
-    /// The lines of a textarea, with the selection and the caret on the lines they fall on.
+    /// The visual lines of a textarea, with the selection and the caret on the lines they fall on.
     fn draw_area(painter: &mut Painter, canvas: &mut Canvas, f: &Field, sel: Option<(u32, u32, &str)>) {
         let line = f.m.normal_line_height();
-        let mut start = 0;
-        for (i, text) in f.text.split('\n').enumerate() {
-            let end = start + text.encode_utf16().count() as u32;
+        let lines = wrap(&f.text, f.w, &f.m);
+        let caret = sel.filter(|s| s.0 == s.1).map(|s| line_of(&lines, s.0));
+        for (i, l) in lines.iter().enumerate() {
             let baseline = f.baseline + (i as f32 * line).round() as i32;
             let top = (baseline as f32 - f.m.ascent).round() as i32;
+            // A line that is above or below the box is not drawn.
+            if top + line as i32 <= f.clip.y0 || top >= f.clip.y1 {
+                continue;
+            }
+            let text = &f.text[l.from..l.to];
+            let at = |u: u32| (f.x + x_of(text, u - l.start, &f.m)).round() as i32;
             if let Some((s, e, _)) = sel {
-                let at = |u: u32| (f.x + x_of(text, u - start, &f.m)).round() as i32;
-                if s != e && s <= end && e > start {
-                    canvas.fill(IRect { x0: at(s.max(start)), y0: top, x1: at(e.min(end)), y1: top + line as i32 }.intersect(f.clip), 0xFFB3_D7FF);
-                } else if s == e && (start..=end).contains(&s) {
+                let (lo, hi) = (s.max(l.start), e.min(l.end));
+                if lo < hi {
+                    canvas.fill(IRect { x0: at(lo), y0: top, x1: at(hi), y1: top + line as i32 }.intersect(f.clip), 0xFFB3_D7FF);
+                } else if caret == Some(i) {
                     canvas.fill(IRect { x0: at(s), y0: top, x1: at(s) + 1, y1: top + line as i32 }.intersect(f.clip), f.color);
                 }
             }
             bare_paint::text(canvas, &mut painter.glyphs, f.clip, f.x, baseline, f.m.size, f.color, f.m.face, (0.0, 0.0), text);
-            start = end + 1;
         }
     }
 
