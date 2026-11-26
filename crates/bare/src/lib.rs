@@ -305,6 +305,8 @@ mod browser_canvas_raster_tests;
 #[cfg(test)]
 mod browser_canvas_images_tests;
 #[cfg(test)]
+mod browser_canvas_jpeg_tests;
+#[cfg(test)]
 mod browser_platform_tests;
 mod browser_style;
 mod browser_style_block;

@@ -94,8 +94,8 @@ fn to_data_url_gives_a_png_that_decodes_to_the_pixels() {
     big(|| {
         let mut b = browser();
         let url = js(&mut b, "var c = document.createElement('canvas'); c.width = 3; c.height = 2; var x = c.getContext('2d'); x.fillStyle = 'rgba(0,128,255,0.5)';
-            x.fillRect(1, 0, 2, 2); c.toDataURL('image/jpeg', 0.8)");
-        // JPEG waits for an encoder: the standard falls back to PNG.
+            x.fillRect(1, 0, 2, 2); c.toDataURL('image/webp', 0.8)");
+        // Bare has no WebP encoder: the standard falls back to PNG.
         let b64 = url.strip_prefix("data:image/png;base64,").expect("a PNG data URL");
         let bytes = unbase64(b64);
         let img = bare_image::decode(&bytes).expect("a PNG");
@@ -106,10 +106,10 @@ fn to_data_url_gives_a_png_that_decodes_to_the_pixels() {
 }
 
 #[test]
-fn to_blob_calls_back_in_a_task_with_a_png() {
+fn to_blob_calls_back_in_a_task_with_a_jpeg() {
     let got = run("var c = cv(2, 2); c.getContext('2d').fillRect(0, 0, 1, 1); var order = [];
         return new Promise(function (res) { c.toBlob(function (b) { order.push('blob'); res(order.join() + ' ' + b.type + ' ' + (b instanceof Blob) + ' ' + (b.size > 50)) }, 'image/jpeg', 0.8); order.push('sync') })");
-    assert_eq!(got, "sync,blob image/png true true");
+    assert_eq!(got, "sync,blob image/jpeg true true");
     assert_eq!(run("var c = cv(0, 2); return new Promise(function (res) { c.toBlob(res) })"), "null");
     assert_eq!(run("try { cv(1, 1).toBlob() } catch (e) { return e.name }"), "TypeError");
 }
@@ -136,7 +136,7 @@ fn a_picture_blob_is_drawn_scaled_and_encoded_again() {
     let got = run("var s = cv(8, 6), y = s.getContext('2d'); y.fillStyle = '#204060'; y.fillRect(0, 0, 8, 6); y.fillStyle = '#f0a000'; y.fillRect(0, 0, 4, 6);
         return new Promise(function (res) { s.toBlob(res) }).then(function (blob) { return createImageBitmap(blob) }).then(function (bm) {
           var c = cv(4, 3), x = c.getContext('2d'); x.drawImage(bm, 0, 0, 4, 3);
-          return new Promise(function (res) { c.toBlob(res, 'image/jpeg', 0.8) }) }).then(function (out) { return createImageBitmap(out) }).then(function (bm) {
+          return new Promise(function (res) { c.toBlob(res) }) }).then(function (out) { return createImageBitmap(out) }).then(function (bm) {
           var c = cv(4, 3), x = c.getContext('2d'); x.drawImage(bm, 0, 0); var d = x.getImageData(0, 0, 4, 1).data;
           return bm.width + 'x' + bm.height + ' ' + [d[0], d[1], d[2], d[12], d[13], d[14]].join() })");
     assert_eq!(got, "4x3 240,160,0,32,64,96");

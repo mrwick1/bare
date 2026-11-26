@@ -97,4 +97,6 @@ Licensed under either of these, at your option:
 
 The files in `data/unicode/` and `data/tz/windowsZones.xml` are under the Unicode License v3 ([data/unicode/LICENSE.txt](data/unicode/LICENSE.txt)). `data/tz/tzdata.zi` is public domain. The file in `data/html/` is under CC BY 4.0 ([data/html/LICENSE.txt](data/html/LICENSE.txt)). The file in `data/css/` is under the MIT License ([data/css/LICENSE.txt](data/css/LICENSE.txt)). The fonts in `data/fonts/` are under the SIL Open Font License ([OFL.txt](data/fonts/OFL.txt), [OFL-Arabic.txt](data/fonts/OFL-Arabic.txt), [OFL-Symbols2.txt](data/fonts/OFL-Symbols2.txt)). The Wycheproof vectors in `data/crypto/ecdsa/` are under the Apache License 2.0 ([LICENSE-wycheproof-APACHE-2.0](data/crypto/ecdsa/LICENSE-wycheproof-APACHE-2.0)).
 
+The JPEG encoder is based in part on the work of the Independent JPEG Group ([crates/paint/LICENSE-IJG](crates/paint/LICENSE-IJG)).
+
 Third-party components and their notices: [docs/third-party.md](docs/third-party.md). Engine monitoring: [status and controls](docs/monitoring.md).
