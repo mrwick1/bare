@@ -373,7 +373,7 @@ pub(crate) fn sized_with(cx: &mut Cx, node: NodeId, space: Space, forced: Option
             // Flex, grid and table containers are their own BFC, so `top_open` is false for them.
             let kids = match context(cx, node) {
                 Context::Flow => children(cx, node, inner, top_open, bp.top, bp.left, here, stop, next),
-                Context::Flex => crate::flex::layout(cx, node, inner, bp),
+                Context::Flex => crate::flex::layout(cx, node, inner, bp, (min, max.unwrap_or(f32::INFINITY))),
                 Context::Grid => crate::grid::layout(cx, node, inner, bp),
                 Context::Table => crate::table::layout(cx, node, inner, bp, plan.as_ref().expect("a table has a plan")),
             };
