@@ -1,5 +1,5 @@
 //! Tests of the bitmap of a `<canvas>`: `fillRect`, `strokeRect` and `clearRect` draw pixels, and paint shows them. The expected pixels
-//! are written by hand: a pixel is in a rectangle when its center is.
+//! are written by hand. Edges are anti-aliased, as in Chrome: a pixel that a rectangle covers in part is `?`.
 
 use crate::browser::*;
 use crate::js_limits::{EvalLimits, HeapLimits};
@@ -34,10 +34,12 @@ fn rows(b: &Browser, dark: u32) -> Vec<String> {
 fn fill_stroke_and_clear_draw_pixels() {
     let mut b = browser("<canvas id=c width=6 height=5></canvas>");
     b.run_script("var x = document.getElementById('c').getContext('2d'); x.fillStyle = '#122e31'; x.fillRect(1, 1, 2, 2); x.fillRect(4.6, 0, -1, 1.4)").unwrap();
-    assert_eq!(rows(&b, 0xFF12_2E31), ["....#.", ".##...", ".##...", "......", "......"]);
+    // The rectangle 3.6..4.6 by 0..1.4 covers four pixels in part.
+    assert_eq!(rows(&b, 0xFF12_2E31), ["...??.", ".##??.", ".##...", "......", "......"]);
     // A 1px line on a half pixel covers one pixel: the box 0..5 by 0..4. `clearRect` makes pixels transparent again.
     b.run_script("x.strokeStyle = 'rgb(18, 46, 49)'; x.strokeRect(0.5, 0.5, 4, 3); x.clearRect(1, 1, 2, 1)").unwrap();
-    assert_eq!(rows(&b, 0xFF12_2E31), ["#####.", "#...#.", "###.#.", "#####.", "......"]);
+    // (3, 1) keeps the part coverage of the first fill.
+    assert_eq!(rows(&b, 0xFF12_2E31), ["#####.", "#..?#.", "###.#.", "#####.", "......"]);
 }
 
 #[test]

@@ -28,6 +28,18 @@ pub fn encode(canvas: &Canvas, out: impl Write) -> io::Result<()> {
     Ok(())
 }
 
+/// A PNG of RGBA bytes, not premultiplied (`toDataURL` and `toBlob` of a canvas). The settings of [`encode`].
+pub fn encode_rgba(w: u32, h: u32, rgba: &[u8]) -> io::Result<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut e = png::Encoder::new(&mut out, w, h);
+    e.set_color(png::ColorType::Rgba);
+    e.set_depth(png::BitDepth::Eight);
+    e.set_compression(png::Compression::Fast);
+    e.set_filter(png::Filter::Sub);
+    e.write_header().map_err(io::Error::other)?.write_image_data(rgba).map_err(io::Error::other)?;
+    Ok(out)
+}
+
 pub fn write_file(canvas: &Canvas, path: &std::path::Path) -> io::Result<()> {
     encode(canvas, io::BufWriter::new(std::fs::File::create(path)?))
 }
