@@ -56,6 +56,8 @@ pub(crate) struct Ver {
     pub state: St,
     /// `skipWaiting()` ran.
     pub skip: bool,
+    /// The script added a `fetch` listener when it ran last (`None`: it has not run in this session).
+    pub has_fetch: Option<bool>,
 }
 
 impl Ver {
@@ -119,6 +121,27 @@ pub(crate) enum ToClient {
     Msg { from: WSnap, origin: String, data: Cloned },
     /// `WindowClient.focus()` in a `notificationclick`: the page comes to the front.
     Focus,
+    /// The reply of the worker to the `fetch` `id` of this client.
+    Fetched { id: u64, reply: FetchReply },
+}
+
+/// A request of a controlled page for a `fetch` event. Headers are `name:value` lines.
+pub(crate) struct FetchReq {
+    pub id: u64,
+    pub url: String,
+    pub method: String,
+    pub headers: String,
+    pub body: Option<Vec<u8>>,
+    pub mode: String,
+    pub credentials: String,
+    pub redirect: String,
+}
+
+/// What the worker answered: no `respondWith` (the page goes to the network), a network error, or a response.
+pub(crate) enum FetchReply {
+    Fallback,
+    Error,
+    Resp { status: u16, status_text: String, headers: String, body: Vec<u8>, url: String },
 }
 
 pub(crate) struct Client {
@@ -142,6 +165,8 @@ pub(crate) enum EvKind {
     Message { client: u64, data: Cloned },
     /// The user clicked (`click`, with the `action` button or "") or closed a notification of the registration.
     Note { click: bool, note: Rc<PNote>, action: String },
+    /// A `fetch` of the client `client`.
+    Fetch { client: u64, req: FetchReq },
 }
 
 /// A notification of a registration (`showNotification`). It lives in the session until a close.
@@ -243,6 +268,8 @@ pub(crate) struct Hub {
     log: Vec<NotificationEvent>,
     /// The id of the last notification of the session: a page notification and a registration notification share the numbers.
     note_last: u64,
+    /// The `fetch` events with no reply yet: event id, version, client, fetch id.
+    fetches: Vec<(u64, u64, u64, u64)>,
 }
 
 /// The origin of a URL: `scheme://host[:port]`.
@@ -451,7 +478,7 @@ impl Hub {
             return self.reply(job.client, id, Ok(snap));
         }
         let vid = self.id();
-        self.regs[i].parsed = Some((Ver { id: vid, url: job.script, text: text.into(), module: job.module, state: St::Parsed, skip: false }, id));
+        self.regs[i].parsed = Some((Ver { id: vid, url: job.script, text: text.into(), module: job.module, state: St::Parsed, skip: false, has_fetch: None }, id));
         self.jobs.push(Job { id, client: job.client, reg: job.reg, script: String::new(), module: job.module });
         let eid = self.id();
         self.events.push(Ev { id: eid, ver: vid, kind: EvKind::Start });
@@ -517,6 +544,10 @@ impl Hub {
         for v in vs {
             self.push_state(&r.origin, v.id, St::Redundant);
             self.events.retain(|e| e.ver != v.id);
+            let open: Vec<u64> = self.fetches.iter().filter(|f| f.1 == v.id).map(|f| f.3).collect();
+            for id in open {
+                self.fetch_reply(id, FetchReply::Fallback);
+            }
         }
         self.rev += 1;
     }
@@ -575,6 +606,10 @@ impl Hub {
     pub(crate) fn run_ended(&mut self, ver: u64) {
         let Some(k) = self.runs.iter().position(|r| r.ver == ver) else { return };
         let r = self.runs.remove(k);
+        let open: Vec<u64> = self.fetches.iter().filter(|f| f.1 == ver).map(|f| f.3).collect();
+        for id in open {
+            self.fetch_reply(id, FetchReply::Fallback);
+        }
         for (id, life) in r.inflight {
             match life {
                 Life::Install => self.finish(ver, Life::Install, false),
@@ -594,6 +629,10 @@ impl Hub {
         let Some(k) = r.inflight.iter().position(|e| e.0 == id) else { return };
         let (_, life) = r.inflight.remove(k);
         r.idle_since = now;
+        // A `fetch` event that ended with no reply: the page goes to the network.
+        if let Some(f) = self.fetches.iter().find(|f| f.0 == id).map(|f| f.3) {
+            self.fetch_reply(f, FetchReply::Fallback);
+        }
         self.finish(ver, life, ok);
     }
 
@@ -810,6 +849,45 @@ impl Hub {
         true
     }
 
+    // ------------------------------------------------------------------------------------------ fetch events
+
+    /// The script of `ver` ran: did it add a `fetch` listener?
+    pub(crate) fn set_has_fetch(&mut self, ver: u64, has: bool) {
+        if let Some(i) = self.reg_of_ver(ver) {
+            let r = &mut self.regs[i];
+            for v in [r.parsed.as_mut().map(|p| &mut p.0), r.installing.as_mut(), r.waiting.as_mut(), r.active.as_mut()].into_iter().flatten() {
+                if v.id == ver {
+                    v.has_fetch = Some(has);
+                }
+            }
+        }
+    }
+
+    /// The worker that gets the `fetch` events of client `client`: its controller, unless its script has no `fetch` listener.
+    pub(crate) fn fetch_ver(&self, client: u64) -> Option<u64> {
+        let ver = self.client(client)?.controller?;
+        let v = self.ver(ver)?;
+        (matches!(v.state, St::Activating | St::Activated) && v.has_fetch != Some(false)).then_some(ver)
+    }
+
+    /// A `fetch` event of client `client` for `ver`. Gives the fetch id (`req.id` is set here).
+    pub(crate) fn fetch(&mut self, ver: u64, client: u64, mut req: FetchReq) -> u64 {
+        let (eid, fid) = (self.id(), self.id());
+        req.id = fid;
+        self.fetches.push((eid, ver, client, fid));
+        self.events.push(Ev { id: eid, ver, kind: EvKind::Fetch { client, req } });
+        fid
+    }
+
+    /// The reply to the fetch `id`: it goes to its client. A second reply does nothing.
+    pub(crate) fn fetch_reply(&mut self, id: u64, reply: FetchReply) {
+        let Some(k) = self.fetches.iter().position(|f| f.3 == id) else { return };
+        let (_, _, client, _) = self.fetches.remove(k);
+        if let Some(c) = self.clients.iter_mut().find(|c| c.id == client) {
+            c.inbox.push(ToClient::Fetched { id, reply });
+        }
+    }
+
     // ------------------------------------------------------------------------------------------ the profile
 
     /// The registrations with an active version, for the profile.
@@ -828,7 +906,7 @@ impl Hub {
                 continue;
             }
             let (id, vid) = (self.id(), self.id());
-            let v = Ver { id: vid, url: s.script.clone(), text: s.text.as_str().into(), module: s.module, state: St::Activated, skip: false };
+            let v = Ver { id: vid, url: s.script.clone(), text: s.text.as_str().into(), module: s.module, state: St::Activated, skip: false, has_fetch: None };
             self.regs.push(Reg { id, scope: s.scope.clone(), origin: origin_of(&s.scope), uvc: s.uvc, parsed: None, installing: None, waiting: None, active: Some(v), uninstalling: false });
         }
     }

@@ -792,7 +792,7 @@ impl<E: Eng> Browser<E> {
                                         t.diags.push(format!("worker {}: the script threw: {e:?}", ch.label));
                                     }
                                     if let Of::Service(ver) = of {
-                                        crate::browser_sw::evaluated(&self.dom, ver, r.is_ok());
+                                        crate::browser_sw::evaluated(&self.dom, &b, ver, r.is_ok());
                                     }
                                 }
                                 ch.delta = delta;
