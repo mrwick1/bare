@@ -935,6 +935,10 @@ pub trait Engine: Sized {
     fn run_script<'s>(&mut self, _source: &str) -> Result<Local<'s>, Error<'s>> {
         Err(Error::Abort(Abort::Unsupported("run_script")))
     }
+    /// [`Engine::run_script`] for a script that has a URL: stack frames of its code show `name` as the source.
+    fn run_script_named<'s>(&mut self, source: &str, _name: &str) -> Result<Local<'s>, Error<'s>> {
+        self.run_script(source)
+    }
     /// An event handler: `function NAME(PARAMS) {\nBODY\n}` in the global environment. A body that does not parse alone is a `SyntaxError`.
     fn compile_function<'s>(&mut self, _name: &str, _params: &str, _body: &str) -> Result<Local<'s>, Error<'s>> {
         Err(Error::Abort(Abort::Unsupported("compile_function")))
@@ -1429,6 +1433,10 @@ impl<'s, E: Engine> Scope<'s, E> {
 
     pub fn run_script(&mut self, source: &str) -> Result<Local<'s>, Error<'s>> {
         self.e.run_script(source)
+    }
+
+    pub fn run_script_named(&mut self, source: &str, name: &str) -> Result<Local<'s>, Error<'s>> {
+        self.e.run_script_named(source, name)
     }
 
     pub fn compile_function(&mut self, name: &str, params: &str, body: &str) -> Result<Local<'s>, Error<'s>> {

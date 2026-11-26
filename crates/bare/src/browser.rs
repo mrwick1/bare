@@ -2168,10 +2168,15 @@ impl<E: Eng> Browser<E> {
     }
 
     pub fn run_script(&mut self, source: &str) -> R<E, E::Raw> {
+        self.run_script_named(source, "")
+    }
+
+    /// [`Browser::run_script`] for a script with a URL: its stack frames show `name` (empty: `<anonymous>`).
+    pub fn run_script_named(&mut self, source: &str, name: &str) -> R<E, E::Raw> {
         let mut ids = bare_observe::process::context();
         ids.document = self.observe_document;
         let _context = bare_observe::process::enter(ids);
-        let r = self.it.run_script_o(source);
+        let r = if name.is_empty() { self.it.run_script_o(source) } else { self.it.run_script_named_o(source, name) };
         self.observe_stats();
         // `BARE_RECLAIM_STRESS=1 cargo test`: collect and reclaim after each script, freed nodes poisoned (`browser_reclaim.rs`).
         #[cfg(test)]
@@ -2314,6 +2319,38 @@ impl<E: Eng> Browser<E> {
             it.define_data(e, k, E::bool_raw(false), false, false, true)?;
             dom.dispatch(it, Target::Window, e)?;
             Ok(())
+        })
+    }
+
+    /// The page goes to the background (`on`) or comes back, as when the user switches tabs in Chrome. Going: `hasFocus()` is false,
+    /// `blur` fires at the window, then the page is hidden and `visibilitychange` fires at the document. Coming back: the reverse
+    /// (`visibilitychange`, then `focus`). The order is the one of the Page Lifecycle API. While hidden, a timer is due at the next
+    /// whole second (`browser_scheduler.rs`). A closed page (`hide`) stays hidden. A second call with the same `on` does nothing.
+    pub fn set_background(&mut self, on: bool) -> R<E, ()> {
+        let dom = self.dom.clone();
+        if dom.basics.background.get() == on {
+            return Ok(());
+        }
+        let root = dom.doc.borrow().root();
+        let fire = |it: &mut E::Vm, t: Target<E>, ty: &str, bubbles: bool| -> R<E, ()> {
+            let e = dom.new_event(it, ty, bubbles, false, false, None)?;
+            dom.st.borrow_mut().events.get_mut(&e).expect("just made").trusted = true;
+            dom.dispatch(it, t, e).map(|_| ())
+        };
+        self.it.host_scope_o(|it| {
+            if on {
+                dom.basics.blurred.set(true);
+                fire(it, Target::Window, "blur", false)?;
+                dom.basics.background.set(true);
+                dom.align_timers();
+                fire(it, Target::Node(root), "visibilitychange", true)?;
+            } else {
+                dom.basics.background.set(false);
+                fire(it, Target::Node(root), "visibilitychange", true)?;
+                dom.basics.blurred.set(false);
+                fire(it, Target::Window, "focus", false)?;
+            }
+            it.host_checkpoint().map(|_| ())
         })
     }
 

@@ -561,6 +561,42 @@ impl Session {
         })?
     }
 
+    /// The notification events that no agent read (this drains them), and the live notifications of the page.
+    pub fn notifications(&mut self) -> Result<(Vec<bare::NotificationEvent>, Vec<bare::NotificationInfo>), String> {
+        self.host.run(|p| match p.browser() {
+            Some(b) => Ok((b.take_notification_events(), b.notifications())),
+            None => Err(p.no_document()),
+        })?
+    }
+
+    /// The live notifications of the page, without a drain of the events.
+    pub fn live_notifications(&mut self) -> Vec<bare::NotificationInfo> {
+        self.host.run(|p| p.browser().map(|b| b.notifications())).ok().flatten().unwrap_or_default()
+    }
+
+    /// The user clicks (`close` false) or closes the live notification `id`. `Ok(None)`: no live notification `id`. A click gives
+    /// whether the page cancelled it.
+    pub fn act_on_notification(&mut self, id: u64, close: bool) -> Result<Option<bool>, String> {
+        self.host.run(move |p| {
+            let Some(b) = p.browser() else { return Err(p.no_document()) };
+            let r = if close { b.close_notification(id).map(|ok| ok.then_some(false)) } else { b.click_notification(id) };
+            let r = r.map_err(|e| format!("{e:?}"));
+            p.touched();
+            r
+        })?
+    }
+
+    /// Put the page in the background (`on`) or bring it back, as a switch of tabs (`Browser::set_background`). A new document
+    /// starts in front.
+    pub fn set_background(&mut self, on: bool) -> Result<(), String> {
+        self.host.run(move |p| {
+            let Some(b) = p.browser() else { return Err(p.no_document()) };
+            let r = b.set_background(on).map_err(|e| format!("{e:?}"));
+            p.touched();
+            r
+        })?
+    }
+
     /// The URL of the page of now.
     pub fn url(&mut self) -> Option<String> {
         self.host.run(|p| p.url()).ok().flatten()
@@ -1409,6 +1445,17 @@ fn check(p: &mut Page, m: &mut Memo, c: &Check) -> Result<(), Try> {
                 (CookieState::Value(t), Some(c)) if !t.matches(&c.value) => return no(format!("the value of the cookie {name} is not {t}")),
                 (CookieState::Value(t), None) => return no(format!("no cookie {name} would go to this page (expected value{t})")),
                 _ => {}
+            }
+        }
+        Check::Notification(c) => {
+            let Some(b) = p.browser() else { return Err(Try::Again(fail("page", p.no_document()))) };
+            if c.new {
+                if b.notification_event_count() == 0 {
+                    return no("no notification event that an agent did not read".into());
+                }
+            } else if !b.notifications().iter().any(|n| c.title.as_ref().is_none_or(|t| t.matches(&n.title)) && c.body.as_ref().is_none_or(|t| t.matches(&n.body))) {
+                let want = [c.title.as_ref().map(|t| format!("title{t}")), c.body.as_ref().map(|t| format!("body{t}"))].into_iter().flatten().collect::<Vec<_>>().join(" ");
+                return no(format!("no live notification {want}").trim_end().to_string());
             }
         }
         Check::Url(t) => {

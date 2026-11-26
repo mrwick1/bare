@@ -383,6 +383,12 @@ impl<E: Eng> Dom<E> {
     }
 }
 
+/// The object of the live notification `id`.
+fn live_note<E: Eng>(d: &Dom<E>, id: u64) -> Option<E::Obj> {
+    let notes = d.notification.notes.borrow();
+    d.notification.shown.borrow().iter().copied().find(|o| notes[o].id == id)
+}
+
 /// An event log entry for the notification `n` of this page.
 fn event<E: Eng>(d: &Dom<E>, kind: &'static str, n: &Note<E>) -> NotificationEvent {
     NotificationEvent { kind, id: n.id, origin: crate::browser_basics::doc_origin(d), title: n.title.clone(), body: n.body.clone(), tag: n.tag.clone(), at_ms: n.timestamp }
@@ -650,6 +656,46 @@ impl<E: Eng> crate::browser::Browser<E> {
     /// The event log since the last call (all of it: there is no cap).
     pub fn take_notification_events(&mut self) -> Vec<NotificationEvent> {
         std::mem::take(&mut *self.dom.notification.events.borrow_mut())
+    }
+
+    /// The number of entries in the event log, which this does not drain.
+    pub fn notification_event_count(&self) -> usize {
+        self.dom.notification.events.borrow().len()
+    }
+
+    /// The user clicks the live notification `id`: a trusted, cancelable `click` fires at it, and the log says "clicked". It stays in
+    /// the list, as in Chrome. A click that no listener cancels brings the page back from the background (the standard: the user agent
+    /// focuses the window). Gives whether a listener cancelled the click, or `None` for no live notification `id`.
+    pub fn click_notification(&mut self, id: u64) -> R<E, Option<bool>> {
+        let dom = self.dom.clone();
+        let Some(o) = live_note(&dom, id) else { return Ok(None) };
+        let ev = event(&dom, "clicked", &dom.notification.notes.borrow()[&o]);
+        dom.notification.events.borrow_mut().push(ev);
+        let canceled = self.fire_from_host(&dom, o, "click", true)?;
+        if !canceled {
+            self.set_background(false)?;
+        }
+        Ok(Some(canceled))
+    }
+
+    /// The user closes the live notification `id`: it leaves the list, the log says "closed" and `close` fires at once. Gives whether
+    /// `id` was live.
+    pub fn close_notification(&mut self, id: u64) -> R<E, bool> {
+        let dom = self.dom.clone();
+        let Some(o) = live_note(&dom, id) else { return Ok(false) };
+        dom.close_note(o, false);
+        self.fire_from_host(&dom, o, "close", false).map(|_| true)
+    }
+
+    /// Fire `ty` at the notification `o` as an input of the user, then run the microtasks. Gives whether a listener cancelled it.
+    fn fire_from_host(&mut self, dom: &std::rc::Rc<Dom<E>>, o: E::Obj, ty: &str, cancelable: bool) -> R<E, bool> {
+        let was = std::mem::replace(&mut dom.st.borrow_mut().driver, true);
+        let r = self.it.host_scope_o(|it| {
+            let c = dom.fire_note(it, o, ty, cancelable)?;
+            it.host_checkpoint().map(|_| c)
+        });
+        dom.st.borrow_mut().driver = was;
+        r
     }
 
     /// The notification objects that the page can still reach (for tests).

@@ -94,9 +94,15 @@ impl Realm {
 
     /// Run `source` as a classic script of the realm. Inside a host call (`importScripts` of a worker) the run is a nested call, as for
     /// `eval_global`.
-    pub(crate) fn a_run_script<'s>(&mut self, source: &str) -> Result<Local<'s>, Error<'s>> {
+    /// `name`: the URL of the script, for its stack frames.
+    pub(crate) fn a_run_script<'s>(&mut self, source: &str, name: Option<&str>) -> Result<Local<'s>, Error<'s>> {
         self.api.abort = None;
-        let r = self.script_code(source, ScriptMode { value: true, ..ScriptMode::default() }).and_then(|ci| self.run_code(ci, false));
+        let r = self.script_code(source, ScriptMode { value: true, ..ScriptMode::default() }).and_then(|ci| {
+            if let (Some(n), Some(l)) = (name, self.lazy.as_mut()) {
+                l.set_name(ci, n);
+            }
+            self.run_code(ci, false)
+        });
         self.a_ret(r)
     }
 

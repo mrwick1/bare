@@ -15,3 +15,5 @@ pub use bare::{DownloadState, Downloads};
 pub use bare::profile;
 #[cfg(test)]
 mod state_permissions_tests;
+#[cfg(test)]
+mod steps_notification_tests;

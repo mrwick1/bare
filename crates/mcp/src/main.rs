@@ -47,6 +47,8 @@ struct Live {
     dl: Downloads,
     /// The downloads that an `act` receipt already named.
     told: std::collections::HashSet<usize>,
+    /// The highest notification id that an `act` receipt already named.
+    told_note: u64,
 }
 
 /// What is known independently of the text receipt, including errors after dispatch.
@@ -713,7 +715,7 @@ impl Server {
         if let Some(p) = profile {
             session.use_profile(p);
         }
-        self.live.insert(name, Live { session, opt, red, vars, lines: 0, dl, told: Default::default() });
+        self.live.insert(name, Live { session, opt, red, vars, lines: 0, dl, told: Default::default(), told_note: 0 });
         let (mut rep, ok) = self.run_live(args, &format!("open {url}"))?;
         // A redirect to another address: the agent must see where the page really is.
         let end = self.live_mut(args)?.session.url().unwrap_or_default();
@@ -1042,8 +1044,10 @@ impl Server {
         Ok(live.red.clean(&if v.is_empty() { "no requests".to_string() } else { v.join("\n") }))
     }
 
-    /// Web notifications of the live page (`docs/internal/design-notifications.md`). `grant`, `deny`, `reset`: the notification
-    /// permission of `origin` (default: the origin of the page). A profile keeps it.
+    /// Web notifications of the live page (`docs/internal/design-notifications.md`). `list` (default): the events that the agent did not
+    /// read (this reads them), then the live notifications. `wait`: the same, after the first new event (up to `timeout_ms`). `click`
+    /// and `close` with `id`: as the user. `grant`, `deny`, `reset`: the notification permission of `origin` (default: the origin of
+    /// the page). A profile keeps it. `background` with `on` (default true): the page goes to the background or comes back.
     fn notifications(&mut self, args: &Value) -> Result<String, String> {
         use bare_drive::Permission;
         let op = args.get("op").and_then(Value::as_str).unwrap_or("list");
@@ -1051,7 +1055,23 @@ impl Server {
             "grant" => Some(Permission::Granted),
             "deny" => Some(Permission::Denied),
             "reset" => None,
-            _ => return Err(format!("op: {op} is not grant, deny or reset")),
+            "list" | "wait" => return self.note_list(args, op == "wait"),
+            "click" | "close" => {
+                let id = args.get("id").and_then(Value::as_u64).ok_or(format!("op {op} needs id (a number from list)"))?;
+                let live = self.live_mut(args)?;
+                return match live.session.act_on_notification(id, op == "close")? {
+                    None => Err(format!("no live notification #{id}: call notifications to see the list")),
+                    Some(true) => Ok(format!("clicked #{id}: the page cancelled the click")),
+                    Some(false) if op == "click" => Ok(format!("clicked #{id}")),
+                    Some(false) => Ok(format!("closed #{id}")),
+                };
+            }
+            "background" => {
+                let on = args.get("on").and_then(Value::as_bool).unwrap_or(true);
+                self.live_mut(args)?.session.set_background(on)?;
+                return Ok(if on { "background on: the page is hidden and has no focus; its timers run at whole seconds" } else { "background off: the page is visible and has focus" }.into());
+            }
+            _ => return Err(format!("op: {op} is not list, wait, click, close, grant, deny, reset or background")),
         };
         // An origin is scheme://host[:port]: a whole URL is cut there.
         let origin = args.get("origin").and_then(Value::as_str).map(|u| match u.find("://") {
@@ -1066,6 +1086,43 @@ impl Server {
             None => "no decision (the page sees denied)",
         };
         Ok(format!("notifications for {origin}: {state}"))
+    }
+
+    /// `notifications op=list|wait`. `wait` runs the step `wait notification new`, which ticks the page until an event comes.
+    fn note_list(&mut self, args: &Value, wait: bool) -> Result<String, String> {
+        if wait && self.live_mut(args)?.session.with_refs(|p, _| p.browser().map_or(0, |b| b.notification_event_count()))? == 0 {
+            let mut a = args.clone();
+            a["compact"] = json!(true);
+            a["timeout_ms"] = json!(args.get("timeout_ms").and_then(Value::as_u64).unwrap_or(30_000));
+            if !self.run_live(&a, "wait notification new")?.1 {
+                return Err("no notification event before the time limit".into());
+            }
+        }
+        let live = self.live_mut(args)?;
+        let (events, list) = live.session.notifications()?;
+        let q = |t: &str| json!(t).to_string();
+        let mut out: Vec<String> = events
+            .iter()
+            .map(|e| match e.kind {
+                "permission-requested" => format!("permission-requested {}", e.origin),
+                k => format!("{k} #{} {} {}{}", e.id, q(&e.title), q(&e.body), if e.tag.is_empty() { String::new() } else { format!(" tag={}", q(&e.tag)) }),
+            })
+            .collect();
+        out.extend(list.iter().map(|n| format!("live #{} {} {} {}", n.id, q(&n.title), q(&n.body), n.origin)));
+        Ok(live.red.clean(&if out.is_empty() { "no notification events and no live notifications".to_string() } else { out.join("\n") }))
+    }
+
+    /// One `notification:` line for each live notification that no `act` receipt named yet.
+    fn new_notes(&mut self, args: &Value) -> Result<String, String> {
+        let live = self.live_mut(args)?;
+        let mut out = String::new();
+        for n in live.session.live_notifications() {
+            if n.id > live.told_note {
+                live.told_note = n.id;
+                out.push_str(&format!("\nnotification: #{} {} {}", n.id, json!(n.title), json!(n.body)));
+            }
+        }
+        Ok(out)
     }
 
     /// A report of what is wrong with the page, to paste into a bare issue.
@@ -1229,6 +1286,7 @@ impl Server {
         // The errors of the snapshot and the download wait; the receipt has those of the step.
         out.push_str(&self.script_errors(args, mark, &out)?);
         out.push_str(&self.late(args)?);
+        out.push_str(&self.new_notes(args)?);
         let out = self.live_mut(args)?.red.clean(&out);
         let mut out = out;
         if let Some(s) = snap {
@@ -1350,7 +1408,7 @@ impl Server {
         self.wake_on_done(&mut session);
         let dl = Downloads::new(std::env::temp_dir().join(format!("bare-mcp-{}-downloads", std::process::id())));
         session.set_downloads(dl.clone());
-        self.live.insert(name.to_string(), Live { session, opt, red, vars, lines: 0, dl, told: Default::default() });
+        self.live.insert(name.to_string(), Live { session, opt, red, vars, lines: 0, dl, told: Default::default(), told_note: 0 });
         let args = json!({"session": name, "compact": true});
         let r = match self.run_live(&args, &format!("open {url}")) {
             Ok((_, true)) => self.arm(&args).map(|_| ()),
@@ -1794,8 +1852,8 @@ fn tools() -> Value {
         },
         {
             "name": "notifications",
-            "description": "Web notifications of the live page. op grant, deny or reset: the notification permission of origin (default: the origin of the page). With no decision a page sees \"denied\". A profile keeps the decision. A page reads the permission when it asks: reload it or use its own \"turn on\" link after a grant.",
-            "inputSchema": {"type": "object", "properties": {"session": S, "op": {"type": "string", "enum": ["grant", "deny", "reset"]}, "origin": {"type": "string"}}, "required": ["op"]},
+            "description": "Web notifications of the live page (new Notification). op list (default): the events since the last list or wait (shown, replaced, closed, clicked, permission-requested), then the live notifications, one line each with #id, title and body. op wait: the same, at the first new event; timeout_ms (default 30000). op click id=N: the user clicks it (a trusted click; the page usually focuses its chat). op close id=N: the user closes it. op grant, deny or reset: the notification permission of origin (default: the origin of the page). With no decision a page sees \"denied\". A profile keeps the decision. A page reads the permission when it asks: reload it or use its own \"turn on\" link after a grant. An act receipt names each new notification. op background on=true (default) or on=false: the page goes to the background (as another tab in front: visibilityState hidden, hasFocus false, blur and visibilitychange; timers run at whole seconds, network messages are not delayed) or comes back. Many chat pages notify only when hidden. A click on a notification that the page does not cancel brings it back. A new document starts in front.",
+            "inputSchema": {"type": "object", "properties": {"session": S, "op": {"type": "string", "enum": ["list", "wait", "click", "close", "grant", "deny", "reset", "background"]}, "id": {"type": "integer"}, "origin": {"type": "string"}, "timeout_ms": {"type": "integer"}, "on": {"type": "boolean"}}},
         },
         {
             "name": "console",
@@ -1894,7 +1952,7 @@ mod dispatch_tests {
         let opt = Options { size: (1280, 800), timeout: Duration::from_secs(1), out: None, window: false, progress: false };
         let session = Session::new(&opt);
         let dl = Downloads::new(std::env::temp_dir().join(format!("bare-cancel-unit-{}", std::process::id())));
-        let live = Live { session, opt, dl, red: Redactor::default(), vars: HashMap::new(), lines: 0, told: Default::default() };
+        let live = Live { session, opt, dl, red: Redactor::default(), vars: HashMap::new(), lines: 0, told: Default::default(), told_note: 0 };
         let mut server = Server { shared: test_shared(), live: HashMap::from([("main".into(), live)]), queue: Weak::new() };
         set_cancel(Some(Arc::new(AtomicBool::new(true))));
         let result = server.run_live_typed(&json!({}), "cookie set should_not_run yes");
