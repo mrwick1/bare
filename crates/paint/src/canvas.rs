@@ -39,15 +39,17 @@ impl Shape {
         let (w, h) = ((r.x1 - r.x0) as f32, (r.y1 - r.y0) as f32);
         // The side of each pair: (the two radii on the top, along x), the right (along y), the bottom, the left.
         let sums = [(0, 2, w), (3, 5, h), (6, 4, w), (1, 7, h)];
-        let mut f = 1.0f32;
+        // In f64, with an infinite radius cut to f32::MAX: two radii of f32::MAX (`rounded-full`) add up to a finite sum.
+        let big = rad.map(|v| v.min(f32::MAX) as f64);
+        let mut f = 1.0f64;
         for (a, b, side) in sums {
-            let sum = rad[a] + rad[b];
-            if sum > side {
-                f = f.min(side / sum);
+            let sum = big[a] + big[b];
+            if sum > side as f64 {
+                f = f.min(side as f64 / sum);
             }
         }
         if f < 1.0 {
-            rad.iter_mut().for_each(|v| *v *= f);
+            rad = big.map(|v| (v * f) as f32);
         }
         Shape { r, rad }
     }

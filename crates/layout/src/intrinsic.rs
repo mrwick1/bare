@@ -31,6 +31,9 @@ pub fn sizes(cx: &mut Cx, node: NodeId) -> (f32, f32) {
         let width = height.filter(|_| h > 0).map_or(w as f32, |height| height * w as f32 / h as f32);
         return (width, width);
     }
+    if let Some(w) = crate::block::ratio_width(cx, cx.tree.style(node), None, 0.0) {
+        return (w, w);
+    }
     if let Some(&known) = cx.sizes.get(&(node.index() as u32)) {
         return known;
     }

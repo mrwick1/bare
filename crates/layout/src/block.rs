@@ -301,7 +301,7 @@ pub(crate) fn sized_with(cx: &mut Cx, node: NodeId, space: Space, forced: Option
         Some(p) => p.widths(cx, forced, space.width, bp.horizontal()),
         None => forced.unwrap_or_else(|| widths_or(cx, style, space.width, bp.horizontal(), own.map(|s| s.0).or_else(|| cx.tree.doc.image(node).map(|&(w, h, _)| {
             resolve(cx, style.get(Property::Height), space.height).filter(|_| h > 0).map_or(w as f32, |height| height * w as f32 / h as f32)
-        })))),
+        })).or_else(|| ratio_width(cx, style, space.height, space.width)))),
     };
     let margin = |p| resolve(cx, style.get(p), Some(space.width)).unwrap_or(0.0);
     let (margin_top, margin_bottom) = (margin(Property::MarginTop), margin(Property::MarginBottom));
@@ -708,6 +708,18 @@ pub(crate) fn solve_margins(ml: Option<f32>, mr: Option<f32>, cb: f32, bp: f32, 
 /// `max-width`). `bp`: the borders and padding of both sides.
 pub fn widths(cx: &Cx, style: &ComputedStyle, cb: f32, bp: f32) -> (f32, f32, f32) {
     widths_or(cx, style, cb, bp, None)
+}
+
+/// The content width of a box with `width: auto`, a definite `height` and an `aspect-ratio` (CSS Sizing 4, 5.1): an `<svg>`
+/// with a `viewBox`, `height: 1em` and `width: auto`. With `box-sizing: border-box` the ratio is of the border box.
+pub(crate) fn ratio_width(cx: &Cx, style: &ComputedStyle, cb_height: Option<f32>, cb_width: f32) -> Option<f32> {
+    let Value::Number(r) = style.get(Property::AspectRatio) else { return None };
+    let h = resolve(cx, style.get(Property::Height), cb_height)?;
+    if style.get(Property::BoxSizing) != Value::Keyword(Keyword::BorderBox) {
+        return Some(h * r);
+    }
+    let (border, padding) = border_padding(cx, style, cb_width);
+    Some((h * r - border.horizontal() - padding.horizontal()).max(0.0))
 }
 
 /// `widths`, with `auto`: the width of a box that is not as wide as its container when `width` is `auto` (a form
