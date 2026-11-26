@@ -24,6 +24,8 @@
 //! expect title="x" | title~"x"
 //! expect js "expression"      true in the page (an assertion: do not change the page in it)
 //! expect cookie NAME [absent | value="x" | value~"x"]   the jar has (or lacks) the cookie that a request to the page would send
+//! expect notification [title="x"|title~"x"] [body="x"|body~"x"]   a live web notification of the page that matches
+//! expect notification new     an event of a notification (shown, replaced, closed, clicked, permission-requested) that no agent read
 //! cookie set NAME VALUE [domain=D] [path=P]   put a cookie in the jar of the session (quote a VALUE that holds `=`); D is a host
 //!                             (default: the host of the page), P defaults to /. A refused cookie (a public suffix) fails the step
 //! wait ...                    the same as expect
@@ -59,6 +61,15 @@ pub enum Check {
     Title(Text),
     Js(String),
     Cookie(String, CookieState),
+    Notification(NoteCheck),
+}
+
+/// `expect notification`: the filters of a live notification, or with `new` any event of the log that no agent read.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NoteCheck {
+    pub title: Option<Text>,
+    pub body: Option<Text>,
+    pub new: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -375,6 +386,18 @@ fn plain(w: &Word, vars: &HashMap<String, String>) -> Result<String, String> {
 
 fn check(w: &[Word], vars: &HashMap<String, String>) -> Result<Check, String> {
     match w {
+        [Word::Bare(k), rest @ ..] if k == "notification" => {
+            let mut c = NoteCheck::default();
+            for x in rest {
+                match x {
+                    Word::Bare(n) if n == "new" => c.new = true,
+                    Word::Pair(k, op, v) if k == "title" => c.title = Some(text_of(*op, expand(v, vars)?)),
+                    Word::Pair(k, op, v) if k == "body" => c.body = Some(text_of(*op, expand(v, vars)?)),
+                    _ => return Err("expect notification [title=\"x\"|title~\"x\"] [body=\"x\"|body~\"x\"] | expect notification new".into()),
+                }
+            }
+            return Ok(Check::Notification(c));
+        }
         [Word::Bare(k), name, rest @ ..] if k == "cookie" => {
             let state = match rest {
                 [] => CookieState::Present,
