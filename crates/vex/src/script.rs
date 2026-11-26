@@ -84,6 +84,9 @@ struct Unit {
     pre: bool,
     /// The line starts of the text, made at its first stack text (`error_stack::Lines`).
     lines: std::cell::OnceCell<crate::error_stack::Lines>,
+    /// The URL of this load of the text, for stack frames. The cached codes of a text are shared, so the name is on the unit, not in the
+    /// cache. `None`: `<anonymous>` (eval code, `new Function`, a text that the host did not name).
+    name: Option<Rc<str>>,
 }
 
 /// The functions that wait for their first call: their stubs in `codes`, and what compiles them. The loader makes a stub for a function
@@ -120,7 +123,7 @@ impl Lazy {
         let u = self.units.len();
         // The text of a new program: its codes start at 0.
         self.spans.push((0, u));
-        self.units.push(Unit { source: Some(source), facts, scoped: false, pre: false, lines: Default::default() });
+        self.units.push(Unit { source: Some(source), facts, scoped: false, pre: false, lines: Default::default(), name: None });
         self.wait(u, pending);
     }
 
@@ -187,6 +190,16 @@ impl LazyCompile for Lazy {
         Some(u.lines.get_or_init(|| crate::error_stack::Lines::new(src)).get(src, off))
     }
 
+    fn set_name(&mut self, ci: usize, name: &str) {
+        if let Some(u) = self.unit_of(ci) {
+            self.units[u].name = Some(name.into());
+        }
+    }
+
+    fn name_of(&self, ci: usize) -> Option<&str> {
+        self.units[self.unit_of(ci)?].name.as_deref()
+    }
+
     fn page_source_of(&self, ci: usize) -> Option<&str> {
         let u = &self.units[self.unit_of(ci)?];
         if u.pre { None } else { u.source.as_deref() }
@@ -198,7 +211,7 @@ impl LazyCompile for Lazy {
         let u = match self.pre {
             Some(u) => u,
             None => {
-                self.units.push(Unit { source: None, facts: crate::prelude_facts::facts(), scoped: false, pre: true, lines: Default::default() });
+                self.units.push(Unit { source: None, facts: crate::prelude_facts::facts(), scoped: false, pre: true, lines: Default::default(), name: None });
                 self.pre = Some(self.units.len() - 1);
                 self.units.len() - 1
             }
@@ -267,7 +280,7 @@ fn bind_unit(lazy: &mut Lazy, codes: &Codes, source: Rc<str>, unit: UnitCode, sc
     codes.push_all(new);
     let u = lazy.units.len();
     lazy.spans.push((base, u));
-    lazy.units.push(Unit { source: Some(source), facts, scoped, pre: false, lines: Default::default() });
+    lazy.units.push(Unit { source: Some(source), facts, scoped, pre: false, lines: Default::default(), name: None });
     lazy.wait(u, pending.into_iter().map(|(i, ch)| (base + i, ch)));
     Ok((base, info))
 }
