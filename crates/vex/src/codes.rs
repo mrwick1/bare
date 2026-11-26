@@ -13,13 +13,20 @@
 //! - [`Codes::free_retired`] needs `&mut self`, so no `&Code` can exist then. It drops the old code (its slot gets an empty `Code`)
 //!   and the slot serves the next `set`. A chunk is given back to the allocator only when the `Codes` drops.
 //!
+//! Stubs (`Op::Lazy`, about two thirds of all codes on a large site) have no record of their own. A stub's record depends only on a few
+//! fields (its word, registers, parameters and kind), so all stubs with equal fields share one *canonical* record. The own data of a
+//! stub (its name, length and span) is in a small entry in `stubs`. `push_all` copies a chunk with stubs into an exact buffer without
+//! them, so their slots are given back at once. A canonical record is never retired: `set` on a stub only changes the table entry.
+//!
 //! SAFETY of the whole module. `Codes` has no `Send` or `Sync` (raw pointers and `UnsafeCell`), so one thread uses it. The tables are
 //! reached only inside the methods below, and no method calls out while it holds a reference to a table, so no two references to a
 //! table exist at once. A slot is read through `&Code` only while it is in the table or retired. It is written only when it is
 //! beyond the used part of its chunk (nobody has a pointer to it), or in `free_retired` (`&mut self`: no reader), or when it is in
 //! `free` (it left the table and the retired list in `free_retired`, so no reader remains). No method gives `&mut Code`.
 use crate::bytecode::Code;
+use crate::string::Str;
 use std::cell::UnsafeCell;
+use std::collections::HashMap;
 use std::mem::ManuallyDrop;
 use std::ops::Index;
 
@@ -74,10 +81,21 @@ impl Slots {
     }
 }
 
+/// The fields that make a stub's record: its word, `nregs`, `nparams`, `flags`, `noctor` and `gen_kind`.
+type StubKey = (u32, u16, u16, u8, bool, u8);
+
+/// The own data of a stub: `(index, name, length, span)`. `Realm::fn_props` and `Function.prototype.toString` read it before the
+/// first call.
+type StubInfo = (u32, Option<Str>, u16, (u32, u32));
+
 #[derive(Default)]
 pub struct Codes {
     table: UnsafeCell<Vec<*mut Code>>,
     slots: UnsafeCell<Slots>,
+    /// The canonical stub records, made at the first stub of each key.
+    canon: UnsafeCell<HashMap<StubKey, *mut Code>>,
+    /// The own data of each stub, in index order (`push_all` adds in index order).
+    stubs: UnsafeCell<Vec<StubInfo>>,
 }
 
 impl Codes {
@@ -116,12 +134,66 @@ impl Codes {
     /// Add the codes of `v` at the end of the table and give the index of the first. Takes `&self`: a reader that holds `&Code` is not
     /// affected (only the table of pointers may move, and no one holds it).
     pub fn push_all(&self, v: Vec<Code>) -> usize {
-        // SAFETY: no reference to the table or to the slots exists (module comment); `adopt` does not touch a slot that is in use.
+        // SAFETY: no reference to the table, the slots or the stub tables exists (module comment); `adopt` and `alloc` do not touch a
+        // slot that is in use.
         unsafe {
             let (t, s) = (&mut *self.table.get(), &mut *self.slots.get());
             let first = t.len();
-            t.extend(s.adopt(v));
+            let n = v.iter().filter(|c| c.is_stub()).count();
+            if n == 0 {
+                t.extend(s.adopt(v));
+                return first;
+            }
+            let (canon, stubs) = (&mut *self.canon.get(), &mut *self.stubs.get());
+            // An exact buffer for the other codes, and one slot of room when the loader left room (`Lazy::compile` keeps it for `set`).
+            let room = (v.capacity() > v.len()) as usize;
+            let mut own = Vec::with_capacity(v.len() - n + room);
+            let mut at = Vec::with_capacity(v.len());
+            for (i, mut c) in v.into_iter().enumerate() {
+                if !c.is_stub() {
+                    at.push(None);
+                    own.push(c);
+                    continue;
+                }
+                let name = c.atoms.get(c.fn_name as usize).copied();
+                stubs.push(((first + i) as u32, name, c.fn_len, c.span));
+                let key = (c.words[0], c.nregs, c.nparams, c.flags, c.noctor, c.gen_kind);
+                let p = *canon.entry(key).or_insert_with(|| {
+                    // The record keeps no data of this stub: a kept stub's `length` is its `nparams`, another has none.
+                    (c.atoms, c.fn_name, c.fn_len, c.span) = (Vec::new(), crate::bytecode::NO_NAME, c.nparams, (0, 0));
+                    s.alloc(c)
+                });
+                at.push(Some(p));
+            }
+            let mut ps = s.adopt(own);
+            t.extend(at.into_iter().map(|p| p.unwrap_or_else(|| ps.next().expect("a slot for each code"))));
             first
+        }
+    }
+
+    /// The stub entry at `i`, when the code at `i` is a stub.
+    fn stub_info(&self, i: usize) -> Option<StubInfo> {
+        if !self.get(i)?.is_stub() {
+            return None;
+        }
+        // SAFETY: see the module comment; the entry is copied out, so the reference ends here.
+        let stubs = unsafe { &*self.stubs.get() };
+        stubs.binary_search_by_key(&(i as u32), |e| e.0).ok().map(|k| stubs[k])
+    }
+
+    /// The shared atom of the `name` and the `length` of the code at `i`, for `Realm::fn_props`.
+    pub fn name_len(&self, i: usize) -> (Option<Str>, u16) {
+        match self.stub_info(i) {
+            Some((_, name, len, _)) => (name, len),
+            None => self.get(i).map(|c| (c.atoms.get(c.fn_name as usize).copied(), c.fn_len)).unwrap_or((None, 0)),
+        }
+    }
+
+    /// The span of the source text of the code at `i`.
+    pub fn span(&self, i: usize) -> Option<(u32, u32)> {
+        match self.stub_info(i) {
+            Some(e) => Some(e.3),
+            None => self.get(i).map(|c| c.span),
         }
     }
 
@@ -133,7 +205,11 @@ impl Codes {
         unsafe {
             let (t, s) = (&mut *self.table.get(), &mut *self.slots.get());
             let p = s.alloc(c);
-            s.retired.push(std::mem::replace(&mut t[i], p));
+            let old = std::mem::replace(&mut t[i], p);
+            // A canonical stub record is shared: it stays.
+            if !(*old).is_stub() {
+                s.retired.push(old);
+            }
         }
     }
 
@@ -166,9 +242,9 @@ impl Index<usize> for Codes {
 
 impl From<Vec<Code>> for Codes {
     fn from(v: Vec<Code>) -> Codes {
-        let mut slots = Slots::default();
-        let table = slots.adopt(v).collect();
-        Codes { table: UnsafeCell::new(table), slots: UnsafeCell::new(slots) }
+        let codes = Codes::default();
+        codes.push_all(v);
+        codes
     }
 }
 

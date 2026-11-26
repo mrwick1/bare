@@ -88,7 +88,7 @@ impl Realm {
             Ok(ci) => ci,
             Err(m) => return Err(self.error(crate::interp_rt::ErrKind::Plain, &m)),
         };
-        self.fn_info.extend((self.fn_info.len()..self.prog.len()).map(|i| crate::interp::code_info(&self.prog[i])));
+        self.fn_info.extend((self.fn_info.len()..self.prog.len()).map(|i| crate::interp::code_info(&self.prog, i)));
         Ok(self.new_function(ci, Value::UNDEFINED))
     }
 

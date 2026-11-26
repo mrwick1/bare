@@ -192,7 +192,7 @@ impl Realm {
     /// `    at NAME (SOURCE:LINE:COL)` for the frame `(ci, pc)`.
     fn frame_line(&self, ci: usize, pc: u32) -> String {
         let Some(code) = self.prog.get(ci) else { return "    at <anonymous>".into() };
-        let name = code.atoms.get(code.fn_name as usize).map(|&a| self.text(self.atoms.adopt(a))).filter(|n| !n.is_empty());
+        let name = self.prog.name_len(ci).0.map(|a| self.text(self.atoms.adopt(a))).filter(|n| !n.is_empty());
         let src = self.lazy.as_ref().and_then(|l| l.name_of(ci)).unwrap_or("<anonymous>");
         let at = match code.source_at(pc).and_then(|off| self.lazy.as_ref()?.line_col(ci, off as usize)) {
             Some((line, col)) => format!("{src}:{line}:{col}"),

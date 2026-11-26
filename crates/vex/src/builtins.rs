@@ -646,7 +646,7 @@ fn fn_to_string(rt: &mut Realm, this: Value, _args: &[Value]) -> R<Value> {
     let bound = rt.native_id(this) == Some(rt.bound_id as usize);
     // A script function gives its source text: the bytes of its span in the text that its code came from.
     if let Some((ci, _)) = rt.function_new(this)
-        && let Some((start, end)) = rt.prog.get(ci).map(|c| c.span).filter(|&(s, e)| e > s)
+        && let Some((start, end)) = rt.prog.span(ci).filter(|&(s, e)| e > s)
         && let Some(mut text) = rt.lazy.as_ref().and_then(|l| l.page_source_of(ci)).and_then(|s| s.get(start as usize..end as usize)).map(str::to_string)
     {
         // A dynamic function's text is `KEYWORD (`: the spec's source text names it `anonymous`.
