@@ -663,13 +663,13 @@ impl SeatHandler for State {
     fn seat_state(&mut self) -> &mut SeatState {
         &mut self.seat
     }
-    fn new_seat(&mut self, _: &Connection, qh: &QueueHandle<Self>, seat: wl_seat::WlSeat) {
+    fn new_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
+
+    fn new_capability(&mut self, _: &Connection, qh: &QueueHandle<Self>, seat: wl_seat::WlSeat, capability: Capability) {
+        // The data device is made with the first capability: `new_seat` does not come for a seat that the registry already had.
         if self.device.is_none() {
             self.device = self.ddm.as_ref().map(|m| m.get_data_device(qh, &seat));
         }
-    }
-
-    fn new_capability(&mut self, _: &Connection, qh: &QueueHandle<Self>, seat: wl_seat::WlSeat, capability: Capability) {
         match capability {
             Capability::Pointer if self.pointer.is_none() => {
                 let surface = self.compositor.create_surface(qh);
