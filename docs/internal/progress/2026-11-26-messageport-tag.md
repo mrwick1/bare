@@ -24,7 +24,6 @@ One gap: `Object.prototype.toString.call(port)` gave `[object EventTarget]`. Chr
 ## Tests
 
 - New `crates/bare/src/browser_worker_port_transfer_tests.rs`, 6 tests. `a_transfer_list_built_from_the_to_string_tag_moves_the_port` failed before the change with "MessagePort object could not be cloned." and passes after it. The other 5 tests pass before and after. They keep the transfers above in place (2 of them on a worker thread).
-- `browser_clone_tests.rs`: the row `transfer port` expects `[object MessagePort]`. The test is ignored for other rows.
 - `t` passed: `browser_scheduler.rs` (scheduler, message queue GC, idle and related tests) and the new file.
 
 ## Cost rows
@@ -42,6 +41,7 @@ No row is over +0.5%. Vex did not change, so test262 did not run.
 
 ## Gaps found, not fixed
 
+- `browser_clone_tests.rs` (`every_class_and_error_of_the_walk`, ignored): the row `transfer port` still expects `[object EventTarget]`. It must be `[object MessagePort]` now. The test fails on other rows already. `t` refuses a changed file whose tests are all ignored, so this PR does not change it.
 - `new MessageEvent(type)` throws `TypeError` in bare. `MessageEvent.prototype` has no tag.
 
 ## Not tested

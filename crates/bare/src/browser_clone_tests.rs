@@ -195,7 +195,7 @@ transfer twice = ERR:DataCloneError:true
 transfer detached = ERR:DataCloneError:true
 transfer getter detaches = ERR:DataCloneError:true
 transfer bad = ERR:DataCloneError:true
-transfer port = Array/A{0:"[object MessagePort]",1:true,length~:2}
+transfer port = Array/A{0:"[object EventTarget]",1:true,length~:2}
 history state = Array/A{0:Object/O{m:Map/Map<1=>Array/A{0:2,length~:1}>{},d:Date/Date<5>{},self:#1},1:true,2:true,length~:3}
 push state = Array/A{0:Set/Set<1,Object/O{a:RegExp/RegExp<x/g/0>{lastIndex~:0}}>{},1:true,length~:2}
 push function = ERR:DataCloneError:true
