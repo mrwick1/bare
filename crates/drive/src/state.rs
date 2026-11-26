@@ -7,10 +7,14 @@
 //!  "origins":[{"origin":"https://example.com","localStorage":[{"name":"k","value":"v"}],"sessionStorage":[{"name":"t","value":"x"}]}]}
 //! ```
 //!
+//! One more top-level field, `permissions`, holds the permission decisions:
+//! `[{"origin":"https://example.com","name":"notifications","state":"granted"}]` (`state` is `granted` or `denied`).
+//!
 //! A domain with a leading dot is a domain cookie, one without is host-only. `expires` is Unix seconds (`-1`: a session cookie).
 //! `sameSite` is `Strict`, `Lax` or `None`; no value, or another one, is "not set". Unknown fields (`indexedDB`, `partitionKey`) are
 //! ignored. IndexedDB is not saved.
 
+use bare::browser_navigation::Permission;
 use bare::page::StorageState;
 use bare_net::cookie::{Cookie, SameSite};
 use serde_json::{Map, Value, json};
@@ -50,7 +54,12 @@ pub fn to_json(st: &StorageState) -> String {
             json!({"origin": o, "localStorage": find(&st.local), "sessionStorage": find(&st.session)})
         })
         .collect();
-    json!({"cookies": cookies, "origins": origins}).to_string()
+    let perms: Vec<Value> = st.permissions.iter().map(|(o, n, v)| json!({"origin": o, "name": n, "state": if *v == Permission::Granted { "granted" } else { "denied" }})).collect();
+    let mut top = json!({"cookies": cookies, "origins": origins});
+    if !perms.is_empty() {
+        top["permissions"] = Value::Array(perms);
+    }
+    top.to_string()
 }
 
 /// Read a session file. The error names the file and the field.
@@ -102,6 +111,15 @@ pub fn from_json(text: &str, file: &str) -> Result<StorageState, String> {
             }
         }
     }
+    for (i, p) in list(obj.get("permissions").unwrap_or(&Value::Null), "permissions")?.iter().enumerate() {
+        let s = |k: &str| p.get(k).and_then(Value::as_str).ok_or_else(|| bad(&format!("permissions[{i}].{k}")));
+        let v = match s("state")? {
+            "granted" => Permission::Granted,
+            "denied" => Permission::Denied,
+            _ => return Err(bad(&format!("permissions[{i}].state"))),
+        };
+        st.permissions.push((s("origin")?.to_string(), s("name")?.to_string(), v));
+    }
     Ok(st)
 }
 
@@ -138,7 +156,7 @@ mod tests {
         c.expires = Some(1_800_000_000_500.0);
         c.same_site = SameSite::Lax;
         c.secure = true;
-        let st = StorageState { cookies: vec![c.clone()], local: vec![("https://a.test".into(), vec![("k".into(), "v".into())])], session: vec![("https://b.test".into(), vec![("t".into(), "x".into())])] };
+        let st = StorageState { cookies: vec![c.clone()], local: vec![("https://a.test".into(), vec![("k".into(), "v".into())])], session: vec![("https://b.test".into(), vec![("t".into(), "x".into())])], ..Default::default() };
         let j = to_json(&st);
         assert!(j.contains("\".a.test\"") && j.contains("\"expires\":1800000000.5"), "{j}");
         let back = from_json(&j, "f").unwrap();

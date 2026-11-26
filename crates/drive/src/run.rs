@@ -547,6 +547,20 @@ impl Session {
         })?
     }
 
+    /// Set (or with `None`, remove) the decision for permission `name` of `origin` (`None`: the origin of the page). The page's
+    /// `PermissionStatus` objects get `change`; a profile saves the decision. Gives the origin.
+    pub fn set_permission(&mut self, origin: Option<String>, name: String, to: Option<bare::browser_navigation::Permission>) -> Result<String, String> {
+        self.host.run(move |p| {
+            let b = p.browser().ok_or("the page has no document")?;
+            let origin = origin.unwrap_or_else(|| b.document_origin());
+            if origin == "null" {
+                return Err("the page has no origin: give origin".to_string());
+            }
+            b.set_permission(&origin, &name, to).map_err(|e| format!("{e:?}"))?;
+            Ok(origin)
+        })?
+    }
+
     /// The URL of the page of now.
     pub fn url(&mut self) -> Option<String> {
         self.host.run(|p| p.url()).ok().flatten()
