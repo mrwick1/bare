@@ -331,8 +331,8 @@ fn unwind(realm: &mut Realm, prog: &Codes, stack: &mut [Value], ci: &mut usize, 
 }
 
 /// The shared atom of the `name` and the `length` of a code, for `Realm::fn_props`.
-pub(crate) fn code_info(c: &Code) -> (Option<crate::string::Str>, u16) {
-    (c.atoms.get(c.fn_name as usize).copied(), c.fn_len)
+pub(crate) fn code_info(prog: &Codes, i: usize) -> (Option<crate::string::Str>, u16) {
+    prog.name_len(i)
 }
 
 impl Realm {
@@ -347,7 +347,7 @@ impl Realm {
         let l = self.lazy.as_mut().ok_or("a lazy function has no compiler")?;
         l.compile(prog, ci)?;
         // The `name` and the `length` of the functions that the compile added (the stub of `ci` has them already).
-        self.fn_info.extend((self.fn_info.len()..prog.len()).map(|i| code_info(&prog[i])));
+        self.fn_info.extend((self.fn_info.len()..prog.len()).map(|i| code_info(prog, i)));
         fbs.resize_with(prog.len(), || None);
         fbs[ci] = None;
         let ncode = &prog[ci];
@@ -511,7 +511,7 @@ impl Vm {
         let fbs = prog.codes.iter().map(|_| None).collect();
         let mut realm = Realm::new(shared);
         (realm.prog, realm.dctor) = (Rc::new(prog.codes.into()), dctor);
-        realm.fn_info = realm.prog.iter().map(code_info).collect();
+        realm.fn_info = (0..realm.prog.len()).map(|i| code_info(&realm.prog, i)).collect();
         Vm { realm, stack: Vec::new(), fbs, dctor, fuel: u64::MAX }
     }
 
