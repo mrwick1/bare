@@ -1,6 +1,6 @@
 # Design: less memory for compiled code (2026-11-26)
 
-Status: measured, not built. The owner decides. This document changes no product code.
+Status: measured, not built. Owner decision (2026-11-26): build the full rewrite of the code representation (C1, C2, C3, R1, then C4). C4 is new in this revision; the owner reviews it before its build. This document changes no product code.
 
 Owner request (2026-11-26): measure the memory of compiled code on Teams, then write a design. This follows `design-feedback-table.md` section 7. Slice A0 of that design is merged (#1128).
 
@@ -145,13 +145,36 @@ The common rule: a function that has not run costs a few words, not a full code 
 | R2     | about 49               | all maps       | high: collector rule, call cost   |
 | R3     | about 49               | most maps      | high: correctness of the analysis |
 
-The gains overlap: C1 removes stub room that C2 would also remove. The sum of C1, C2, C3 and R1 is about 190 to 210 MiB.
+| C4 | about 50 | lazy state | medium |
+
+The gains overlap: C1 removes stub room that C2 would also remove. The sum of C1, C2, C3 and R1 is about 190 to 210 MiB. With C4 it is about 240 to 260 MiB.
+
+### C4: a compact lazy record per stub
+
+The RAM analysis of 2026-11-26 (jemalloc heap profiles, 2 runs, owner lines) split the lazy state that each stub keeps:
+
+| Owner line                          | What                                       | MiB |
+| ----------------------------------- | ------------------------------------------ | --- |
+| `script.rs:136` `pending.extend`    | `Wait { ci, unit, Child }` per stub        | 21  |
+| `compile.rs:738`, `compile.rs:83`   | `Level` scope chains held by `Child.chain` | 23  |
+| `parse.rs`, `facts.rs` (kept facts) | `FnFacts` and capture spans per function   | 40  |
+
+- Today: a `Child` holds an `Rc<Level>` chain, a `Box<str>` name and flags. A `Level` holds a `Vec<LevelVar>` with a `Box<str>` name per variable and a `HashMap` index for big levels. The chain stays alive while any stub below it waits.
+- V8 keeps a lazy function as 2 source positions, and a scope as a serialized `ScopeInfo` (a flat array of names and slots). It does not keep the parser's scope objects.
+- Data:
+  - The stub's own data (name, length, span, flags) is in one 16 B entry per stub, next to the table entry of C1. The name is an atom id, not a `Box<str>`.
+  - When a function finishes its compile, its levels freeze into one flat `ScopeInfo` per level: a `Box<[(atom: u32, slot: u32)]>` sorted by atom, a parent index and flags. A lookup is a binary search; the `HashMap` index goes away.
+  - The facts of a function are dropped when it and all its nested functions are compiled. Only facts of functions that can still compile stay.
+- Algorithm: `compile_stub` reads the entry, rebuilds the `Level` chain from the frozen `ScopeInfo`s (cost per lazy compile: one walk of the chain), and compiles as today.
+- Gain (hypothesis): `Wait`/`Child` 21 to about 5, scope chains 23 to about 8, facts 40 to about 20. About 50 MiB.
+- Risk: medium. Scope resolution must give the same slots from the frozen form. A test compares the slots of a lazy compile against an eager compile for the same text.
+- To verify before the build: the share of the 40 MiB facts that belongs to functions that can no longer compile.
 
 ## 7. Not in this design
 
 - **Sharing code between realms.** Four realms load about 58,000 to 65,000 codes each, and none shares `prog`. A realm copies the code cache through `map_atoms` with its own atoms. Sharing needs atoms that do not depend on the realm. That is a larger design.
 - **Flushing compiled code.** Code that compiled and never ran in a nested machine is 3.9 MiB. Code that ran once and is now cold is not measured.
-- **The `Child` and facts kept for each stub.** The heap profile of 2026-11-26 gave `Loader::children` 56 MiB and parse `close_fn` 43 MiB. To verify how much of it is the `Child`, the facts and the source text.
+- **The `Child` and facts kept for each stub.** Measured on 2026-11-26; see C4.
 
 ## 8. Measuring plan after each slice
 
@@ -161,8 +184,8 @@ The gains overlap: C1 removes stub room that C2 would also remove. The sum of C1
 - C1 adds a test: a stub's name, length and `toString` before its first call, and `new` on a stub of an arrow.
 - Linux and the Windows VM. Miri on `codes.rs` for C1 and C2.
 
-## 9. Open questions for the owner
+## 9. Decisions (owner, 2026-11-26)
 
-1. Build C1, C2, C3 and R1 as 4 PRs in that order?
-2. Keep R2 and R3 out until R1 is measured?
-3. Measure the `Child` and facts memory next (section 7), or code sharing between realms?
+1. Build C1, C2, C3, R1 and C4 as separate PRs in that order.
+2. R2 and R3 stay out until R1 is measured.
+3. The `Child` and facts memory is measured (C4). Code sharing between realms stays out.
