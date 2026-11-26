@@ -40,7 +40,10 @@
 //! A `<textarea>` is edited like a field (typing, Enter, Backspace, Delete, `maxlength`). Gaps there: Up and Down and Home and End do not
 //! move by line (Home and End go to the start and the end of the value), and the box does not wrap or scroll (`page.rs`).
 //!
-//! Gaps (none is faked): in a `contenteditable` host, arrows, Home and End do not move the caret; clipboard keys; Ctrl+Left/Right word moves; IME and `compositionstart`; `readonly` is honored but
+//! Clipboard keys (Ctrl+C, X, V and the Insert and Delete forms): `copy`, `cut` and `paste` events with a `DataTransfer`, then the default
+//! action. See `browser_ui/clipboard.rs`.
+//!
+//! Gaps (none is faked): in a `contenteditable` host, arrows, Home and End do not move the caret; `navigator.clipboard` and a menu or mouse paste (the clipboard keys are in `browser_ui/clipboard.rs`); Ctrl+Left/Right word moves; IME and `compositionstart`; `readonly` is honored but
 //! `type=number` does not filter text; `contextmenu`; `:hover`/`:focus` styling; radio groups in the Tab order (every
 //! radio is a stop); `<summary>` toggling; `<label>` click coordinates of the second click; `UIEvent` and `WheelEvent`.
 //!
