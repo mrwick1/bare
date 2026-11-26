@@ -2317,6 +2317,38 @@ impl<E: Eng> Browser<E> {
         })
     }
 
+    /// The page goes to the background (`on`) or comes back, as when the user switches tabs in Chrome. Going: `hasFocus()` is false,
+    /// `blur` fires at the window, then the page is hidden and `visibilitychange` fires at the document. Coming back: the reverse
+    /// (`visibilitychange`, then `focus`). The order is the one of the Page Lifecycle API. While hidden, a timer is due at the next
+    /// whole second (`browser_scheduler.rs`). A closed page (`hide`) stays hidden. A second call with the same `on` does nothing.
+    pub fn set_background(&mut self, on: bool) -> R<E, ()> {
+        let dom = self.dom.clone();
+        if dom.basics.background.get() == on {
+            return Ok(());
+        }
+        let root = dom.doc.borrow().root();
+        let fire = |it: &mut E::Vm, t: Target<E>, ty: &str, bubbles: bool| -> R<E, ()> {
+            let e = dom.new_event(it, ty, bubbles, false, false, None)?;
+            dom.st.borrow_mut().events.get_mut(&e).expect("just made").trusted = true;
+            dom.dispatch(it, t, e).map(|_| ())
+        };
+        self.it.host_scope_o(|it| {
+            if on {
+                dom.basics.blurred.set(true);
+                fire(it, Target::Window, "blur", false)?;
+                dom.basics.background.set(true);
+                dom.align_timers();
+                fire(it, Target::Node(root), "visibilitychange", true)?;
+            } else {
+                dom.basics.background.set(false);
+                fire(it, Target::Node(root), "visibilitychange", true)?;
+                dom.basics.blurred.set(false);
+                fire(it, Target::Window, "focus", false)?;
+            }
+            it.host_checkpoint().map(|_| ())
+        })
+    }
+
     /// `submit` at a form (bubbles, cancelable). No validation, no navigation.
     pub fn submit(&mut self, form: NodeId) -> R<E, Dispatched> {
         self.dispatch(form, "submit", true, true)

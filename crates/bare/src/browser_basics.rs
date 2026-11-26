@@ -5,7 +5,7 @@
 //! depends on the document is a getter. `navigator` is lazy as a whole (`browser_web.rs`), so its names cost a page that never reads
 //! `navigator` nothing. Values are Chrome 155 on Linux where the HTML Standard leaves a choice (`docs/internal/decisions.md` lists each one).
 //!
-//! `document`: `visibilityState` "visible" and `hidden` false (getters: "hidden" and true once the page closes, `Browser::hide`),
+//! `document`: `visibilityState` "visible" and `hidden` false (getters: "hidden" and true once the page closes, `Browser::hide`, or while it is in the background, `Browser::set_background`),
 //! `referrer` "" (a navigation sends no `Referer`), `designMode` "off" (data properties: a write only stores the value, the page has no design
 //! mode); `characterSet`, `charset` and `inputEncoding` (one getter:
 //! the `<meta charset>` or `<meta http-equiv=content-type>` in `<head>` through `bare_html::encoding`'s labels, else "UTF-8"; the
@@ -55,6 +55,15 @@ pub(crate) struct Basics<E: Eng> {
     noop: Cell<Option<<E as Eng>::Obj>>,
     /// The page closes (`Browser::hide`): `document.visibilityState` is "hidden" and `document.hidden` is true.
     pub(crate) hidden: Cell<bool>,
+    /// The page is in the background (`Browser::set_background`): it is hidden while this is set.
+    pub(crate) background: Cell<bool>,
+    /// The page has no focus (`Browser::set_background`): `document.hasFocus()` is false.
+    pub(crate) blurred: Cell<bool>,
+}
+
+/// The page is hidden: closed or in the background.
+pub(crate) fn page_hidden<E: Eng>(d: &Dom<E>) -> bool {
+    d.basics.hidden.get() || d.basics.background.get()
 }
 
 pub(crate) fn install<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, ()> {
@@ -98,12 +107,12 @@ pub(crate) fn define<E: Eng>(d: &Dom<E>, it: &mut E::Vm, key: &str) -> R<E, ()> 
         "isSecureContext" => getter(d, it, g, &["isSecureContext"], |d, s, _, _| Ok(s.boolean(secure(d))), false),
         "outerWidth" => getter(d, it, g, &["outerWidth"], |d, s, _, _| Ok(s.number(d.plat.s.borrow().viewport.0 as f64)), false),
         "outerHeight" => getter(d, it, g, &["outerHeight"], |d, s, _, _| Ok(s.number(d.plat.s.borrow().viewport.1 as f64)), false),
-        "hidden" => getter(d, it, doc, &[key], |d, s, _, _| Ok(s.boolean(d.basics.hidden.get())), false),
+        "hidden" => getter(d, it, doc, &[key], |d, s, _, _| Ok(s.boolean(page_hidden(d))), false),
         "referrer" => {
             let empty = d.js_str(it, "")?;
             data(it, doc, empty)
         }
-        "visibilityState" => getter(d, it, doc, &[key], |d, s, _, _| d.js_str_s(s, if d.basics.hidden.get() { "hidden" } else { "visible" }), false),
+        "visibilityState" => getter(d, it, doc, &[key], |d, s, _, _| d.js_str_s(s, if page_hidden(d) { "hidden" } else { "visible" }), false),
         "contentType" => getter(d, it, doc, &[key], |d, s, _, _| d.js_str_s(s, "text/html"), false),
         "compatMode" => getter(d, it, doc, &[key], |d, s, _, _| d.js_str_s(s, if has_doctype(&d.doc.borrow()) { "CSS1Compat" } else { "BackCompat" }), false),
         "characterSet" | "charset" | "inputEncoding" => getter(d, it, doc, &[key], |d, s, _, _| d.js_str_s(s, charset(&d.doc.borrow())), false),
