@@ -1273,7 +1273,7 @@ fn fill_form<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, proto: E::Obj, list: Vec
 pub(crate) const MAX_UPLOAD: u64 = 100 << 20;
 
 /// The content type of a file name, from its extension (a short list; else `application/octet-stream`).
-fn mime_of(name: &str) -> &'static str {
+pub(crate) fn mime_of(name: &str) -> &'static str {
     match name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).as_deref() {
         Some("txt" | "log") => "text/plain",
         Some("html" | "htm") => "text/html",
@@ -1287,6 +1287,24 @@ fn mime_of(name: &str) -> &'static str {
         Some("webp") => "image/webp",
         Some("svg") => "image/svg+xml",
         Some("zip") => "application/zip",
+        Some("avif") => "image/avif",
+        Some("bmp") => "image/bmp",
+        Some("mp4" | "m4v") => "video/mp4",
+        Some("webm") => "video/webm",
+        Some("mov") => "video/quicktime",
+        Some("3gp") => "video/3gpp",
+        Some("mp3") => "audio/mpeg",
+        Some("m4a") => "audio/x-m4a",
+        Some("ogg" | "oga" | "opus") => "audio/ogg",
+        Some("wav") => "audio/wav",
+        Some("aac") => "audio/aac",
+        Some("flac") => "audio/flac",
+        Some("doc") => "application/msword",
+        Some("docx") => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        Some("xls") => "application/vnd.ms-excel",
+        Some("xlsx") => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        Some("ppt") => "application/vnd.ms-powerpoint",
+        Some("pptx") => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         _ => "application/octet-stream",
     }
 }
