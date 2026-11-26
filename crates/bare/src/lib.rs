@@ -207,6 +207,7 @@ mod browser_platform_query;
 mod browser_scheduler;
 mod browser_worker;
 mod browser_notification;
+pub use browser_notification::{NotificationEvent, NotificationInfo};
 mod browser_wasm;
 #[cfg(test)]
 mod browser_wasm_tests;
@@ -465,6 +466,8 @@ mod browser_domparser_xhtml_tests;
 mod browser_notification_tests;
 #[cfg(test)]
 mod browser_notification_permission_tests;
+#[cfg(test)]
+mod browser_notification_show_tests;
 #[cfg(test)]
 mod browser_create_document_tests;
 #[cfg(test)]
