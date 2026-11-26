@@ -21,7 +21,7 @@ use crate::browser_scoped::*;
 use bare_js_api::{Args, HostFn, Local, Type};
 
 /// `(names that ask for it, the global that the source defines first, source)`.
-const SHIMS: [(&[&str], &str, &str); 11] = [
+const SHIMS: [(&[&str], &str, &str); 12] = [
     (&["animate", "Animation"], "Animation", include_str!("shims/animation.js")),
     (&["Path2D"], "Path2D", include_str!("shims/path2d.js")),
     (&["EventSource"], "EventSource", include_str!("shims/eventsource.js")),
