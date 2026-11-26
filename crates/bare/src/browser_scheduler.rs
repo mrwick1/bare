@@ -1244,6 +1244,23 @@ fn set_timer<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args
     Ok(s.number(id as f64))
 }
 
+/// Call `cb(arg)` in a new task, as a timer of delay 0 that no script can clear (the callback of `canvas.toBlob`).
+pub(crate) fn queue_call<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, cb: Local<'s>, arg: Local<'s>) -> Res<'s, ()> {
+    let id = {
+        let sc = d.sched.borrow();
+        if sc.timers.len() >= sc.limits.max_timers {
+            return Err(d.lim_s(s, "timers"));
+        }
+        sc.next_timer + 1
+    };
+    let call = TimerCall { cb: s.persist(cb), args: vec![TimerArg::new(s, arg)] };
+    let key = lift::<E, _>(s, d.schedule(d.now_ms(), Task::Timer(id)))?;
+    let mut sc = d.sched.borrow_mut();
+    sc.next_timer = id;
+    sc.timers.insert(id, Timer { call, interval: None, nesting: 1, key: Some(key), period: 0, idle: false });
+    Ok(())
+}
+
 fn set_timeout<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     set_timer(d, s, this, a, false)
 }

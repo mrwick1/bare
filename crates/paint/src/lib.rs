@@ -17,6 +17,9 @@ pub mod hit;
 mod hit_generated_tests;
 pub mod layer;
 pub mod png;
+pub mod raster2d;
+#[cfg(test)]
+mod raster2d_tests;
 pub mod svg;
 
 use bare_css::cascade::Styles;
