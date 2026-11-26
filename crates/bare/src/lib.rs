@@ -232,6 +232,9 @@ mod browser_scheduler;
 mod browser_worker;
 mod browser_sw;
 mod sw_hub;
+mod cache_store;
+mod browser_caches;
+pub use cache_store::{CacheEntry, SavedCache};
 mod browser_notification;
 pub use browser_notification::{NotificationAction, NotificationEvent, NotificationInfo};
 pub use sw_hub::SavedReg;
@@ -515,6 +518,8 @@ mod browser_sw_lifecycle_tests;
 mod browser_sw_message_tests;
 #[cfg(test)]
 mod browser_sw_notification_tests;
+#[cfg(test)]
+mod browser_caches_store_tests;
 #[cfg(test)]
 mod browser_background_tests;
 #[cfg(test)]
