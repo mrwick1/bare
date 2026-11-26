@@ -105,6 +105,8 @@ mod browser_web_tests;
 #[cfg(test)]
 mod browser_web_filelist_tests;
 #[cfg(test)]
+mod browser_web_upload_types_tests;
+#[cfg(test)]
 mod browser_attr_tests;
 #[cfg(test)]
 mod browser_nodelist_tests;
