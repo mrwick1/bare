@@ -6,11 +6,11 @@
 //! Media environment (what `matches` is computed from)
 //! - A viewport in CSS pixels. The default is 1280 x 800, the window `main.rs` lays out with (the realm has no window of
 //!   its own yet). The driver changes it with `Browser::set_viewport`. `window.innerWidth` and friends do not exist.
-//! - The colour scheme is light. This is what `bare_css::at_rules::media_matches` answers for `prefers-color-scheme`
-//!   (`light` is true, `dark` is false), the same function the cascade uses for `@media`. It does not read any OS
-//!   setting and it is not configurable. `Browser::media_environment()` reports both values.
+//! - The colour scheme is `bare_css::at_rules::color_scheme()`: light, or dark when the window found a dark desktop
+//!   (`bare_os::scheme`). `media_matches` answers `prefers-color-scheme` from it, the same function the cascade uses
+//!   for `@media`. `Browser::media_environment()` reports both values.
 //! - Subset: exactly the queries `media_matches` understands (`screen`/`all`, `not`/`only`, `and`, commas, `width`,
-//!   `height`, `orientation`, `resolution`, `prefers-color-scheme` (light only), `prefers-reduced-motion` (no-preference),
+//!   `height`, `orientation`, `resolution`, `prefers-color-scheme`, `prefers-reduced-motion` (no-preference),
 //!   `hover`, `pointer`, range syntax). A query it does not understand is false, as a media type the engine does not know.
 //!   Not done: the "not all" rewrite of a query with a syntax error, and the canonical serialization. `media` is the
 //!   query text with ASCII white space trimmed at both ends. The empty query matches.
@@ -423,7 +423,7 @@ impl<E: Eng> Browser<E> {
 
     /// The viewport and colour scheme that `matchMedia` uses.
     pub fn media_environment(&self) -> MediaEnvironment {
-        MediaEnvironment { viewport: self.dom.plat.s.borrow().viewport, prefers_color_scheme: "light" }
+        MediaEnvironment { viewport: self.dom.plat.s.borrow().viewport, prefers_color_scheme: bare_css::at_rules::color_scheme() }
     }
 
     pub fn platform_stats(&self) -> PlatformStats {
