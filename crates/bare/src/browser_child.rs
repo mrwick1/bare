@@ -159,6 +159,8 @@ pub(crate) enum Of<O> {
     Frame(NodeId),
     /// The `Worker` object in this heap, and whether the script is a module.
     Worker(O, bool),
+    /// A service worker: the id of its version in the hub (`sw_hub.rs`). It runs on this thread, also in a cross-origin isolated page.
+    Service(u64),
 }
 
 struct Slot<E: Eng> {
@@ -231,6 +233,8 @@ pub(crate) struct Kids<E: Eng> {
     pub(crate) poll_to: Cell<Option<f64>>,
     /// A worker page called `close()`: the driver ends it after this turn.
     pub(crate) closed: Cell<bool>,
+    /// This page is a service worker client (`browser_sw.rs`): the driver gives it a turn.
+    pub(crate) sw_on: Cell<bool>,
 }
 
 impl<E: Eng> Drop for Kids<E> {
@@ -251,7 +255,7 @@ impl<E: Eng> Drop for Kids<E> {
 fn live<E: Eng>(doc: &Document, s: &Slot<E>) -> bool {
     match s.of {
         Of::Frame(n) => connected(doc, n),
-        Of::Worker(..) => true,
+        Of::Worker(..) | Of::Service(_) => true,
     }
 }
 
@@ -297,7 +301,7 @@ impl<E: Eng> Kids<E> {
     /// Does this page have a child page, or a slot for one, or does a wire wait in the port hub? The driver gives such a page a turn.
     #[inline]
     pub(crate) fn any(&self) -> bool {
-        !self.slots.borrow().is_empty() || self.hub_busy()
+        !self.slots.borrow().is_empty() || self.hub_busy() || self.sw_on.get()
     }
 
     /// Does a wire wait in the port hub?
@@ -411,7 +415,7 @@ impl<E: Eng> Kids<E> {
     fn worker_obj(&self, id: FrameId) -> Option<E::Obj> {
         match self.slots.borrow().get(id as usize)?.as_ref()?.of {
             Of::Worker(o, _) => Some(o),
-            Of::Frame(_) => None,
+            _ => None,
         }
     }
 
@@ -429,6 +433,19 @@ impl<E: Eng> Kids<E> {
         }
         let mut slots = self.slots.borrow_mut();
         slots.push(Some(Slot { of: Of::Worker(o, module), url, dirty: true, win: None }));
+        Some((slots.len() - 1) as FrameId)
+    }
+
+    /// Make a worker page for the service worker version `ver`. `None` when the bounds of child pages are reached or this page has no
+    /// driver.
+    pub(crate) fn add_service(&self, ver: u64, url: String) -> Option<FrameId> {
+        let cfg = self.cfg()?;
+        let lim = cfg.browser;
+        if cfg.depth as usize >= lim.max_child_depth || !cfg.reserve(lim.max_child_pages) {
+            return None;
+        }
+        let mut slots = self.slots.borrow_mut();
+        slots.push(Some(Slot { of: Of::Service(ver), url, dirty: true, win: None }));
         Some((slots.len() - 1) as FrameId)
     }
 
@@ -526,7 +543,7 @@ impl<E: Eng> Kids<E> {
             let label = Url::parse(s.url.split('#').next().unwrap_or("")).map_or_else(|_| "?".to_string(), |u| label(&u));
             let (state, worker) = match s.of {
                 Of::Frame(_) => (State::Loading(start_load(cfg, s.url.clone(), from.clone())), false),
-                Of::Worker(..) => (State::Start, true),
+                Of::Worker(..) | Of::Service(_) => (State::Start, true),
             };
             // A worker has no element that waits for a `load` event.
             kids[i] = Some(Child { state, started: false, notified: worker, ran: false, delta: 0.0, label, site });
@@ -552,8 +569,8 @@ impl<E: Eng> Kids<E> {
 
     /// Does a child keep the page from settling (a queued task of it, due by `limit` on the page clock, that blocks; or a load)?
     pub(crate) fn blocks(&self, d: &Dom<E>, limit: f64) -> bool {
-        // A wire in the hub waits for a page to take it.
-        if self.hub_busy() {
+        // A wire in the hub waits for a page to take it. A service worker change or event waits for this page.
+        if self.hub_busy() || self.sw_on.get() && crate::browser_sw::busy(d) {
             return true;
         }
         let slots = self.slots.borrow();
@@ -574,6 +591,9 @@ impl<E: Eng> Kids<E> {
 
     /// Does a live child still load its document?
     pub(crate) fn loading(&self, d: &Dom<E>) -> bool {
+        if self.sw_on.get() && crate::browser_sw::fetching(d) {
+            return true;
+        }
         let slots = self.slots.borrow();
         let (kids, doc) = (self.kids.borrow(), d.doc.borrow());
         kids.iter().enumerate().any(|(i, k)| {
@@ -590,12 +610,18 @@ impl<E: Eng> Kids<E> {
     }
 
     /// Live: can a turn do something for a child now (`Some(true)`), or does a child wait for the network (`Some(false)`)?
-    pub(crate) fn live_work(&self, streams: bool) -> Option<bool> {
+    pub(crate) fn live_work(&self, d: &Dom<E>, streams: bool) -> Option<bool> {
         // A slot whose document is not requested yet, or a wire in the hub: the next turn starts the load or takes the wire.
         if self.hub_busy() || self.slots.borrow().iter().flatten().any(|s| s.dirty) {
             return Some(true);
         }
         let mut out = None;
+        if self.sw_on.get() {
+            match crate::browser_sw::live_work(d) {
+                Some(true) => return Some(true),
+                w => out = w,
+            }
+        }
         for k in self.kids.borrow().iter().flatten() {
             let w = match &k.state {
                 State::Loading(t) => Some(t.done()),
@@ -668,8 +694,12 @@ impl<E: Eng> Browser<E> {
             Of::Frame(_) => b.it.host_scope_o(|it| crate::browser_remote_window::install_up(&dom, it, depth)),
             // A worker has no parent window: it talks to its `Worker` object through its own global.
             Of::Worker(..) => b.it.host_scope_o(|it| crate::browser_worker::install_scope(&dom, it)),
+            Of::Service(ver) => b.it.host_scope_o(|it| crate::browser_sw::install_worker(&dom, it, ver)),
         };
         up.map_err(|_| "the window could not be set up".to_string())?;
+        if matches!(of, Of::Frame(_)) {
+            crate::browser_sw::navigated(&b.dom);
+        }
         Ok((b, delta))
     }
 
@@ -679,12 +709,16 @@ impl<E: Eng> Browser<E> {
     pub(crate) fn kids_turn(&mut self, advance: bool, wait: bool) -> Turn {
         let mut t = Turn::default();
         let Some(cfg) = self.dom.kids.cfg() else { return t };
-        self.dom.kids.sync(&self.dom, &cfg);
-        let n = self.dom.kids.kids.borrow().len();
         let block = wait || !self.live();
+        // The service workers of this page first: its jobs, its inbox, and the workers that it starts (they get a slot).
+        if self.dom.kids.sw_on.get() {
+            t.work += self.sw_turn(block);
+        }
+        self.dom.kids.sync(&self.dom, &cfg);
         let from = base_url(&self.dom);
         // Workers whose script did not load (their object gets `error`), and workers that called `close()`.
-        let (mut failed, mut ended) = (Vec::new(), Vec::new());
+        let (mut failed, mut ended, mut sw_stop) = (Vec::new(), Vec::new(), Vec::new());
+        let n = self.dom.kids.kids.borrow().len();
         // The wires for the ports of this page (a page that has no split port has no end: the call does nothing).
         if cfg.hub.busy() {
             match self.it.host_scope_o(|it| run::<E, _>(it, |s| self.dom.take_wires(s))) {
@@ -697,8 +731,9 @@ impl<E: Eng> Browser<E> {
             let Some((of, slot_url)) = self.dom.kids.slots.borrow().get(i).and_then(|s| s.as_ref()).map(|s| (s.of, s.url.clone())) else { continue };
             let mut down = if self.dom.kids.outbox_len() > 0 { self.dom.kids.take_out(|m| m.to == Side::Child(i as FrameId)) } else { Vec::new() };
             let mut fail = |ch: &mut Child<E>, t: &mut Turn, why: String| {
-                t.diags.push(format!("{} {}: {why}", if matches!(of, Of::Worker(..)) { "worker" } else { "frame" }, ch.label));
+                t.diags.push(format!("{} {}: {why}", if matches!(of, Of::Frame(_)) { "frame" } else { "worker" }, ch.label));
                 match of {
+                    Of::Service(ver) => sw_stop.push(ver),
                     Of::Frame(node) if !ch.notified => {
                         ch.notified = true;
                         t.loaded.push(node);
@@ -710,7 +745,7 @@ impl<E: Eng> Browser<E> {
             };
             ch.state = match std::mem::replace(&mut ch.state, State::Empty) {
                 State::Loading(task) if !block && !task.done() => State::Loading(task),
-                State::Start if self.dom.agent_cluster.get().is_some() => {
+                State::Start if self.dom.agent_cluster.get().is_some() && !matches!(of, Of::Service(_)) => {
                     match ThreadWorker::start::<E>(&cfg, &self.dom, &slot_url, of, &from) {
                         Ok(worker) => {
                             t.work += 1;
@@ -743,6 +778,7 @@ impl<E: Eng> Browser<E> {
                         State::Loading(task) => task.wait().unwrap_or_else(|| Err("network error".into())).map(|doc| (doc.url, doc.html, None)),
                         _ => match of {
                             Of::Worker(_, module) => worker_doc(&slot_url, module, &from),
+                            Of::Service(ver) => crate::browser_sw::worker_doc(&self.dom, ver),
                             Of::Frame(_) => Ok((slot_url.clone(), String::new(), None)),
                         },
                     };
@@ -751,8 +787,12 @@ impl<E: Eng> Browser<E> {
                             Ok((mut b, delta)) => {
                                 if let Some(text) = text {
                                     ch.ran = true;
-                                    if let Err(e) = b.run_script(&text) {
+                                    let r = b.run_script(&text);
+                                    if let Err(e) = &r {
                                         t.diags.push(format!("worker {}: the script threw: {e:?}", ch.label));
+                                    }
+                                    if let Of::Service(ver) = of {
+                                        crate::browser_sw::evaluated(&self.dom, ver, r.is_ok());
                                     }
                                 }
                                 ch.delta = delta;
@@ -779,6 +819,9 @@ impl<E: Eng> Browser<E> {
                         if let Err(e) = b.it.host_scope_o(|it| b.dom.deliver(it, m, parent)) {
                             t.diags.push(format!("frame {}: a message was dropped: {e:?}", ch.label));
                         }
+                    }
+                    if let Of::Service(_) = of {
+                        t.work += b.dispatch_events(self.now());
                     }
                     let url = b.document_url().unwrap_or_default();
                     let ready = b.ready_level();
@@ -819,8 +862,13 @@ impl<E: Eng> Browser<E> {
                             self.route_up(&cfg, i as FrameId, m, &mut t);
                         }
                     }
+                    let idle = if let Of::Service(ver) = of { crate::browser_sw::after_turn(&self.dom, &mut b, ver, self.now()) } else { false };
                     match r.stop {
                         _ if unloaded => fail(&mut ch, &mut t, "the worker script did not load".into()),
+                        _ if idle => {
+                            ended.push(i as FrameId);
+                            State::Empty
+                        }
                         _ if closed => {
                             ended.push(i as FrameId);
                             State::Empty
@@ -865,6 +913,9 @@ impl<E: Eng> Browser<E> {
         }
         for id in ended {
             self.dom.kids.end(id);
+        }
+        for ver in sw_stop {
+            crate::browser_sw::stopped(&self.dom, ver);
         }
         for o in failed {
             if let Err(e) = self.it.host_scope_o(|it| self.dom.worker_error(it, o)) {

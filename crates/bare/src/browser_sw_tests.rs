@@ -1,4 +1,4 @@
-//! Tests of `navigator.serviceWorker` (the `Sw` code of `browser_web.rs`): a container with no registrations, as in Ladybird.
+//! Tests of `navigator.serviceWorker` in a page with no driver and no registration (`browser_sw.rs`, `shims/sw.js`).
 
 use crate::eng_new::Peek;
 use crate::browser::*;
@@ -39,9 +39,9 @@ fn service_worker_container_has_no_registrations() {
     big(|| {
         let mut b = browser();
         assert_eq!(js(&mut b, "['serviceWorker' in navigator, typeof navigator.serviceWorker, navigator.serviceWorker === navigator.serviceWorker, navigator.serviceWorker instanceof ServiceWorkerContainer, navigator.serviceWorker.controller, typeof ServiceWorkerRegistration, typeof ServiceWorker].join()"), "true,object,true,true,,function,function");
-        js(&mut b, "var out = []; const sw = navigator.serviceWorker; sw.getRegistration().then(r => out.push('one:' + r)); sw.getRegistrations().then(r => out.push('all:' + r.length)); sw.register('/sw.js').catch(e => out.push('reg:' + e.name)); let ready = 'pending'; sw.ready.then(() => ready = 'resolved');");
+        js(&mut b, "var out = []; const sw = navigator.serviceWorker; sw.getRegistration().then(r => out.push('one:' + r)); sw.getRegistrations().then(r => out.push('all:' + r.length)); let ready = 'pending'; sw.ready.then(() => ready = 'resolved');");
         pump(&mut b);
-        assert_eq!(js(&mut b, "out.sort().join('|') + '|' + ready"), "all:0|one:undefined|reg:NotSupportedError|pending");
+        assert_eq!(js(&mut b, "out.sort().join('|') + '|' + ready"), "all:0|one:undefined|pending");
         assert_eq!(js(&mut b, "try { new ServiceWorkerContainer(); 'made' } catch (e) { e.name }"), "TypeError");
         assert_eq!(js(&mut b, "let n = 0; navigator.serviceWorker.addEventListener('message', () => n++); navigator.serviceWorker.dispatchEvent(new Event('message')); n + ':' + Object.prototype.toString.call(navigator.serviceWorker)"), "1:[object ServiceWorkerContainer]");
     });

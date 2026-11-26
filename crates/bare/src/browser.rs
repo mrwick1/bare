@@ -802,6 +802,8 @@ pub struct Dom<E: Eng = New> {
     /// The `mark` and `measure` entries of `performance` (`browser_perf.rs`).
     pub(crate) frames: crate::browser_frames::Frames<E>,
     pub(crate) kids: crate::browser_child::Kids<E>,
+    /// The service worker state of this page (`browser_sw.rs`).
+    pub(crate) sw: crate::browser_sw::SwPage,
     pub(crate) perf_entries: RefCell<Vec<crate::browser_perf::Entry<E::Obj>>>,
     /// The times of the load of this document, for its navigation entry (`browser_perf.rs`).
     pub(crate) load_times: RefCell<crate::browser_perf::LoadTimes>,
@@ -2089,6 +2091,7 @@ impl<E: Eng> Browser<E> {
             screen_iface: Default::default(),
             frames: Default::default(),
             kids: Default::default(),
+            sw: Default::default(),
             perf_entries: Default::default(),
             load_times: Default::default(),
             html_ifaces: Default::default(),
