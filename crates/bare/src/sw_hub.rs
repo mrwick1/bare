@@ -270,6 +270,8 @@ pub(crate) struct Hub {
     note_last: u64,
     /// The `fetch` events with no reply yet: event id, version, client, fetch id.
     fetches: Vec<(u64, u64, u64, u64)>,
+    /// The replies to navigation `fetch` events (client 0): fetch id, reply. The session takes them (`take_nav`).
+    nav: Vec<(u64, FetchReply)>,
 }
 
 /// The origin of a URL: `scheme://host[:port]`.
@@ -879,13 +881,31 @@ impl Hub {
         fid
     }
 
-    /// The reply to the fetch `id`: it goes to its client. A second reply does nothing.
+    /// The reply to the fetch `id`: it goes to its client, or to the session for a navigation. A second reply does nothing.
     pub(crate) fn fetch_reply(&mut self, id: u64, reply: FetchReply) {
         let Some(k) = self.fetches.iter().position(|f| f.3 == id) else { return };
         let (_, _, client, _) = self.fetches.remove(k);
+        if client == 0 {
+            self.nav.push((id, reply));
+            return;
+        }
         if let Some(c) = self.clients.iter_mut().find(|c| c.id == client) {
             c.inbox.push(ToClient::Fetched { id, reply });
         }
+    }
+
+    /// The worker that gets the `fetch` event of a navigation to `url`: the active version of the registration whose scope matches,
+    /// unless its script has no `fetch` listener.
+    pub(crate) fn nav_ver(&self, url: &str) -> Option<u64> {
+        let v = self.match_url(url)?.active.as_ref()?;
+        (matches!(v.state, St::Activating | St::Activated) && v.has_fetch != Some(false)).then_some(v.id)
+    }
+
+    /// The reply to the navigation fetch `id`. With none yet, the navigation goes to the network.
+    pub(crate) fn take_nav(&mut self, id: u64) -> FetchReply {
+        self.fetch_reply(id, FetchReply::Fallback);
+        let k = self.nav.iter().position(|n| n.0 == id).expect("fetch_reply keeps a navigation reply");
+        self.nav.remove(k).1
     }
 
     // ------------------------------------------------------------------------------------------ the profile
