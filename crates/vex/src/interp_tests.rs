@@ -312,8 +312,8 @@ fn a_recursive_function_calls_and_returns_with_frame_records() {
     let (vm, v) = run_main(&sh, fib_program(&sh, arg));
     assert_eq!(v, n(want));
     // The cache of the global read is a hit after the second use: one entry, and the state stays MONO.
-    assert_eq!(vm.fbs[1].caches[0].state, MONO);
-    assert_eq!(vm.fbs[1].entries(0), 1);
+    assert_eq!(vm.fb(1).caches[0].state, MONO);
+    assert_eq!(vm.fb(1).entries(0), 1);
 }
 
 #[test]
@@ -483,7 +483,7 @@ fn a_context_variable_in_its_dead_zone_throws_a_reference_error() {
 
 // ---- properties and caches ----
 
-/// A function `(o) => o.x`; the cache of its one site is `vm.fbs[0].caches[0]`.
+/// A function `(o) => o.x`; the cache of its one site is `vm.fb(0).caches[0]`.
 fn getter(sh: &Arc<SharedAtoms>, name: &str) -> Vec<Code> {
     let mut f = F::new(sh, 2, 1);
     f.get(1, 0, name);
@@ -500,21 +500,21 @@ fn a_get_field_site_goes_from_fresh_to_mono_poly_and_mega() {
     let sh = shared();
     let mut vm = vm_with(&sh, getter(&sh, "x"));
     let f = vm.function(0);
-    let st = |vm: &Vm| (vm.fbs[0].caches[0].state, vm.fbs[0].entries(0));
-    assert!(!vm.fbs[0].ready, "a feedback vector is made at the first run of its code");
+    let st = |vm: &Vm| (vm.fb(0).caches[0].state, vm.fb(0).entries(0));
+    assert!(vm.fbs[0].is_none(), "a feedback vector is made at the first run of its code");
     let o = mk(&mut vm, &[("x", 1)]);
     assert_eq!(call1(&mut vm, f, o), n(1));
     assert_eq!(st(&vm), (SEEN, 0), "the first use makes no entry");
     let o = mk(&mut vm, &[("x", 2)]);
     assert_eq!(call1(&mut vm, f, o), n(2));
     assert_eq!(st(&vm), (MONO, 1), "the second use of the site fills it");
-    let shape = vm.fbs[0].caches[0].shape;
+    let shape = vm.fb(0).caches[0].shape;
     for i in 3..6 {
         let o = mk(&mut vm, &[("x", i)]);
         assert_eq!(call1(&mut vm, f, o), n(i));
     }
     assert_eq!(st(&vm), (MONO, 1), "a hit does not change the record");
-    assert_eq!(vm.fbs[0].caches[0].shape, shape);
+    assert_eq!(vm.fb(0).caches[0].shape, shape);
     let o = mk(&mut vm, &[("y", 0), ("x", 9)]);
     assert_eq!(call1(&mut vm, f, o), n(9));
     assert_eq!(st(&vm), (POLY, 2));
@@ -527,7 +527,7 @@ fn a_get_field_site_goes_from_fresh_to_mono_poly_and_mega() {
     let o = mk(&mut vm, &[("c", 0), ("x", 5)]);
     assert_eq!(call1(&mut vm, f, o), n(5));
     assert_eq!(st(&vm), (MEGA, 0));
-    assert_eq!(vm.fbs[0].caches[0].shape, 0, "no object has shape 0");
+    assert_eq!(vm.fb(0).caches[0].shape, 0, "no object has shape 0");
     let o = mk(&mut vm, &[("x", 6)]);
     assert_eq!(call1(&mut vm, f, o), n(6), "a megamorphic site still reads");
     assert_eq!(st(&vm).0, MEGA);
@@ -545,15 +545,15 @@ fn a_get_field_of_an_inherited_name_makes_a_prototype_entry_and_a_missing_name_m
         assert_eq!(call1(&mut vm, f, o), n(5));
     }
     // The first read makes the site `SEEN`, the second makes the entry (a prototype entry: the record has shape 0).
-    assert_eq!((vm.fbs[0].caches[0].state, vm.fbs[0].entries(0), vm.fbs[0].protos.len()), (MONO, 1, 1));
-    assert_eq!(vm.fbs[0].caches[0].shape, 0, "the own-property hit never matches a prototype entry");
+    assert_eq!((vm.fb(0).caches[0].state, vm.fb(0).entries(0), vm.fb(0).protos.len()), (MONO, 1, 1));
+    assert_eq!(vm.fb(0).caches[0].shape, 0, "the own-property hit never matches a prototype entry");
     let mut vm = vm_with(&sh, getter(&sh, "missing"));
     let f = vm.function(0);
     let o = mk(&mut vm, &[("x", 1)]);
     for _ in 0..4 {
         assert_eq!(call1(&mut vm, f, o), Value::UNDEFINED);
     }
-    assert_eq!((vm.fbs[0].caches[0].state, vm.fbs[0].entries(0)), (SEEN, 0));
+    assert_eq!((vm.fb(0).caches[0].state, vm.fb(0).entries(0)), (SEEN, 0));
 }
 
 #[test]
@@ -586,27 +586,27 @@ fn a_set_field_that_adds_a_property_is_a_cache_hit_with_a_new_shape() {
     let a1 = mk(&mut vm, &[("x", 1)]);
     put(&mut vm, a1, 5);
     assert_eq!(prop(&mut vm, a1, "z"), n(5));
-    assert_eq!(vm.fbs[0].caches[0].state, SEEN, "the first add makes no entry");
+    assert_eq!(vm.fb(0).caches[0].state, SEEN, "the first add makes no entry");
     let a2 = mk(&mut vm, &[("x", 2)]);
     let before = Realm::obj(a2).unwrap().shape(&vm.realm.shapes);
     put(&mut vm, a2, 6);
-    let c = vm.fbs[0].caches[0];
+    let c = vm.fb(0).caches[0];
     assert_eq!((c.state, c.shape), (MONO, before.raw()));
     assert_ne!(c.to, 0, "the entry has the shape after the add");
     assert_eq!(Realm::obj(a2).unwrap().shape(&vm.realm.shapes).raw(), c.to);
     let a3 = mk(&mut vm, &[("x", 3)]);
     put(&mut vm, a3, 7);
-    assert_eq!(vm.fbs[0].caches[0].state, MONO, "the third add is a hit");
+    assert_eq!(vm.fb(0).caches[0].state, MONO, "the third add is a hit");
     assert_eq!(prop(&mut vm, a3, "z"), n(7));
     assert_eq!(Realm::obj(a3).unwrap().shape(&vm.realm.shapes).raw(), c.to);
     assert_eq!(prop(&mut vm, a3, "x"), n(3));
     // An object that has `z` now: another shape, so a second entry (a plain write).
     put(&mut vm, a3, 8);
-    assert_eq!((vm.fbs[0].caches[0].state, vm.fbs[0].entries(0)), (POLY, 2));
+    assert_eq!((vm.fb(0).caches[0].state, vm.fb(0).entries(0)), (POLY, 2));
     assert_eq!(prop(&mut vm, a3, "z"), n(8));
     put(&mut vm, a2, 9);
     assert_eq!(prop(&mut vm, a2, "z"), n(9));
-    assert_eq!(vm.fbs[0].entries(0), 2, "a pool entry hits for both kinds");
+    assert_eq!(vm.fb(0).entries(0), 2, "a pool entry hits for both kinds");
 }
 
 #[test]
@@ -659,7 +659,7 @@ fn object_literals_share_one_shape_and_their_reads_hit() {
     let (vm, v) = run_main(&sh, vec![f.build()]);
     assert_eq!(v, n(499500 + 1000));
     for site in 0..2 {
-        assert_eq!((vm.fbs[0].caches[site].state, vm.fbs[0].entries(site)), (MONO, 1));
+        assert_eq!((vm.fb(0).caches[site].state, vm.fb(0).entries(site)), (MONO, 1));
     }
 }
 
@@ -1024,13 +1024,13 @@ fn a_cache_is_cleared_when_a_collection_frees_a_shape() {
         let o = mk(&mut vm, &[("x", i)]);
         call1(&mut vm, f, o);
     }
-    assert_eq!(vm.fbs[0].caches[0].state, MONO);
+    assert_eq!(vm.fb(0).caches[0].state, MONO);
     // Shapes that nothing keeps: the collection frees them and bumps the epoch.
     for i in 0..50 {
         mk(&mut vm, &[(&format!("tmp{i}"), 0), ("x", 1)]);
     }
     vm.collect_idle();
-    assert_eq!(vm.fbs[0].caches[0].state, FRESH, "the cache would name a shape id that may be reused");
+    assert_eq!(vm.fb(0).caches[0].state, FRESH, "the cache would name a shape id that may be reused");
     let f = prop(&mut vm, g.value(), "getter");
     let o = mk(&mut vm, &[("x", 4)]);
     assert_eq!(call1(&mut vm, f, o), n(4));

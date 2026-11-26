@@ -197,7 +197,7 @@ macro_rules! cold_ops {
 pub struct Vm {
     pub realm: Realm,
     pub stack: Vec<Value>,
-    pub fbs: Vec<Feedback>,
+    pub fbs: Vec<Option<Box<Feedback>>>,
     /// The code indexes of the default constructors (`DefaultCtor`): a base class and a derived class. Also in `Realm::dctor`.
     pub dctor: [usize; 2],
     /// Back edges that may still run. At 0 the run stops with [`Exit::Fuel`]. A call copies it to `Realm::fuel` (where the loop and a
@@ -337,13 +337,13 @@ impl Realm {
     /// It runs in any run, nested or not: `prog` is append-only (`Codes`) and the other runs hold no table that a push changes. A
     /// machine that is below in the Rust stack has its feedback vector in its loop; the loop makes the entry that it needs (`grow_fbs`).
     #[allow(clippy::too_many_arguments)]
-    fn compile_stub(&mut self, prog: &Codes, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, ci: usize, fp: usize, kept: bool, np: usize) -> Result<(), String> {
+    fn compile_stub(&mut self, prog: &Codes, stack: &mut Vec<Value>, fbs: &mut Vec<Option<Box<Feedback>>>, ci: usize, fp: usize, kept: bool, np: usize) -> Result<(), String> {
         let l = self.lazy.as_mut().ok_or("a lazy function has no compiler")?;
         l.compile(prog, ci)?;
         // The `name` and the `length` of the functions that the compile added (the stub of `ci` has them already).
         self.fn_info.extend((self.fn_info.len()..prog.len()).map(|i| code_info(&prog[i])));
-        fbs.resize_with(prog.len(), Feedback::default);
-        fbs[ci] = Feedback::default();
+        fbs.resize_with(prog.len(), || None);
+        fbs[ci] = None;
         let ncode = &prog[ci];
         let need = fp + ncode.nregs as usize + 8;
         if need > stack.len() {
@@ -374,8 +374,21 @@ impl Realm {
 /// run above it). Cold: the loop checks the length it already checks for the index.
 #[cold]
 #[inline(never)]
-fn grow_fbs(fbs: &mut Vec<Feedback>, n: usize) {
-    fbs.resize_with(n, Feedback::default);
+fn grow_fbs(fbs: &mut Vec<Option<Box<Feedback>>>, n: usize) {
+    fbs.resize_with(n, || None);
+}
+
+/// The feedback of code `ci`, made at its first run. A slot of a code that never ran costs one word (`design-feedback-table.md`).
+#[inline(always)]
+fn feedback<'a>(fbs: &'a mut Vec<Option<Box<Feedback>>>, n: usize, ci: usize, code: &Code) -> &'a mut Feedback {
+    if ci >= fbs.len() {
+        grow_fbs(fbs, n);
+    }
+    let fb = fbs[ci].get_or_insert_with(Box::default);
+    if !fb.ready || fb.caches.len() != code.sites.len() {
+        fb.init(code);
+    }
+    fb
 }
 
 /// How `gen_op` ends: the first frame of the run returned (`Done`), or `ci`, `fp` and `pc` are the caller's (`reload!` follows).
@@ -388,7 +401,7 @@ enum GenExit {
 #[cold]
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-fn async_op(realm: &mut Realm, stack: &mut [Value], fbs: &mut [Feedback], prog: &Codes, ci: usize, fp: usize, pc: usize, op: Op, a: usize, bx: u32, c: u32, next: usize) -> Result<GenExit, Value> {
+fn async_op(realm: &mut Realm, stack: &mut [Value], fbs: &mut [Option<Box<Feedback>>], prog: &Codes, ci: usize, fp: usize, pc: usize, op: Op, a: usize, bx: u32, c: u32, next: usize) -> Result<GenExit, Value> {
     if realm.due() {
         realm.cur = (ci, fp, pc as u32);
         let (cur, st) = (realm.cur, &stack[..]);
@@ -417,7 +430,7 @@ fn async_op(realm: &mut Realm, stack: &mut [Value], fbs: &mut [Feedback], prog: 
 #[cold]
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-fn gen_op(realm: &mut Realm, stack: &mut [Value], fbs: &mut [Feedback], prog: &Codes, ci: usize, fp: usize, pc: usize, op: Op, a: usize, bx: u32, c: u32, next: usize) -> Result<GenExit, Value> {
+fn gen_op(realm: &mut Realm, stack: &mut [Value], fbs: &mut [Option<Box<Feedback>>], prog: &Codes, ci: usize, fp: usize, pc: usize, op: Op, a: usize, bx: u32, c: u32, next: usize) -> Result<GenExit, Value> {
     if realm.due() {
         realm.cur = (ci, fp, pc as u32);
         let (cur, st) = (realm.cur, &stack[..]);
@@ -482,11 +495,17 @@ impl Vm {
         if scan {
             scan_flags(&mut prog.codes);
         }
-        let fbs = prog.codes.iter().map(|_| Feedback::default()).collect();
+        let fbs = prog.codes.iter().map(|_| None).collect();
         let mut realm = Realm::new(shared);
         (realm.prog, realm.dctor) = (Rc::new(prog.codes.into()), dctor);
         realm.fn_info = realm.prog.iter().map(code_info).collect();
         Vm { realm, stack: Vec::new(), fbs, dctor, fuel: u64::MAX }
+    }
+
+    /// The feedback of code `ci`, for tests. It panics when the code did not run.
+    #[cfg(test)]
+    pub(crate) fn fb(&self, ci: usize) -> &Feedback {
+        self.fbs[ci].as_deref().expect("the code ran")
     }
 
     /// A function cell for code `code` with no context.
@@ -506,7 +525,7 @@ impl Vm {
 
     /// Run `f` with `this` and `args` as a new entry into the interpreter, on the empty stack `stack` with the feedback `fbs` of the
     /// program. `Vm::call` uses the stack of the `Vm`, and `Realm::call_function` a machine of its own.
-    pub(crate) fn start(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, f: Value, this: Value, args: &[Value]) -> Result<Value, Exit> {
+    pub(crate) fn start(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Option<Box<Feedback>>>, f: Value, this: Value, args: &[Value]) -> Result<Value, Exit> {
         let Some((ci, ctx)) = realm.function(f) else {
             let e = realm.error(ErrKind::Type, "not a function");
             return Err(Exit::Throw(e));
@@ -516,7 +535,7 @@ impl Vm {
 
     /// As [`Vm::start`] for a construct call of the class or function `f` (`Realm::construct_script`): `nt` is `new.target`, and a
     /// result that is not an object is the `this` of the frame.
-    pub(crate) fn start_new(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, f: Value, this: Value, nt: Value, args: &[Value]) -> Result<Value, Exit> {
+    pub(crate) fn start_new(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Option<Box<Feedback>>>, f: Value, this: Value, nt: Value, args: &[Value]) -> Result<Value, Exit> {
         let Some((ci, ctx)) = realm.function_new(f) else {
             let e = realm.error(ErrKind::Type, "not a constructor");
             return Err(Exit::Throw(e));
@@ -525,7 +544,7 @@ impl Vm {
     }
 
     #[inline(always)]
-    fn start_at(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, (f, ci, ctx): (Value, usize, Value), this: Value, (nt, dstw): (Value, i32), args: &[Value]) -> Result<Value, Exit> {
+    fn start_at(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Option<Box<Feedback>>>, (f, ci, ctx): (Value, usize, Value), this: Value, (nt, dstw): (Value, i32), args: &[Value]) -> Result<Value, Exit> {
         let previous = realm.activate_function(f);
         let prog = realm.prog.clone();
         let code = &prog[ci];
@@ -566,7 +585,7 @@ impl Vm {
 
     /// Resume the generator `g` (the request is answered, [`Realm::gen_request`] said `Step::Enter`) as a new entry into the interpreter, on
     /// the empty stack `stack`. Gives what the generator yields or returns, with no result object ([`Realm::gen_done`] tells which).
-    pub(crate) fn resume_start(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, g: Value) -> Result<Value, Exit> {
+    pub(crate) fn resume_start(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Option<Box<Feedback>>>, g: Value) -> Result<Value, Exit> {
         let prog = realm.prog.clone();
         let (ci, pc) = match realm.gen_enter(stack, &prog, REC, ENTRY, 0, 0, 0, g) {
             Ok(x) => x,
@@ -605,7 +624,7 @@ impl Vm {
         realm.collect(fbs, |_| {});
     }
 
-    fn run(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, prog: &Codes, ci: usize, fp: usize, pc: usize) -> Result<Value, Exit> {
+    fn run(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Option<Box<Feedback>>>, prog: &Codes, ci: usize, fp: usize, pc: usize) -> Result<Value, Exit> {
         // The stack and the entry frame for the errors of natives that the loop did not publish for (`error_stack.rs`); the run above gets
         // its own back when this one ends.
         let saved = (realm.es.top, realm.es.pc, realm.es.base);
@@ -619,7 +638,7 @@ impl Vm {
         r
     }
 
-    fn run_loop<const REALMS: bool>(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, prog: &Codes, mut ci: usize, mut fp: usize, mut pc: usize) -> Result<Value, Exit> {
+    fn run_loop<const REALMS: bool>(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Option<Box<Feedback>>>, prog: &Codes, mut ci: usize, mut fp: usize, mut pc: usize) -> Result<Value, Exit> {
         loop {
             match Vm::exec::<Hot, REALMS>(realm, stack, fbs, prog, ci, fp, pc) {
                 Flow::Done(r) => return r,
@@ -632,7 +651,7 @@ impl Vm {
     /// the hot arms.
     #[cold]
     #[inline(never)]
-    fn run_cold<const REALMS: bool>(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, prog: &Codes, ci: usize, fp: usize, pc: usize) -> Flow {
+    fn run_cold<const REALMS: bool>(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Option<Box<Feedback>>>, prog: &Codes, ci: usize, fp: usize, pc: usize) -> Flow {
         Vm::exec::<Cold, REALMS>(realm, stack, fbs, prog, ci, fp, pc)
     }
 
@@ -658,18 +677,10 @@ impl Vm {
     /// `reload!()` after it (`regs`, `code`, `words` and `fb`). `ret!` moves `fp` first, then calls `reload!`.
     #[allow(unused_assignments, clippy::ptr_arg)]
     #[inline(never)]
-    fn exec<M: Mode, const REALMS: bool>(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Feedback>, prog: &Codes, mut ci: usize, mut fp: usize, pc0: usize) -> M::Out {
+    fn exec<M: Mode, const REALMS: bool>(realm: &mut Realm, stack: &mut Vec<Value>, fbs: &mut Vec<Option<Box<Feedback>>>, prog: &Codes, mut ci: usize, mut fp: usize, pc0: usize) -> M::Out {
         let mut code: &Code = &prog[ci];
         let mut words: &[u32] = &code.words;
-        let mut fb: &mut Feedback = if ci < fbs.len() {
-            &mut fbs[ci]
-        } else {
-            grow_fbs(fbs, prog.len());
-            &mut fbs[ci]
-        };
-        if !fb.ready || fb.caches.len() != code.sites.len() {
-            fb.init(code);
-        }
+        let mut fb: &mut Feedback = feedback(fbs, prog.len(), ci, code);
         let mut pc: usize = pc0;
         let undef = Value::UNDEFINED;
         // Register 0 of the current frame: `stack.as_mut_ptr().add(fp)`. Each time `fp` changes (`reload!`) or the stack is reallocated
@@ -689,15 +700,7 @@ impl Vm {
                 regs = unsafe { stack.as_mut_ptr().add(fp) };
                 code = $c;
                 words = &code.words;
-                fb = if ci < fbs.len() {
-                    &mut fbs[ci]
-                } else {
-                    grow_fbs(fbs, prog.len());
-                    &mut fbs[ci]
-                };
-                if !fb.ready || fb.caches.len() != code.sites.len() {
-                    fb.init(code);
-                }
+                fb = feedback(fbs, prog.len(), ci, code);
             }};
         }
         macro_rules! run_cold {
@@ -776,7 +779,7 @@ impl Vm {
                     realm.cur = (ci, fp, pc as u32);
                     let (cur, st) = (realm.cur, &stack[..]);
                     realm.collect(&mut fbs[..], |m| walk_frames(m, prog, st, cur.0, cur.1, cur.2));
-                    fb = &mut fbs[ci];
+                    fb = fbs[ci].as_deref_mut().expect("the feedback of the running code");
                 }
             };
         }

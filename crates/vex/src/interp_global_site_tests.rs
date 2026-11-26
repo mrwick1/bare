@@ -6,9 +6,9 @@ fn frame_rebuilds_feedback_with_a_different_site_count() {
     let mut vm = script::load("var x = 42; function read() { return x; }").unwrap();
     let ci = 0;
     vm.run_main(ci).unwrap();
-    vm.fbs[ci].init(&Code::new(0, 0));
+    vm.fbs[ci].get_or_insert_with(Box::default).init(&Code::new(0, 0));
     vm.run_main(ci).unwrap();
-    assert_eq!(vm.fbs[ci].caches.len(), vm.realm.prog[ci].sites.len());
+    assert_eq!(vm.fb(ci).caches.len(), vm.realm.prog[ci].sites.len());
 }
 
 #[test]

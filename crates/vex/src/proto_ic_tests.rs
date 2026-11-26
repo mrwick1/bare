@@ -32,7 +32,7 @@ fn check(cases: &[(&str, &str)]) {
 
 /// Prototype entries that the feedback of a finished script holds.
 fn entries(src: &str) -> usize {
-    run(src).unwrap().fbs.iter().map(|f| f.protos.len()).sum()
+    run(src).unwrap().fbs.iter().flatten().map(|f| f.protos.len()).sum()
 }
 
 #[test]
@@ -133,7 +133,7 @@ fn prototypes_that_die_are_not_read_from_the_cache() {
 fn a_collection_drops_the_entries() {
     let mut vm = load("class A { m() { return 1; } } var o = new A(); var r = 0; for (var i = 0; i < 20; i++) r += o.m();").unwrap();
     vm.run_main(0).unwrap();
-    assert!(vm.fbs.iter().map(|f| f.protos.len()).sum::<usize>() > 0);
+    assert!(vm.fbs.iter().flatten().map(|f| f.protos.len()).sum::<usize>() > 0);
     let before = vm.realm.shapes.proto_epoch();
     let Vm { realm, fbs, .. } = &mut vm;
     realm.collect(fbs, |_| {});

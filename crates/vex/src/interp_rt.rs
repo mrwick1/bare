@@ -683,7 +683,7 @@ impl Realm {
     }
 
     /// Collect with the frames of the stack as roots. `walk_frames` marks them (see `interp.rs`); the realm adds its own.
-    pub fn collect(&mut self, fbs: &mut [Feedback], walk_frames: impl FnOnce(&mut Marker)) {
+    pub fn collect(&mut self, fbs: &mut [Option<Box<Feedback>>], walk_frames: impl FnOnce(&mut Marker)) {
         // A nested call holds the collector (`Realm::call_function`), so no machine is in use now: the idle ones keep their feedback.
         debug_assert!(self.nest == 0, "a collection inside a nested call");
         let Realm { heap, shapes, atoms, consts, pins, state, pool, pr, api, rx, intl, realms, shared_memory, .. } = self;
@@ -727,8 +727,8 @@ impl Realm {
                 if let Some(rx) = rx {
                     rx.mark(m);
                 }
-                fbs.iter().for_each(|f| f.walk(m));
-                pool.iter().flat_map(|p| p.fbs.iter()).for_each(|f| f.walk(m));
+                fbs.iter().flatten().for_each(|f| f.walk(m));
+                pool.iter().flat_map(|p| p.fbs.iter().flatten()).for_each(|f| f.walk(m));
                 if let Some(w) = walk_frames.take() {
                     w(m);
                 }
@@ -740,13 +740,13 @@ impl Realm {
         self.collections += 1;
         // A holder may be gone: every prototype entry is stale from now on (the module comment).
         self.shapes.bump_proto_epoch();
-        fbs.iter_mut().for_each(Feedback::collected);
-        self.pool.iter_mut().flat_map(|p| p.fbs.iter_mut()).for_each(Feedback::collected);
+        fbs.iter_mut().flatten().for_each(|f| f.collected());
+        self.pool.iter_mut().flat_map(|p| p.fbs.iter_mut().flatten()).for_each(|f| f.collected());
         if self.shapes.epoch() != self.epoch {
             self.epoch = self.shapes.epoch();
             self.ltab.array_iter_spot = None;
-            fbs.iter_mut().for_each(Feedback::clear);
-            self.pool.iter_mut().flat_map(|p| p.fbs.iter_mut()).for_each(Feedback::clear);
+            fbs.iter_mut().flatten().for_each(|f| f.clear());
+            self.pool.iter_mut().flat_map(|p| p.fbs.iter_mut().flatten()).for_each(|f| f.clear());
         }
     }
 
