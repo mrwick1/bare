@@ -105,6 +105,8 @@ mod browser_web_tests;
 #[cfg(test)]
 mod browser_web_filelist_tests;
 #[cfg(test)]
+mod browser_web_upload_types_tests;
+#[cfg(test)]
 mod browser_attr_tests;
 #[cfg(test)]
 mod browser_nodelist_tests;
@@ -423,6 +425,8 @@ mod browser_geom_tests;
 mod browser_computed_tests;
 #[cfg(test)]
 mod browser_computed_chain_tests;
+#[cfg(test)]
+mod browser_computed_radius_tests;
 #[cfg(test)]
 mod browser_computed_pseudo_tests;
 #[cfg(test)]

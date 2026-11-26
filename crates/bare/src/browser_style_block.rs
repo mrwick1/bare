@@ -406,6 +406,8 @@ fn long_text<'a, E: Eng>(d: &'a Decl, p: Property, charge: Charge<E>) -> F<Optio
 #[derive(Clone, Copy)]
 enum Join {
     Box4,
+    /// The four corners of `border-radius`, as `Box4`. A corner with two radii needs the `/` form: it is not written.
+    Radius,
     Pair,
     Seq,
     Border,
@@ -413,7 +415,7 @@ enum Join {
 
 const BUILD: &[(&str, Join)] = &[
     ("margin", Join::Box4), ("padding", Join::Box4), ("inset", Join::Box4), ("border-width", Join::Box4), ("border-style", Join::Box4),
-    ("border-color", Join::Box4), ("gap", Join::Pair), ("overflow", Join::Pair), ("border-spacing", Join::Pair), ("place-items", Join::Pair),
+    ("border-color", Join::Box4), ("border-radius", Join::Radius), ("gap", Join::Pair), ("overflow", Join::Pair), ("border-spacing", Join::Pair), ("place-items", Join::Pair),
     ("place-self", Join::Pair), ("place-content", Join::Pair), ("flex", Join::Seq), ("border-top", Join::Seq), ("border-right", Join::Seq),
     ("border-bottom", Join::Seq), ("border-left", Join::Seq), ("border", Join::Border),
 ];
@@ -430,7 +432,8 @@ fn join<E: Eng>(how: Join, t: &[&str], max: usize) -> F<Option<String>, E> {
     }
     if t.iter().any(|x| wide(x) || has_var(x)) { return Ok(None); }
     match how {
-        Join::Box4 => {
+        Join::Radius if t.iter().any(|x| x.contains(' ')) => Ok(None),
+        Join::Box4 | Join::Radius => {
             let n = if t[1] != t[3] { 4 } else if t[0] != t[2] { 3 } else if t[0] != t[1] { 2 } else { 1 };
             joined(&t[..n])
         }
