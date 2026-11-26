@@ -2,7 +2,7 @@
 //! code, and so their inlining, unchanged (the cost rows move with the inlining of unrelated code: see `docs/internal/progress.md`).
 //!
 //! - `HTMLScriptElement.prototype.noModule`: a reflected boolean for `nomodule`.
-//! - `document.hasFocus()`: always `true`. The page always has system focus (`browser_focus.rs`).
+//! - `document.hasFocus()`: `true`, except while the page is in the background (`Browser::set_background`). Else the page has system focus (`browser_focus.rs`).
 //! - `window.event`: the event of the dispatch that runs (`Dom::dispatch`), else `undefined`. A write makes a data property (`[Replaceable]`).
 //! - `wrap_coll`: the snapshot arrays of `children`, `childNodes` and `getElementsBy*` inherit from one prototype that has `item`.
 //!   The array is made with that prototype (`set_prototype_of` would send each array to dictionary mode).
@@ -25,8 +25,8 @@ pub(crate) fn set_script_no_module<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, th
     crate::browser_loader::set_flag(d, s, this, a, "nomodule")
 }
 
-pub(crate) fn has_focus<'s, E: Eng>(_: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
-    Ok(s.boolean(true))
+pub(crate) fn has_focus<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    Ok(s.boolean(!d.basics.blurred.get()))
 }
 
 /// The accessor `window.event`. The same function is the getter and the setter: a write has an argument.

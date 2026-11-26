@@ -1417,7 +1417,7 @@ impl<E: Eng> Dom<E> {
             "backward" | "left" => false,
             _ => return Ok(()),
         };
-        if !matches!(alter, "move" | "extend") || !matches!(gran, "character" | "word" | "lineboundary" | "paragraphboundary" | "documentboundary") {
+        if !matches!(alter, "move" | "extend") || !matches!(gran, "character" | "word" | "line" | "lineboundary" | "paragraphboundary" | "documentboundary") {
             return Ok(());
         }
         let so = selection_obj(d, s)?;
@@ -1454,12 +1454,29 @@ impl<E: Eng> Dom<E> {
         };
         let f = flat(focus);
         let end = at;
+        let mut at_start = false;
         let target = match gran {
             "character" if alter == "move" && r.start() != r.end() => flat(if fwd { r.end() } else { r.start() }),
             "character" if fwd => crate::browser_ui::next_off(&text, f),
             "character" => crate::browser_ui::prev_off(&text, f),
             "word" => crate::browser_ui::word_move(&text, f, fwd),
             "documentboundary" => if fwd { end } else { 0 },
+            // The line before or after, at the same column (cut short on a shorter line). On the first or the last line: the start or the end.
+            "line" => {
+                let l = nodes.iter().find(|x| x.0 == focus.0).or_else(|| nodes.iter().rev().find(|x| x.2 <= f)).unwrap_or(&nodes[0]).1;
+                let span = |l: u32| (nodes.iter().find(|x| x.1 == l).map(|a| a.2), nodes.iter().rfind(|x| x.1 == l).map(|b| b.2 + length(&doc, b.0)));
+                let near = nodes.iter().map(|x| x.1).filter(|&n| if fwd { n > l } else { n < l });
+                match (if fwd { near.min() } else { near.max() }, span(l).0) {
+                    (Some(n), Some(col0)) => match span(n) {
+                        (Some(a), Some(z)) => {
+                            at_start = f == col0;
+                            a + (f - col0).min(z - a)
+                        }
+                        _ => f,
+                    },
+                    _ => if fwd { end } else { 0 },
+                }
+            }
             // A line (a paragraph): the text nodes with the line of the point.
             _ => {
                 // The text node of the focus gives the line; a point between nodes takes the node before it (after it, going back).
@@ -1472,7 +1489,9 @@ impl<E: Eng> Dom<E> {
             }
         };
         // The boundary point of a text offset: the end of the node it ends, else the node that holds it.
-        let to = nodes.iter().find(|x| target <= x.2 + length(&doc, x.0)).map_or_else(|| nodes.last().map(|x| (x.0, length(&doc, x.0))), |x| Some((x.0, target.saturating_sub(x.2)))).expect("not empty");
+        // A line start that is also the end of the line before (the paragraphs join in the text) is the start of its own line.
+        let start_of_line = at_start || !fwd && matches!(gran, "lineboundary" | "paragraphboundary");
+        let to = nodes.iter().find(|x| target + start_of_line as u32 <= x.2 + length(&doc, x.0)).map_or_else(|| nodes.last().map(|x| (x.0, length(&doc, x.0))), |x| Some((x.0, target.saturating_sub(x.2)))).expect("not empty");
         drop(doc);
         if alter == "move" {
             return set_new(d, s, Rng { sc: to.0, so: to.1, ec: to.0, eo: to.1 }, false);

@@ -33,6 +33,9 @@ pub enum Event {
     /// A key went down or up. `key` and `code` are the DOM `KeyboardEvent` values. `text` is what the key types (only
     /// for a press), `None` for a key with no text and when ctrl or alt or logo is held.
     Key { key: String, code: &'static str, pressed: bool, repeat: bool, text: Option<String>, mods: Mods },
+    /// The answer to `Control::read_clipboard`: the MIME type and the bytes of each type that was read. Empty when the clipboard
+    /// has no type that was asked for, or the owner gave nothing.
+    Clipboard { items: Vec<(String, Vec<u8>)> },
 }
 
 /// The shape of the mouse cursor that the app wants over the window.

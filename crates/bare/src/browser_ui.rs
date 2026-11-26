@@ -37,10 +37,15 @@
 //! - Editing: text, Backspace, Delete, Left, Right, Home, End (Shift extends the selection), Ctrl+A. Offsets are UTF-16
 //!   units, as for `selectionStart`. The value changes through `put_input_value`, the same state that `input.value` reads.
 //!
-//! A `<textarea>` is edited like a field (typing, Enter, Backspace, Delete, `maxlength`). Gaps there: Up and Down and Home and End do not
-//! move by line (Home and End go to the start and the end of the value), and the box does not wrap or scroll (`page.rs`).
+//! A `<textarea>` is edited like a field (typing, Enter, Backspace, Delete, `maxlength`). In the window, Up, Down, Home and End move by
+//! visual line (`page.rs` finds the offset and passes it with `ui_key_at`); with no window, Home and End go to the start and the end of the
+//! value and Up and Down do nothing. Ctrl+Backspace and Ctrl+Delete delete a word in a field, a textarea and an editing host. Up and Down
+//! in an editing host move to the line before or after (a block or a `<br>`) at the same column; a line that wraps is one line there.
 //!
-//! Gaps (none is faked): in a `contenteditable` host, arrows, Home and End do not move the caret; clipboard keys; Ctrl+Left/Right word moves; IME and `compositionstart`; `readonly` is honored but
+//! Clipboard keys (Ctrl+C, X, V and the Insert and Delete forms): `copy`, `cut` and `paste` events with a `DataTransfer`, then the default
+//! action. See `browser_ui/clipboard.rs`.
+//!
+//! Gaps (none is faked): in a `contenteditable` host, Up and Down do not follow soft wraps and skip a paragraph with no text; `navigator.clipboard` and a menu or mouse paste (the clipboard keys are in `browser_ui/clipboard.rs`); IME and `compositionstart`; `readonly` is honored but
 //! `type=number` does not filter text; `contextmenu`; `:hover`/`:focus` styling; radio groups in the Tab order (every
 //! radio is a stop); `<summary>` toggling; `<label>` click coordinates of the second click; `UIEvent` and `WheelEvent`.
 //!
@@ -157,9 +162,21 @@ pub(crate) struct UiState {
     nomouse: bool,
     /// A drag that selects text: the text field and the offset where the press fell (the anchor).
     pub(crate) sel_drag: Option<(NodeId, u32)>,
+    /// Where the window put the caret for the key that runs now (`ui_key_at`): the end of a visual line of a textarea.
+    line_caret: Option<u32>,
     /// The last user input was the pointer, not a key: a focus that follows it shows no focus ring (`:focus-visible`), except in a text field.
     pub(crate) by_pointer: bool,
+    /// The helper of `shims/clipboard.js` (`browser_ui/clipboard.rs`), once the shim ran.
+    pub(crate) clip: Option<bare_js_api::Persistent>,
+    /// What the last copy or cut put on the clipboard, for the window to take (`Browser::take_clipboard`).
+    pub(crate) clip_out: Option<Vec<(String, Vec<u8>)>>,
+    /// The last key was a paste: the window must read the clipboard and call `Browser::ui_paste`.
+    pub(crate) paste_wanted: bool,
+    /// The `DataTransfer` of the paste that runs, for `InputEvent.dataTransfer` of its `beforeinput` and `input`.
+    pub(crate) paste_dt: Option<bare_js_api::Persistent>,
 }
+
+mod clipboard;
 
 // ------------------------------------------------------------------------------------------ getters
 
@@ -839,6 +856,9 @@ impl<E: Eng> Dom<E> {
     }
 
     fn key_default(&self, it: &mut E::Vm, k: &KeyInput) -> R<E, ()> {
+        if let Some(cmd) = clipboard::command(k) {
+            return self.clip_key(it, cmd);
+        }
         let focus = self.current_focus(it)?;
         let t = self.focus_target(it)?;
         let edit = focus.filter(|&f| self.editable(f));
@@ -874,10 +894,19 @@ impl<E: Eng> Dom<E> {
             }
             "Backspace" | "Delete" if edit.is_some() => {
                 let f = edit.expect("checked");
-                self.edit(it, f, if k.key == "Backspace" { "deleteContentBackward" } else { "deleteContentForward" }, None)?;
+                let word = m.ctrl && !m.alt && !m.meta;
+                self.edit(it, f, match (k.key == "Backspace", word) {
+                    (true, false) => "deleteContentBackward",
+                    (false, false) => "deleteContentForward",
+                    (true, true) => "deleteWordBackward",
+                    (false, true) => "deleteWordForward",
+                }, None)?;
             }
             "ArrowLeft" | "ArrowRight" | "Home" | "End" if focus.is_some_and(|f| self.selection_applies(f)) => {
                 self.move_caret(it, focus.expect("checked"), &k.key, m.shift, m.ctrl)?;
+            }
+            "ArrowUp" | "ArrowDown" if !(m.ctrl || m.alt || m.meta) && self.st.borrow().ui.line_caret.is_some() && focus.is_some_and(|f| self.selection_applies(f)) => {
+                self.move_caret(it, focus.expect("checked"), &k.key, m.shift, false)?;
             }
             "ArrowUp" | "ArrowDown" | "ArrowLeft" | "ArrowRight" | "PageUp" | "PageDown" | "Home" | "End" if !(m.ctrl || m.alt || m.meta || matches!(k.key.as_str(), "ArrowUp" | "ArrowDown") && edit.is_some()) => {
                 use crate::browser_scroll::ScrollKey as S;
@@ -952,10 +981,11 @@ impl<E: Eng> Dom<E> {
             return Ok(false);
         }
         // An arrow, Home or End moves the caret; Shift extends the selection (Control: by word, or to the end of the host).
-        if matches!(k.key.as_str(), "ArrowLeft" | "ArrowRight" | "Home" | "End") {
+        if matches!(k.key.as_str(), "ArrowLeft" | "ArrowRight" | "Home" | "End") || matches!(k.key.as_str(), "ArrowUp" | "ArrowDown") && !m.ctrl {
             self.caret_into_host(it, f)?;
-            let fwd = matches!(k.key.as_str(), "ArrowRight" | "End");
+            let fwd = matches!(k.key.as_str(), "ArrowRight" | "ArrowDown" | "End");
             let gran = match (k.key.as_str(), m.ctrl) {
+                ("ArrowUp" | "ArrowDown", _) => "line",
                 ("ArrowLeft" | "ArrowRight", false) => "character",
                 ("ArrowLeft" | "ArrowRight", true) => "word",
                 (_, false) => "lineboundary",
@@ -966,8 +996,8 @@ impl<E: Eng> Dom<E> {
         }
         let (kind, text) = match k.key.as_str() {
             "Enter" => (if m.shift { "insertLineBreak" } else { "insertParagraph" }, None),
-            "Backspace" => ("deleteContentBackward", None),
-            "Delete" => ("deleteContentForward", None),
+            "Backspace" => (if m.ctrl { "deleteWordBackward" } else { "deleteContentBackward" }, None),
+            "Delete" => (if m.ctrl { "deleteWordForward" } else { "deleteContentForward" }, None),
             "a" | "A" if m.ctrl => {
                 self.caret_into_host(it, f)?;
                 self.select_all(it)?;
@@ -991,6 +1021,12 @@ impl<E: Eng> Dom<E> {
             "insertParagraph" => self.insert_paragraph(it)?,
             "insertLineBreak" => self.insert_line_break(it)?,
             "deleteContentBackward" => self.delete_back(it)?,
+            // A word: select it, then delete the selection.
+            "deleteWordBackward" | "deleteWordForward" => {
+                let back = kind == "deleteWordBackward";
+                self.modify_selection(it, "extend", if back { "backward" } else { "forward" }, "word")?;
+                if back { self.delete_back(it)? } else { self.delete_forward(it)? }
+            }
             _ => self.delete_forward(it)?,
         };
         Ok(true)
@@ -1020,6 +1056,8 @@ impl<E: Eng> Dom<E> {
             _ if sel.start != sel.end => (sel.start, sel.end),
             "deleteContentBackward" => (prev_off(&value, sel.start), sel.start),
             "deleteContentForward" => (sel.start, next_off(&value, sel.start)),
+            "deleteWordBackward" => (word_move(&value, sel.start, false), sel.start),
+            "deleteWordForward" => (sel.start, word_move(&value, sel.start, true)),
             _ => (sel.start, sel.end),
         };
         if !kind.starts_with("insert") && from == to {
@@ -1028,7 +1066,7 @@ impl<E: Eng> Dom<E> {
         // `maxlength`: the typed text is cut to fit, and nothing happens when none of it fits.
         let fitted;
         let text = match (kind, text, self.max_length(n)) {
-            ("insertText" | "insertLineBreak", Some(t), Some(max)) => {
+            ("insertText" | "insertLineBreak" | "insertFromPaste", Some(t), Some(max)) => {
                 fitted = crate::browser_submit::fit_units(t, max.saturating_sub(u16_len(&value) - (to - from)));
                 if fitted.is_empty() {
                     return Ok(());
@@ -1068,6 +1106,7 @@ impl<E: Eng> Dom<E> {
         // The selection has an anchor and a focus end: Shift moves the focus end.
         let (anchor, focus) = if sel.dir == Dir::Backward { (sel.end, sel.start) } else { (sel.start, sel.end) };
         let (left, right) = (key == "ArrowLeft", key == "ArrowRight");
+        let line = self.st.borrow().ui.line_caret;
         let focus = match key {
             _ if !extend && sel.start != sel.end && (left || right) => {
                 let c = if left { sel.start } else { sel.end };
@@ -1077,6 +1116,7 @@ impl<E: Eng> Dom<E> {
             "ArrowRight" if word => word_move(&value, focus, true),
             "ArrowLeft" => prev_off(&value, focus),
             "ArrowRight" => next_off(&value, focus),
+            _ if line.is_some() => line.expect("checked").min(len),
             "Home" => 0,
             _ => len,
         };
@@ -1400,10 +1440,19 @@ impl<E: Eng> Browser<E> {
 
     /// A key went down or up.
     pub fn ui_key(&mut self, k: KeyInput, down: bool) -> R<E, UiOutcome> {
+        self.ui_key_at(k, down, None)
+    }
+
+    /// A key went down or up. For Up, Down, Home and End in a textarea, `caret` is the offset that the visual lines give (only the
+    /// window has the layout that wraps the text). With none, Home and End go to the start and the end of the value.
+    pub fn ui_key_at(&mut self, k: KeyInput, down: bool, caret: Option<u32>) -> R<E, UiOutcome> {
         // Only a key down and the Space key up have a default action that may change the page. A listener that runs says so itself.
         self.dom.scroll_key_set(true);
         let always = down || k.code == "Space";
-        self.ui_call(always, |d, it| d.ui_key(it, &k, down))
+        self.dom.st.borrow_mut().ui.line_caret = caret;
+        let r = self.ui_call(always, |d, it| d.ui_key(it, &k, down));
+        self.dom.st.borrow_mut().ui.line_caret = None;
+        r
     }
 
     /// Insert `text` at the focused element as one edit (Chrome's `Input.insertText`). See `Dom::insert_at_focus`.

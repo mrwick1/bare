@@ -179,6 +179,8 @@ fwd! {
     (&mut) fn take_navigation_request() -> Option<NavigationRequest>;
     (&mut) fn take_reports() -> Vec<Report>;
     (&mut) fn take_scroll_key() -> Option<ScrollKey>;
+    (&mut) fn take_clipboard() -> Option<Vec<(String, Vec<u8>)>>;
+    (&mut) fn take_paste_request() -> bool;
     (&) fn tasks_held() -> bool;
     (&) fn waiting_loads(out: &mut Vec<crate::page::Waiting>);
     (&) fn waiting_requests(out: &mut Vec<crate::page::Waiting>);
@@ -199,11 +201,14 @@ fwd_try! {
     (&mut) fn restyle() -> Rc<Styles>;
     (&mut) fn set_viewport(width: f32, height: f32) -> usize;
     (&mut) fn click_notification(id: u64) -> Option<bool>;
+    (&mut) fn set_background(on: bool) -> ();
     (&mut) fn close_notification(id: u64) -> bool;
     (&mut) fn set_permission(origin: &str, name: &str, to: Option<crate::browser_navigation::Permission>) -> usize;
     (&mut) fn ui_drag_select(caret: u32) -> UiOutcome;
     (&mut) fn ui_insert_text(text: &str) -> UiOutcome;
     (&mut) fn ui_key(k: KeyInput, down: bool) -> UiOutcome;
+    (&mut) fn ui_paste(items: Vec<(String, Vec<u8>)>) -> UiOutcome;
+    (&mut) fn ui_key_at(k: KeyInput, down: bool, caret: Option<u32>) -> UiOutcome;
     (&mut) fn ui_pointer_button(target: Option<NodeId>, p: Pointer, button: u8, pressed: bool, caret: Option<u32>) -> UiOutcome;
     (&mut) fn ui_pointer_leave(p: Pointer) -> UiOutcome;
     (&mut) fn ui_pointer_move(target: Option<NodeId>, p: Pointer) -> UiOutcome;
