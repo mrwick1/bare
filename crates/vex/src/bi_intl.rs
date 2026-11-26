@@ -23,6 +23,9 @@ mod tests;
 #[path = "bi_intl_parts_tests.rs"]
 mod parts_tests;
 #[cfg(test)]
+#[path = "bi_intl_segment_tests.rs"]
+mod segment_tests;
+#[cfg(test)]
 #[path = "bi_intl_plural_tests.rs"]
 mod plural_tests;
 #[cfg(test)]
@@ -70,6 +73,8 @@ pub(crate) struct State {
     icu: icu::Cache,
     bound_key: Option<Str>,
     bound_natives: Option<usize>,
+    /// The `containing` method that each `Intl.Segmenter.prototype.segment` result shares (kept alive by `Realm::keep`).
+    containing: Option<Value>,
 }
 
 impl Realm {
@@ -150,7 +155,7 @@ fn constructor<const K: usize>(rt: &mut Realm) -> Value {
                 getter("numberingSystem", "get numberingSystem", locale_get::<9>),
             ]
         }
-        SEGMENTER => late_table![m("resolvedOptions", 0, segmenter_resolved)],
+        SEGMENTER => late_table![m("resolvedOptions", 0, segmenter_resolved), m("segment", 1, segmenter_segment)],
         RELATIVE => late_table![m("format", 2, relative_format)],
         LIST => late_table![m("resolvedOptions", 0, list_resolved)],
         PLURAL => late_table![m("select", 1, plural_select), m("resolvedOptions", 0, plural_resolved)],
@@ -581,6 +586,61 @@ fn property(rt: &mut Realm, object: Obj, key: &str, value: Value) {
 fn segmenter_resolved(rt: &mut Realm, this: Value, _: &[Value]) -> R<Value> {
     let Some(&Format::Segmenter(loc, gran)) = format(rt, this) else { return rt.type_error("incompatible Intl.Segmenter receiver") };
     Ok(properties(rt, &[("locale", intl::locale_name(loc)), ("granularity", GRANULARITIES[gran as usize])]).value())
+}
+
+/// `Intl.Segmenter.prototype.segment(string)`. Gap: the result is an array of the segment data objects (`{segment, index, input}`, and
+/// `isWordLike` for words) with a `containing(index)` method, not a `%SegmentsPrototype%` object; it iterates the same. A lone surrogate
+/// in a segment becomes U+FFFD.
+fn segmenter_segment(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+    let Some(&Format::Segmenter(_, gran)) = format(rt, this) else { return rt.type_error("incompatible Intl.Segmenter receiver") };
+    let text = string(rt, arg(args, 0))?;
+    let units: Vec<u16> = text.encode_utf16().collect();
+    let (breaks, word_like) = icu::segment_breaks(gran, &units);
+    let input = rt.string(&text);
+    let mut objects = Vec::with_capacity(breaks.len() - 1);
+    for (i, w) in breaks.windows(2).enumerate() {
+        let object = plain_proto(rt, rt.object_proto);
+        let segment = rt.string(&String::from_utf16_lossy(&units[w[0] as usize..w[1] as usize]));
+        property(rt, object, "segment", segment);
+        property(rt, object, "index", Value::int(w[0] as i32));
+        property(rt, object, "input", input);
+        if gran == 1 {
+            property(rt, object, "isWordLike", Value::bool(word_like[i]));
+        }
+        objects.push(object.value());
+    }
+    let list = rt.new_array(&objects);
+    let containing = match rt.intl_state().containing {
+        Some(f) => f,
+        None => {
+            let f = rt.new_native(segments_containing, false, 1, "containing").value();
+            rt.keep(f);
+            rt.intl_state().containing = Some(f);
+            f
+        }
+    };
+    let key = rt.intern("containing");
+    rt.define_attrs(Realm::obj(list).expect("array"), Key::Name(key), A_W | A_C, containing)?;
+    Ok(list)
+}
+
+/// `containing(index)` of a `segment` result: the segment data object that holds the code unit at `index`, or `undefined`.
+fn segments_containing(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
+    let n = rt.to_number(arg(args, 0))?;
+    let n = if n.is_nan() { 0.0 } else { n.trunc() };
+    let count = rt.get_named(this, "length")?;
+    let count = rt.to_number(count)? as usize;
+    for i in 0..count {
+        let item = rt.get_prop(this, Key::Idx(i as u32))?;
+        let start = rt.get_named(item, "index")?;
+        let start = rt.to_number(start)?;
+        let segment = rt.get_named(item, "segment")?;
+        let segment = string(rt, segment)?;
+        if n >= start && n < start + segment.encode_utf16().count() as f64 {
+            return Ok(item);
+        }
+    }
+    Ok(Value::UNDEFINED)
 }
 
 fn relative_format(rt: &mut Realm, this: Value, args: &[Value]) -> R<Value> {
