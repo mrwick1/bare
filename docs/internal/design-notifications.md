@@ -152,8 +152,15 @@ Notifications matter most when the chat is not in view.
   page has focus (hypothesis, as Chrome users see). So an agent needs a way to put the page in the background:
   `notifications op=background on|off`. It sets `visibilityState` "hidden", `hasFocus()` false, and fires `visibilitychange`
   and `blur`. A click on a notification sets it back to "visible", as Chrome does when it focuses the tab.
+- Built (step 5): `Browser::set_background`. The order is the one of the Page Lifecycle API: going, `blur` at the window
+  (`hasFocus()` false, still "visible"), then `visibilitychange` at the document ("hidden"). Coming back, `visibilitychange`,
+  then `focus`. A click that the page does not cancel brings the page back. A new document starts in front. A closed page
+  (`hide`) stays hidden.
 - Throttling as a cost saving: a hidden page aligns its timers to 1 s, as Chrome does (owner decision). That saves CPU on an
-  idle WhatsApp page. WebSocket messages, fetch replies and other network tasks are not aligned. Step 5 builds it.
+  idle WhatsApp page. WebSocket messages, fetch replies and other network tasks are not aligned. Step 5 builds it: while the
+  page is in the background, a timer is due at the next whole second of the scheduler clock (`browser_scheduler.rs`, `align`).
+  The timers that are queued when the page goes to the background move too. When the page comes back, they keep the aligned
+  time (at most 1 s late). The one-per-minute limit of Chrome for chained timers after 5 minutes is not built.
 
 ## 7. Plan (one PR each)
 

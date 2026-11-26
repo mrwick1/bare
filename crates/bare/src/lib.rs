@@ -471,6 +471,10 @@ mod browser_notification_permission_tests;
 #[cfg(test)]
 mod browser_notification_show_tests;
 #[cfg(test)]
+mod browser_notification_click_tests;
+#[cfg(test)]
+mod browser_background_tests;
+#[cfg(test)]
 mod browser_create_document_tests;
 #[cfg(test)]
 mod browser_input_target_ranges_tests;
@@ -487,6 +491,8 @@ mod browser_message_queue_gc_tests;
 mod browser_worker_run_tests;
 #[cfg(test)]
 mod browser_worker_port_transfer_tests;
+#[cfg(test)]
+mod browser_script_names_tests;
 #[cfg(test)]
 mod browser_worker_scope_tests;
 #[cfg(test)]

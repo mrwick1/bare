@@ -12,6 +12,7 @@ impl Realm {
         let Some(l) = self.lazy.as_mut() else { return Err(self.a_unsup("a realm with no compiler")) };
         match l.module(&self.prog, source) {
             Ok((ci, info)) => {
+                l.set_name(ci, url);
                 self.fn_info.extend((self.fn_info.len()..self.prog.len()).map(|i| crate::interp::code_info(&self.prog[i])));
                 Ok(self.md_add(url, ci, info))
             }

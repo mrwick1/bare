@@ -159,7 +159,7 @@ fn scope_import<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args
         let Some(text) = import_text(d, &href) else {
             return Err(d.dom_err_s(s, "NetworkError", &format!("{CTX}: The script at '{href}' failed to load.")));
         };
-        s.run_script(&text)?;
+        s.run_script_named(&text, &href)?;
     }
     Ok(s.undefined())
 }

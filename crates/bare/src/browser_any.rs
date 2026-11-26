@@ -132,6 +132,9 @@ fwd! {
     (&) fn document() -> Rc<RefCell<Document>>;
     (&) fn document_url() -> Option<String>;
     (&) fn document_origin() -> String;
+    (&) fn notifications() -> Vec<crate::NotificationInfo>;
+    (&) fn notification_event_count() -> usize;
+    (&mut) fn take_notification_events() -> Vec<crate::NotificationEvent>;
     (&) fn fetches_since(t: std::time::Instant) -> usize;
     (&) fn has_children(node: NodeId) -> bool;
     (&) fn has_download_request() -> bool;
@@ -195,6 +198,9 @@ fwd_try! {
     (&mut) fn render_with(styles: Rc<Styles>, old: Option<Frame>) -> Frame;
     (&mut) fn restyle() -> Rc<Styles>;
     (&mut) fn set_viewport(width: f32, height: f32) -> usize;
+    (&mut) fn click_notification(id: u64) -> Option<bool>;
+    (&mut) fn set_background(on: bool) -> ();
+    (&mut) fn close_notification(id: u64) -> bool;
     (&mut) fn set_permission(origin: &str, name: &str, to: Option<crate::browser_navigation::Permission>) -> usize;
     (&mut) fn ui_drag_select(caret: u32) -> UiOutcome;
     (&mut) fn ui_insert_text(text: &str) -> UiOutcome;

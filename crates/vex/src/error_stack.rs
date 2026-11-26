@@ -13,7 +13,7 @@
 //! then makes an own data property with the text and drops the frames. The setter makes an own data property with the assigned value.
 //! `captureStackTrace` puts the same accessor, as an own property, on its target.
 //!
-//! **Gaps.** The host passes no script name, so SOURCE is `<anonymous>`. The frames of a machine that a native started (`call_function`)
+//! **Gaps.** SOURCE is the name that the host gave the script or module (its URL), else `<anonymous>` (eval code, `new Function`). The frames of a machine that a native started (`call_function`)
 //! end at its entry. A native frame is not listed. An error that has no frame (made by the host, or swallowed by a native before it
 //! reached `unwind`) reads as `Name: message`. The head of the text is made at the first read, so a later change of `name` or `message`
 //! shows in it (V8 fixes it at the creation).
@@ -193,9 +193,10 @@ impl Realm {
     fn frame_line(&self, ci: usize, pc: u32) -> String {
         let Some(code) = self.prog.get(ci) else { return "    at <anonymous>".into() };
         let name = code.atoms.get(code.fn_name as usize).map(|&a| self.text(self.atoms.adopt(a))).filter(|n| !n.is_empty());
+        let src = self.lazy.as_ref().and_then(|l| l.name_of(ci)).unwrap_or("<anonymous>");
         let at = match code.source_at(pc).and_then(|off| self.lazy.as_ref()?.line_col(ci, off as usize)) {
-            Some((line, col)) => format!("<anonymous>:{line}:{col}"),
-            None => "<anonymous>".into(),
+            Some((line, col)) => format!("{src}:{line}:{col}"),
+            None => src.into(),
         };
         match name {
             Some(n) => format!("    at {n} ({at})"),
