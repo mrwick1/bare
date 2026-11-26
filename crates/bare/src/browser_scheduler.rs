@@ -572,12 +572,30 @@ impl<E: Eng> Dom<E> {
         Ok(())
     }
 
+    /// The page goes to the background: each queued timer moves to the next whole second. It keeps its sequence number, so
+    /// timers that share a second run in queue order.
+    pub(crate) fn align_timers(&self) {
+        let mut s = self.sched.borrow_mut();
+        let keys: Vec<Key> = s.tasks.iter().filter(|(k, t)| matches!(t, Task::Timer(_)) && align(f64::from_bits(k.0)) != f64::from_bits(k.0)).map(|(k, _)| *k).collect();
+        for k in keys {
+            let task = s.tasks.remove(&k).expect("listed");
+            let key = (align(f64::from_bits(k.0)).to_bits(), k.1);
+            if let Task::Timer(id) = task {
+                if let Some(t) = s.timers.get_mut(&id) {
+                    t.key = Some(key);
+                }
+            }
+            s.tasks.insert(key, task);
+        }
+    }
+
     /// Queue the delivery of `IntersectionObserver` entries now (a task after the current one).
     pub(crate) fn want_notify(&self) -> R<E, ()> {
         self.schedule(self.now_ms(), Task::Notify).map(|_| ())
     }
 
     pub(crate) fn schedule(&self, due: f64, task: Task<E>) -> R<E, Key> {
+        let due = if matches!(task, Task::Timer(_)) && self.basics.background.get() { align(due) } else { due };
         let mut s = self.sched.borrow_mut();
         let seq = s.seq;
         s.seq = seq.checked_add(1).ok_or_else(|| self.lim("task-seq"))?;
@@ -1242,6 +1260,11 @@ fn set_timer<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args
     }
     sc.timers.insert(id, Timer { call, interval: repeat.then_some(delay), nesting: level, key: Some(key), period, idle: false });
     Ok(s.number(id as f64))
+}
+
+/// The due time of a timer of a hidden page: the next whole second of the clock, as Chrome aligns the wake-ups of a background tab.
+fn align(due: f64) -> f64 {
+    (due / 1000.0).ceil() * 1000.0
 }
 
 /// Call `cb(arg)` in a new task, as a timer of delay 0 that no script can clear (the callback of `canvas.toBlob`).

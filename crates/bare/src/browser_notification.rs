@@ -664,13 +664,18 @@ impl<E: Eng> crate::browser::Browser<E> {
     }
 
     /// The user clicks the live notification `id`: a trusted, cancelable `click` fires at it, and the log says "clicked". It stays in
-    /// the list, as in Chrome. Gives whether a listener cancelled the click, or `None` for no live notification `id`.
+    /// the list, as in Chrome. A click that no listener cancels brings the page back from the background (the standard: the user agent
+    /// focuses the window). Gives whether a listener cancelled the click, or `None` for no live notification `id`.
     pub fn click_notification(&mut self, id: u64) -> R<E, Option<bool>> {
         let dom = self.dom.clone();
         let Some(o) = live_note(&dom, id) else { return Ok(None) };
         let ev = event(&dom, "clicked", &dom.notification.notes.borrow()[&o]);
         dom.notification.events.borrow_mut().push(ev);
-        self.fire_from_host(&dom, o, "click", true).map(Some)
+        let canceled = self.fire_from_host(&dom, o, "click", true)?;
+        if !canceled {
+            self.set_background(false)?;
+        }
+        Ok(Some(canceled))
     }
 
     /// The user closes the live notification `id`: it leaves the list, the log says "closed" and `close` fires at once. Gives whether
