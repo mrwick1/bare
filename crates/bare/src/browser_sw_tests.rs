@@ -1,4 +1,4 @@
-//! Tests of `navigator.serviceWorker` (`shims/serviceworker.js`): a container with no registrations, as in Ladybird.
+//! Tests of `navigator.serviceWorker` (the `Sw` code of `browser_web.rs`): a container with no registrations, as in Ladybird.
 
 use crate::eng_new::Peek;
 use crate::browser::*;

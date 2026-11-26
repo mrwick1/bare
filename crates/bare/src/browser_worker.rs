@@ -1,8 +1,14 @@
-//! `Worker` and `SharedWorker` (HTML Standard, "Workers"): a worker that fails to start.
+//! `Worker` and `SharedWorker` (HTML Standard, "Workers").
 //!
-//! bare has one realm and cannot run a worker script. `new Worker(url)` does what a browser does when the worker script cannot load:
-//! it returns the object, and a task after the current one fires a simple `error` event at it. A page that handles that event goes on.
-//! A page that waits for a message waits for ever, as it would for a worker that never answers. See `docs/internal/decisions.md`.
+//! A dedicated worker runs. `new Worker(url)` in a page with a driver makes a worker page (`Of::Worker` in `browser_child.rs`): a
+//! child page with its own `Browser` and heap. It runs on the page thread (rule D1 of `design-gmail-frames.md`), or on its own thread
+//! when the page is cross-origin isolated (`browser_child_thread.rs`). Its document is one script element that loads the worker
+//! script, so the rules of a script load apply. `install_scope` gives the worker global `postMessage`, `close`, `importScripts` and the
+//! prototypes `WorkerGlobalScope` and `DedicatedWorkerGlobalScope`. Messages and ports cross heaps as clones (`Kids::send`).
+//!
+//! A worker that cannot run gets the behavior of a browser whose worker script did not load: the constructor returns the object,
+//! and a task after the current one fires a simple `error` event at it. That happens when the page has no driver, when the bounds of
+//! child pages are reached, and when the script does not load. `SharedWorker` never runs: it always takes this path.
 //!
 //! - The constructor reads its arguments in the WebIDL order: the URL (a string; `new URL(..)` works), then the options (`type` is
 //!   `classic` or `module`, else `TypeError`; `name` and `credentials` are ignored). Then it parses the URL against the document: a
@@ -10,21 +16,21 @@
 //!   other scheme fails, both with a `SecurityError`. At most `MAX_WORKERS` worker objects live in a page (a collected one frees its
 //!   place); the next one throws `NotSupportedError`.
 //! - A worker is an `EventTarget` (a `Target::Obj`, so the listener code and the GC rules are the common ones) with `onmessage`,
-//!   `onmessageerror` and `onerror`. `postMessage(message[, transfer])` sends nothing. It checks the arguments that a browser checks
-//!   without a worker: one argument is required, and a function or a symbol throws `DataCloneError`. It does not look inside an
-//!   object (a function in a property passes), and it does not read a transfer list.
-//! - `terminate()` stops the queued `error`. A second call does nothing.
-//! - The `error` task is `Task::Worker`; a queued task roots its worker. No event object is made when nobody listens.
-//! - The first worker of a page logs one console warning, `Worker scripts do not run in bare (<url>)`.
-//! - `SharedWorker` is made the same way, from the same host record and the same cap. Its constructor takes the URL and then a name
-//!   (a string) or the options (`type`, `name`; `credentials` and `extraInfo` are ignored). The object has `onerror` and a read-only
-//!   `port`: a `MessagePort` with no peer, that takes messages and answers none. It has no `postMessage` and no `terminate`. A page
-//!   that tests `window.SharedWorker` to choose its code (craigslist does) takes the path that a browser takes. The first shared
-//!   worker of a page logs `SharedWorker scripts do not run in bare (<url>)`.
+//!   `onmessageerror` and `onerror`. `postMessage(message[, transfer])` sends a structured clone to a running worker. A worker that
+//!   cannot run sends nothing: it checks only that one argument is given and that it is not a function or a symbol
+//!   (`DataCloneError`).
+//! - `terminate()` ends the worker page, or stops the queued `error`. A second call does nothing.
+//! - The `error` task is `Task::Worker`; a queued task roots its worker. A worker with a live page is a root too. No event object is
+//!   made when nobody listens.
+//! - The first worker of a page that cannot run logs one console warning, `Worker scripts do not run in bare (<url>)`.
+//! - `SharedWorker` is made from the same host record and the same cap. Its constructor takes the URL and then a name (a string) or
+//!   the options (`type`, `name`; `credentials` and `extraInfo` are ignored). The object has `onerror` and a read-only `port`: a
+//!   `MessagePort` with no peer, that takes messages and answers none. It has no `postMessage` and no `terminate`. A page that tests
+//!   `window.SharedWorker` to choose its code (craigslist does) takes the path that a browser takes. The first shared worker of a page
+//!   logs `SharedWorker scripts do not run in bare (<url>)`.
 //! - `Worker` is an accessor of the global until the first read, as `AbortController` is (`browser_abort.rs`): a realm that never reads
 //!   it makes no interface.
-//! - Not here: `ServiceWorker`, `importScripts`, a real worker (it needs a second realm and a structured clone between
-//!   heaps), `Worker.prototype.postMessage` of an object that has a function inside, `ErrorEvent` for the `error` event.
+//! - Not here: `ServiceWorker`, `ErrorEvent` for the `error` event.
 
 use crate::eng::Eng;
 use crate::browser_sources::Roots;

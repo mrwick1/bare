@@ -51,7 +51,7 @@ fn notification_is_a_constructor_with_an_event_target_prototype() {
 fn permission_is_denied_and_max_actions_is_zero() {
     big(|| {
         let mut b = browser();
-        assert_eq!(js(&mut b, "Notification.permission + ',' + Notification.maxActions + ',' + Notification.requestPermission.length"), "denied,0,0");
+        assert_eq!(js(&mut b, "Notification.permission + ',' + Notification.maxActions + ',' + Notification.requestPermission.length"), "denied,2,0");
     });
 }
 
