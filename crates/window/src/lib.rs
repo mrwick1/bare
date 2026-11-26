@@ -19,6 +19,8 @@
 //! reads the selection of another program. The read is answered by one `Event::Clipboard`. The rules for the MIME types are in
 //! `clipboard.rs`. The primary selection (middle click) and drag and drop are not here.
 //!
+//! Title: `Control::set_title` changes the title of the window (a program that has many pages shows the current one).
+//!
 //! Timers (S5): `App::tick` runs the work that is due and gives the time of the next work. The loop sleeps in `poll` until that
 //! time at the latest, so page timers and `fetch` tasks run between input events. With no work due, the timeout is none.
 //!
@@ -63,6 +65,7 @@ pub struct Control {
     pub(crate) cursor: Option<Cursor>,
     pub(crate) set_clipboard: Option<Vec<(String, std::sync::Arc<[u8]>)>>,
     pub(crate) read_clipboard: Option<Vec<Vec<String>>>,
+    pub(crate) title: Option<String>,
 }
 
 impl Control {
@@ -79,6 +82,11 @@ impl Control {
     /// Show this cursor shape over the window from now on. The window keeps it until the next call.
     pub fn set_cursor(&mut self, cursor: Cursor) {
         self.cursor = Some(cursor);
+    }
+
+    /// Set the title of the window. The backend with no window ignores it.
+    pub fn set_title(&mut self, title: String) {
+        self.title = Some(title);
     }
 
     /// Own the clipboard with this data, one entry for each MIME type. `text/plain` is offered under all the text names. The data

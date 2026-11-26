@@ -45,6 +45,7 @@ mod browser_uievent;
 mod browser_mouse_legacy;
 pub mod agent;
 pub mod page;
+pub mod shell;
 mod images;
 pub mod control;
 pub mod force;
@@ -66,6 +67,8 @@ mod browser_rects_fixed_tests;
 mod page_live_events_tests;
 #[cfg(test)]
 mod page_live_iframe_tests;
+#[cfg(test)]
+mod shell_pages_tests;
 #[cfg(test)]
 mod paint_trace_tests;
 #[cfg(test)]

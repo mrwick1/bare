@@ -515,6 +515,42 @@ impl Page {
         Ok(())
     }
 
+    /// `open_in` for a new page of a window that has many: it shares the `localStorage`, the cookies, the `indexedDB` stores and the
+    /// permissions of `store`, and has its own `sessionStorage` (`WebStorage::new_session`). It saves nothing: the `Shell` owns the saver.
+    pub(crate) fn open_shared(url: &str, viewport: (u32, u32), net: &bare_net::http::Client, store: &crate::browser_navigation::WebStorage) -> Result<Page, String> {
+        let mut cfg = SessionConfig::new(url);
+        cfg.storage = Some(store.new_session());
+        let net = net.fork();
+        cfg.client = Box::new(move || net.fork());
+        Page::open_cfg(cfg, viewport)
+    }
+
+    /// Moves when the document, its tree or its text changed: a shell reads the title again only then (`title` walks the tree).
+    pub(crate) fn doc_key(&mut self) -> (usize, u64, u64) {
+        let id = self.doc_id();
+        self.browser().map_or((id, 0, 0), |b| {
+            let d = b.document();
+            let d = d.borrow();
+            (id, d.revision(), d.text_revision())
+        })
+    }
+
+    /// `document.title` read from the tree: the text of the first `title` element, white space collapsed. Empty with no document or no title.
+    pub fn title(&mut self) -> String {
+        let Some(b) = self.browser() else { return String::new() };
+        let doc = b.document();
+        let doc = doc.borrow();
+        let mut stack = vec![doc.root()];
+        while let Some(n) = stack.pop() {
+            if doc.is_html(n, "title") {
+                let text: String = doc.children(n).filter_map(|c| if let bare_html::dom::NodeData::Text(sp) = *doc.data(c) { Some(doc.text(sp)) } else { None }).collect();
+                return text.split_whitespace().collect::<Vec<_>>().join(" ");
+            }
+            stack.extend(doc.children(n).collect::<Vec<_>>().into_iter().rev());
+        }
+        String::new()
+    }
+
     pub(crate) fn open_cfg(cfg: SessionConfig, viewport: (u32, u32)) -> Result<Page, String> {
         Ok(Page::new(Source::Session(Box::new(Page::live_session(cfg, viewport)?)), viewport))
     }
