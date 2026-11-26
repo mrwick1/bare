@@ -1011,7 +1011,7 @@ impl<E: Eng> Browser<E> {
         if !self.dom.kids.any() {
             return own;
         }
-        match (own, self.dom.kids.live_work(streams)) {
+        match (own, self.dom.kids.live_work(&self.dom, streams)) {
             (Some(true), _) | (_, Some(true)) => Some(true),
             (None, None) => None,
             _ => Some(false),
