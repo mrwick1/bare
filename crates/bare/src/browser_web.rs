@@ -447,7 +447,7 @@ fn make<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, Made<E>> {
 
     // navigator
     let np = proto(d, s, op_, "Navigator")?;
-    let getters: [(&str, HS<E>); 9] = [
+    let getters: [(&str, HS<E>); 10] = [
         ("userAgent", nav_user_agent),
         ("userAgentData", nav_uad),
         ("language", nav_language),
@@ -457,6 +457,7 @@ fn make<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>) -> Res<'s, Made<E>> {
         ("cookieEnabled", nav_cookie_enabled),
         ("hardwareConcurrency", nav_cores),
         ("serviceWorker", nav_sw),
+        ("permissions", nav_permissions),
     ];
     for (name, h) in getters {
         getter(d, s, np, name, h)?;
@@ -765,6 +766,11 @@ fn nav_sw<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s
     nav(d, s, this)?;
     let w = sw_made(d, s)?;
     Ok(d.obj_local(s, w.inst))
+}
+
+fn nav_permissions<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    nav(d, s, this)?;
+    crate::browser_notification::permissions(d, s)
 }
 
 fn nav_cores<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
@@ -1273,7 +1279,7 @@ fn fill_form<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, proto: E::Obj, list: Vec
 pub(crate) const MAX_UPLOAD: u64 = 100 << 20;
 
 /// The content type of a file name, from its extension (a short list; else `application/octet-stream`).
-fn mime_of(name: &str) -> &'static str {
+pub(crate) fn mime_of(name: &str) -> &'static str {
     match name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).as_deref() {
         Some("txt" | "log") => "text/plain",
         Some("html" | "htm") => "text/html",
@@ -1287,6 +1293,24 @@ fn mime_of(name: &str) -> &'static str {
         Some("webp") => "image/webp",
         Some("svg") => "image/svg+xml",
         Some("zip") => "application/zip",
+        Some("avif") => "image/avif",
+        Some("bmp") => "image/bmp",
+        Some("mp4" | "m4v") => "video/mp4",
+        Some("webm") => "video/webm",
+        Some("mov") => "video/quicktime",
+        Some("3gp") => "video/3gpp",
+        Some("mp3") => "audio/mpeg",
+        Some("m4a") => "audio/x-m4a",
+        Some("ogg" | "oga" | "opus") => "audio/ogg",
+        Some("wav") => "audio/wav",
+        Some("aac") => "audio/aac",
+        Some("flac") => "audio/flac",
+        Some("doc") => "application/msword",
+        Some("docx") => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        Some("xls") => "application/vnd.ms-excel",
+        Some("xlsx") => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        Some("ppt") => "application/vnd.ms-powerpoint",
+        Some("pptx") => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         _ => "application/octet-stream",
     }
 }

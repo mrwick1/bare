@@ -448,8 +448,14 @@ impl Session {
                 }
             };
             let end = bare_net::vclock::instant() + limit;
+            let doc = p.generation();
             let mut v = v;
             let out = loop {
+                // The code started a navigation, and the promise went with the old document: its handle is not valid in the new one.
+                if p.generation() != doc {
+                    let _ = p.wait_load(end.saturating_duration_since(bare_net::vclock::instant()));
+                    return Err(format!("the page navigated before the promise settled\nnavigated: {}", safe_url(&p.url().unwrap_or_default())));
+                }
                 let b = p.browser().ok_or("no document")?;
                 match b.promise_step(&v, EVAL_MAX) {
                     bare::browser_any::Step::Done(s) => break s,
@@ -538,6 +544,45 @@ impl Session {
                 j.set(&at, &text, bare_net::cookie::Via::Http { third: false }, now);
             }
             Ok(hit.len())
+        })?
+    }
+
+    /// Set (or with `None`, remove) the decision for permission `name` of `origin` (`None`: the origin of the page). The page's
+    /// `PermissionStatus` objects get `change`; a profile saves the decision. Gives the origin.
+    pub fn set_permission(&mut self, origin: Option<String>, name: String, to: Option<bare::browser_navigation::Permission>) -> Result<String, String> {
+        self.host.run(move |p| {
+            let b = p.browser().ok_or("the page has no document")?;
+            let origin = origin.unwrap_or_else(|| b.document_origin());
+            if origin == "null" {
+                return Err("the page has no origin: give origin".to_string());
+            }
+            b.set_permission(&origin, &name, to).map_err(|e| format!("{e:?}"))?;
+            Ok(origin)
+        })?
+    }
+
+    /// The notification events that no agent read (this drains them), and the live notifications of the page.
+    pub fn notifications(&mut self) -> Result<(Vec<bare::NotificationEvent>, Vec<bare::NotificationInfo>), String> {
+        self.host.run(|p| match p.browser() {
+            Some(b) => Ok((b.take_notification_events(), b.notifications())),
+            None => Err(p.no_document()),
+        })?
+    }
+
+    /// The live notifications of the page, without a drain of the events.
+    pub fn live_notifications(&mut self) -> Vec<bare::NotificationInfo> {
+        self.host.run(|p| p.browser().map(|b| b.notifications())).ok().flatten().unwrap_or_default()
+    }
+
+    /// The user clicks (`close` false) or closes the live notification `id`. `Ok(None)`: no live notification `id`. A click gives
+    /// whether the page cancelled it.
+    pub fn act_on_notification(&mut self, id: u64, close: bool) -> Result<Option<bool>, String> {
+        self.host.run(move |p| {
+            let Some(b) = p.browser() else { return Err(p.no_document()) };
+            let r = if close { b.close_notification(id).map(|ok| ok.then_some(false)) } else { b.click_notification(id) };
+            let r = r.map_err(|e| format!("{e:?}"));
+            p.touched();
+            r
         })?
     }
 
@@ -1389,6 +1434,17 @@ fn check(p: &mut Page, m: &mut Memo, c: &Check) -> Result<(), Try> {
                 (CookieState::Value(t), Some(c)) if !t.matches(&c.value) => return no(format!("the value of the cookie {name} is not {t}")),
                 (CookieState::Value(t), None) => return no(format!("no cookie {name} would go to this page (expected value{t})")),
                 _ => {}
+            }
+        }
+        Check::Notification(c) => {
+            let Some(b) = p.browser() else { return Err(Try::Again(fail("page", p.no_document()))) };
+            if c.new {
+                if b.notification_event_count() == 0 {
+                    return no("no notification event that an agent did not read".into());
+                }
+            } else if !b.notifications().iter().any(|n| c.title.as_ref().is_none_or(|t| t.matches(&n.title)) && c.body.as_ref().is_none_or(|t| t.matches(&n.body))) {
+                let want = [c.title.as_ref().map(|t| format!("title{t}")), c.body.as_ref().map(|t| format!("body{t}"))].into_iter().flatten().collect::<Vec<_>>().join(" ");
+                return no(format!("no live notification {want}").trim_end().to_string());
             }
         }
         Check::Url(t) => {

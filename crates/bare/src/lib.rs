@@ -18,6 +18,8 @@ mod browser_idb;
 pub mod profile;
 #[cfg(test)]
 mod profile_tests;
+#[cfg(test)]
+mod profile_permissions_tests;
 mod profile_record;
 mod browser_shadow;
 mod browser_events;
@@ -104,6 +106,8 @@ mod browser_subtle_hkdf_hmac_tests;
 mod browser_web_tests;
 #[cfg(test)]
 mod browser_web_filelist_tests;
+#[cfg(test)]
+mod browser_web_upload_types_tests;
 #[cfg(test)]
 mod browser_attr_tests;
 #[cfg(test)]
@@ -203,6 +207,7 @@ mod browser_platform_query;
 mod browser_scheduler;
 mod browser_worker;
 mod browser_notification;
+pub use browser_notification::{NotificationEvent, NotificationInfo};
 mod browser_wasm;
 #[cfg(test)]
 mod browser_wasm_tests;
@@ -424,6 +429,8 @@ mod browser_computed_tests;
 #[cfg(test)]
 mod browser_computed_chain_tests;
 #[cfg(test)]
+mod browser_computed_radius_tests;
+#[cfg(test)]
 mod browser_computed_pseudo_tests;
 #[cfg(test)]
 mod browser_generated_tests;
@@ -457,6 +464,12 @@ mod browser_domparser_move_tests;
 mod browser_domparser_xhtml_tests;
 #[cfg(test)]
 mod browser_notification_tests;
+#[cfg(test)]
+mod browser_notification_permission_tests;
+#[cfg(test)]
+mod browser_notification_show_tests;
+#[cfg(test)]
+mod browser_notification_click_tests;
 #[cfg(test)]
 mod browser_create_document_tests;
 #[cfg(test)]

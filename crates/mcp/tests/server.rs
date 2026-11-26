@@ -78,7 +78,7 @@ fn tools_list_names_the_tools() {
     let mut s = Server::start();
     let r = s.ask("tools/list", json!({}));
     let names: Vec<&str> = r["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["run_steps", "run_suite", "open", "step", "save_state", "ensure_session", "close", "snapshot", "act", "find", "read", "links", "screenshot", "eval", "console", "network", "diagnose", "downloads", "sessions", "storage"]);
+    assert_eq!(names, ["run_steps", "run_suite", "open", "step", "save_state", "ensure_session", "close", "snapshot", "act", "find", "read", "links", "screenshot", "eval", "notifications", "console", "network", "diagnose", "downloads", "sessions", "storage"]);
 }
 
 #[test]

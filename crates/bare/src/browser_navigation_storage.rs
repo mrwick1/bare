@@ -91,6 +91,8 @@ pub struct StorageState {
     pub cookies: Vec<bare_net::cookie::Cookie>,
     pub local: OriginItems,
     pub session: OriginItems,
+    /// The permission decisions: `(origin, permission name, decision)`, sorted.
+    pub permissions: Vec<(String, String, Permission)>,
 }
 
 /// The `localStorage` and `sessionStorage` data of all origins. Clones share the data.
@@ -103,7 +105,24 @@ pub struct WebStorage {
     cookies: Arc<Mutex<bare_net::cookie::Jar>>,
     /// The `indexedDB` data of each origin (`browser_idb.rs`). A new tab shares it, as it shares `localStorage`.
     idb: Arc<Mutex<Idbs>>,
+    /// The permission decisions of each origin (`browser_notification.rs`). A new tab shares them.
+    perms: Rc<RefCell<Perms>>,
     lim: StorageLimits,
+}
+
+/// A decision of the user for one permission of one origin. No decision is `None`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Permission {
+    Granted,
+    Denied,
+}
+
+/// The permission decisions: `(origin, permission name, decision)`. The list is short: a linear search is enough.
+#[derive(Default)]
+struct Perms {
+    list: Vec<(String, String, Permission)>,
+    /// Moves at each change (`WebStorage::revisions`).
+    rev: u64,
 }
 
 /// The `indexedDB` stores of the origins that opened it, and the profile that saves them (`browser_idb_log.rs`).
@@ -134,12 +153,12 @@ impl Default for WebStorage {
 
 impl WebStorage {
     pub fn new(lim: StorageLimits) -> WebStorage {
-        WebStorage { local: Default::default(), session: Default::default(), cookies: Default::default(), idb: Default::default(), lim }
+        WebStorage { local: Default::default(), session: Default::default(), cookies: Default::default(), idb: Default::default(), perms: Default::default(), lim }
     }
 
     /// The same `localStorage` data with a new, empty `sessionStorage` (a new tab).
     pub fn new_session(&self) -> WebStorage {
-        WebStorage { local: self.local.clone(), session: Default::default(), cookies: self.cookies.clone(), idb: self.idb.clone(), lim: self.lim }
+        WebStorage { local: self.local.clone(), session: Default::default(), cookies: self.cookies.clone(), idb: self.idb.clone(), perms: self.perms.clone(), lim: self.lim }
     }
 
     /// The `indexedDB` stores of this session, for a worker on another thread (`WebStorage` is not `Send`).
@@ -172,6 +191,26 @@ impl WebStorage {
         for st in list {
             st.lock().unwrap_or_else(|e| e.into_inner()).flush(sync);
         }
+    }
+
+    /// The decision for permission `name` of `origin`.
+    pub fn permission(&self, origin: &str, name: &str) -> Option<Permission> {
+        self.perms.borrow().list.iter().find(|(o, n, _)| o == origin && n == name).map(|e| e.2)
+    }
+
+    /// Set (or with `None`, remove) the decision for permission `name` of `origin`. Gives `true` when it changed.
+    pub fn set_permission(&self, origin: &str, name: &str, to: Option<Permission>) -> bool {
+        let mut p = self.perms.borrow_mut();
+        let at = p.list.iter().position(|(o, n, _)| o == origin && n == name);
+        match (at, to) {
+            (Some(i), Some(v)) if p.list[i].2 == v => return false,
+            (Some(i), Some(v)) => p.list[i].2 = v,
+            (Some(i), None) => drop(p.list.remove(i)),
+            (None, Some(v)) => p.list.push((origin.into(), name.into(), v)),
+            (None, None) => return false,
+        }
+        p.rev += 1;
+        true
     }
 
     pub fn jar(&self) -> Arc<Mutex<bare_net::cookie::Jar>> {
@@ -271,7 +310,7 @@ impl WebStorage {
 
     /// A copy of the cookies (an expired one is skipped) and of both storage areas. Origins are sorted.
     pub fn export(&self) -> StorageState {
-        StorageState { cookies: self.export_cookies(), local: self.export_area(false), session: self.export_area(true) }
+        StorageState { cookies: self.export_cookies(), local: self.export_area(false), session: self.export_area(true), permissions: self.export_permissions() }
     }
 
     /// The cookies of `export`.
@@ -293,9 +332,17 @@ impl WebStorage {
         out
     }
 
-    /// The revisions of the cookie jar and of `localStorage`: each moves at a change. A profile saves a part when its number moved.
-    pub(crate) fn revisions(&self) -> (u64, u64) {
-        (self.cookies.lock().unwrap_or_else(|e| e.into_inner()).revision(), self.local.borrow().rev)
+    /// The permission decisions of `export`, sorted.
+    pub(crate) fn export_permissions(&self) -> Vec<(String, String, Permission)> {
+        let mut out = self.perms.borrow().list.clone();
+        out.sort_by(|x, y| (&x.0, &x.1).cmp(&(&y.0, &y.1)));
+        out
+    }
+
+    /// The revisions of the cookie jar, of `localStorage` and of the permissions: each moves at a change. A profile saves a part
+    /// when its number moved.
+    pub(crate) fn revisions(&self) -> (u64, u64, u64) {
+        (self.cookies.lock().unwrap_or_else(|e| e.into_inner()).revision(), self.local.borrow().rev, self.perms.borrow().rev)
     }
 
     /// Add a saved state to this storage. Items go through `set`, so the limits hold; the first error stops the import (what was added stays).
@@ -306,6 +353,9 @@ impl WebStorage {
             for c in &st.cookies {
                 jar.insert(c.clone(), now);
             }
+        }
+        for (origin, name, v) in &st.permissions {
+            self.set_permission(origin, name, Some(*v));
         }
         for (session, list) in [(false, &st.local), (true, &st.session)] {
             for (origin, items) in list {
