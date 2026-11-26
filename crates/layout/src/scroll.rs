@@ -172,8 +172,9 @@ pub fn areas(doc: &Document, styles: &Styles, layout: &Layout) -> Areas {
                 let w = |p| style.px(p).max(0.0);
                 let (l, t, r, b) = (w(Property::BorderLeftWidth), w(Property::BorderTopWidth), w(Property::BorderRightWidth), w(Property::BorderBottomWidth));
                 let pad = Rect { x: f.rect.x + l, y: f.rect.y + t, w: (f.rect.w - l - r).max(0.0), h: (f.rect.h - t - b).max(0.0) };
+                let none = tree.no_bars(f.node);
                 let auto = |k, at| match k {
-                    Keyword::Scroll => true,
+                    Keyword::Scroll => !none,
                     Keyword::Auto => at,
                     _ => false,
                 };

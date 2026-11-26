@@ -913,6 +913,8 @@ impl Session {
             return Err(SessionStop::LoadFailed("the document URL could not be configured".into()));
         }
         b.cross_document_history(true);
+        // A registration with an active worker that matches the URL controls the new document.
+        crate::browser_sw::navigated(&b.dom);
         if self.cfg.downloads.is_some() {
             b.enable_downloads();
         }

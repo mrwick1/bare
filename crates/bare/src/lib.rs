@@ -230,8 +230,11 @@ mod browser_platform_class;
 mod browser_platform_query;
 mod browser_scheduler;
 mod browser_worker;
+mod browser_sw;
+mod sw_hub;
 mod browser_notification;
 pub use browser_notification::{NotificationEvent, NotificationInfo};
+pub use sw_hub::SavedReg;
 mod browser_wasm;
 #[cfg(test)]
 mod browser_wasm_tests;
@@ -262,6 +265,10 @@ mod browser_date_tests;
 mod browser_web_api_tests;
 #[cfg(test)]
 mod browser_gaps_tests;
+#[cfg(test)]
+mod browser_scrollbar_none_tests;
+#[cfg(test)]
+mod browser_animation_list_tests;
 #[cfg(test)]
 mod browser_query_item_tests;
 #[cfg(test)]
@@ -498,6 +505,12 @@ mod browser_notification_show_tests;
 mod browser_notification_click_tests;
 #[cfg(test)]
 mod browser_notification_actions_tests;
+#[cfg(test)]
+mod browser_sw_register_tests;
+#[cfg(test)]
+mod browser_sw_lifecycle_tests;
+#[cfg(test)]
+mod browser_sw_message_tests;
 #[cfg(test)]
 mod browser_background_tests;
 #[cfg(test)]

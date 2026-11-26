@@ -6,12 +6,14 @@
 //! <profile>/cookies.bin    all cookies, session cookies too (as Chrome keeps them for a session restore)
 //! <profile>/local.bin      the `localStorage` items of all origins
 //! <profile>/permissions.bin the permission decisions of all origins (`browser_notification.rs`)
+//! <profile>/sw.bin        the service worker registrations with an active worker, and their script text (`sw_hub.rs`)
 //! <profile>/idb/*.log      the IndexedDB log of each origin (`browser_idb_log.rs`)
 //!
 //! file    = 8 bytes magic, payload, u32 CRC-32 of the bytes before it
 //! cookies = u32 count, (str name, str value, str domain, str path, u8 flags, u8 same site, f64 expires ms or NaN)*
 //! local   = u32 origins, (str origin, u32 items, (str key, str value)*)*
 //! perms   = u32 count, (str origin, str name, u8 decision)*      decision: 1 granted, 2 denied
+//! sw      = u32 count, (str scope, str script URL, u8 updateViaCache, u8 module, str script text)*
 //! str     = u32 length, UTF-8 bytes
 //! ```
 //!
@@ -41,6 +43,7 @@ const EVERY: Duration = Duration::from_secs(1);
 const COOKIES: (&str, &[u8; 8]) = ("cookies.bin", b"bareck01");
 const LOCAL: (&str, &[u8; 8]) = ("local.bin", b"barels01");
 const PERMS: (&str, &[u8; 8]) = ("permissions.bin", b"barepm01");
+const SW: (&str, &[u8; 8]) = ("sw.bin", b"baresw01");
 
 /// An open profile: its directory and its lock. Clones share the lock, which ends with the last clone.
 #[derive(Clone)]
@@ -134,6 +137,9 @@ impl Profile {
         if let Some(b) = self.read(PERMS)? {
             st.permissions = decode_perms(&b).ok_or_else(|| self.damaged(PERMS.0))?;
         }
+        if let Some(b) = self.read(SW)? {
+            st.service_workers = decode_sw(&b).ok_or_else(|| self.damaged(SW.0))?;
+        }
         Ok(st)
     }
 
@@ -177,8 +183,8 @@ impl Profile {
 pub struct Saver {
     profile: Profile,
     store: WebStorage,
-    /// The revisions that are on disk: the cookies, `localStorage`, the permissions and the IndexedDB commits.
-    saved: (u64, u64, u64, u64),
+    /// The revisions that are on disk: the cookies, `localStorage`, the permissions, the IndexedDB commits and the service workers.
+    saved: (u64, u64, u64, u64, u64),
     idb: Arc<crate::browser_idb::log::Disk>,
     last: Option<Instant>,
     /// A write failed: the first failure goes to stderr, the next ones are quiet.
@@ -193,12 +199,13 @@ impl Saver {
         let idb = crate::browser_idb::log::Disk::new(&profile);
         store.use_idb_disk(idb.clone());
         let (c, l, p) = store.revisions();
-        Saver { saved: (c, l, p, 0), profile, store, idb, last: None, failed: false, writes: 0 }
+        let w = store.sw_rev();
+        Saver { saved: (c, l, p, 0, w), profile, store, idb, last: None, failed: false, writes: 0 }
     }
 
-    fn revisions(&self) -> (u64, u64, u64, u64) {
+    fn revisions(&self) -> (u64, u64, u64, u64, u64) {
         let (c, l, p) = self.store.revisions();
-        (c, l, p, self.idb.rev.load(std::sync::atomic::Ordering::Relaxed))
+        (c, l, p, self.idb.rev.load(std::sync::atomic::Ordering::Relaxed), self.store.sw_rev())
     }
 
     /// Write what changed, unless the last write was less than a second ago. Gives when to call again: a change waits for that time.
@@ -224,7 +231,7 @@ impl Saver {
         self.store.flush_idb(true);
     }
 
-    fn write(&mut self, rev: (u64, u64, u64, u64)) {
+    fn write(&mut self, rev: (u64, u64, u64, u64, u64)) {
         let mut done = Ok(());
         if rev.0 != self.saved.0 {
             done = self.profile.write(COOKIES, encode_cookies(&self.store.export_cookies()));
@@ -236,6 +243,10 @@ impl Saver {
         }
         if rev.2 != self.saved.2 && done.is_ok() {
             done = self.profile.write(PERMS, encode_perms(&self.store.export_permissions()));
+            self.writes += 1;
+        }
+        if rev.4 != self.saved.4 && done.is_ok() {
+            done = self.profile.write(SW, encode_sw(&self.store.sw_hub().borrow().export()));
             self.writes += 1;
         }
         if rev.3 != self.saved.3 {
@@ -310,6 +321,17 @@ fn encode_perms(list: &[(String, String, Permission)]) -> Vec<u8> {
     out
 }
 
+fn encode_sw(list: &[crate::sw_hub::SavedReg]) -> Vec<u8> {
+    let mut out = (list.len() as u32).to_le_bytes().to_vec();
+    for r in list {
+        put_str(&mut out, &r.scope);
+        put_str(&mut out, &r.script);
+        out.extend([r.uvc, u8::from(r.module)]);
+        put_str(&mut out, &r.text);
+    }
+    out
+}
+
 struct Reader<'b>(&'b [u8]);
 
 impl Reader<'_> {
@@ -380,6 +402,22 @@ fn decode_perms(b: &[u8]) -> Option<Vec<(String, String, Permission)>> {
             _ => return None,
         };
         out.push((origin, name, v));
+    }
+    r.0.is_empty().then_some(out)
+}
+
+fn decode_sw(b: &[u8]) -> Option<Vec<crate::sw_hub::SavedReg>> {
+    let mut r = Reader(b);
+    let n = r.u32()?;
+    let mut out = Vec::with_capacity(n.min(1024) as usize);
+    for _ in 0..n {
+        let (scope, script) = (r.str()?, r.str()?);
+        let f = r.take(2)?;
+        let (uvc, module) = (f[0], f[1]);
+        if uvc > 2 || module > 1 {
+            return None;
+        }
+        out.push(crate::sw_hub::SavedReg { scope, script, uvc, module: module == 1, text: r.str()? });
     }
     r.0.is_empty().then_some(out)
 }

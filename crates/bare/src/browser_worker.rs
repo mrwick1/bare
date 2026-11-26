@@ -83,23 +83,31 @@ pub(crate) fn forget<E: Eng>(d: &Dom<E>, o: E::Obj) {
     d.sched_forget_port(o);
 }
 
-/// The global of a worker page: `postMessage(message, transfer)` sends to the `Worker` object, `close()` ends the page, and
+/// The global of a dedicated worker page: `postMessage(message, transfer)` sends to the `Worker` object, `close()` ends the page, and
 /// `importScripts(urls…)` runs scripts. The rest of the worker global (no window names, the worker prototype chain) is a later step
 /// of `design-workers.md`.
 pub(crate) fn install_scope<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, ()> {
+    install_scope_named(d, it, "DedicatedWorkerGlobalScope", true)
+}
+
+/// The global of a worker page whose scope interface is `name`. `dedicated`: it has `postMessage` and `close()`. A service worker
+/// (`browser_sw.rs`) has neither.
+pub(crate) fn install_scope_named<E: Eng>(d: &Dom<E>, it: &mut E::Vm, name: &'static str, dedicated: bool) -> R<E, ()> {
     run::<E, _>(it, |s| {
         let g = s.global();
         let attrs = Attrs { writable: true, enumerable: true, configurable: true };
-        let post = d.add_fn_s(s, scope_post, "postMessage", 1, HostFn::Method)?;
-        s.define_str(g, "postMessage", post, attrs)?;
-        let close = d.add_fn_s(s, scope_close, "close", 0, HostFn::Method)?;
-        s.define_str(g, "close", close, attrs)?;
+        if dedicated {
+            let post = d.add_fn_s(s, scope_post, "postMessage", 1, HostFn::Method)?;
+            s.define_str(g, "postMessage", post, attrs)?;
+            let close = d.add_fn_s(s, scope_close, "close", 0, HostFn::Method)?;
+            s.define_str(g, "close", close, attrs)?;
+        }
         let import = d.add_fn_s(s, scope_import, "importScripts", 0, HostFn::Method)?;
         s.define_str(g, "importScripts", import, attrs)?;
         // The chain is `self -> DedicatedWorkerGlobalScope.prototype -> WorkerGlobalScope.prototype -> Window.prototype -> ..
         // -> EventTarget.prototype`. The standard has no `Window.prototype` here; it stays because the functions of the global live on it.
         let mut up = s.get_prototype_of(g)?;
-        for name in ["WorkerGlobalScope", "DedicatedWorkerGlobalScope"] {
+        for name in ["WorkerGlobalScope", name] {
             let p = match up { Some(u) => s.new_object_with(u)?, None => s.new_object()? };
             let f = d.add_fn_s(s, illegal, name, 0, HostFn::Ctor)?;
             s.define_str(f, "prototype", p, Attrs { writable: false, enumerable: false, configurable: false })?;
@@ -113,7 +121,7 @@ pub(crate) fn install_scope<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, ()> {
         s.set_prototype_of(g, up)?;
         // The window code puts the tag `Window` on the global itself.
         let key = s.intrinsic(Intrinsic::SymbolToStringTag);
-        let tag = s.string("DedicatedWorkerGlobalScope")?;
+        let tag = s.string(name)?;
         s.define(g, key, tag, Attrs { writable: false, enumerable: false, configurable: true })?;
         Ok(())
     })
