@@ -266,6 +266,8 @@ mod browser_web_api_tests;
 #[cfg(test)]
 mod browser_gaps_tests;
 #[cfg(test)]
+mod browser_scrollbar_none_tests;
+#[cfg(test)]
 mod browser_animation_list_tests;
 #[cfg(test)]
 mod browser_query_item_tests;
