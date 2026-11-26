@@ -363,14 +363,7 @@
           ctrl = worker(a);
           container.dispatchEvent(new Event("controllerchange"));
         } else if (kind === "msg") {
-          container.dispatchEvent(
-            new MessageEvent("message", {
-              data: a,
-              ports: b,
-              source: worker(c),
-              origin: d,
-            }),
-          );
+          return [container, worker(a)];
         }
       },
     };

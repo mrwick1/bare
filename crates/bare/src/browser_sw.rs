@@ -410,14 +410,16 @@ impl<E: Eng> Browser<E> {
         work
     }
 
-    /// Give one change of the inbox to the shim, then run the microtasks.
+    /// Give one change of the inbox to the shim, then run the microtasks. A message is queued as a `message` event task at the
+    /// container, with the `ServiceWorker` object of the sender as `source` (a script cannot make a `MessageEvent` with a source).
     fn sync_item(&mut self, item: ToClient) -> R<E, ()> {
         let dom = self.dom.clone();
-        let r = self.it.host_scope_o(|it| {
+        self.it.host_scope_o(|it| {
             let h = helper(&dom, it)?;
-            crate::browser_scoped::run::<E, _>(it, |s| {
+            let msg = crate::browser_scoped::run::<E, _>(it, |s| {
                 let h = s.engine().raw_local(&h);
                 let f = s.get_str(h, "sync")?;
+                let mut msg = None;
                 let args: Vec<Local<'_>> = match item {
                     ToClient::Job { id, result } => match result {
                         Ok(snap) => vec![s.string("job")?, s.number(id as f64), reg_snap::<E>(s, &snap)?],
@@ -427,18 +429,27 @@ impl<E: Eng> Browser<E> {
                     ToClient::State { ver, state } => vec![s.string("state")?, s.number(ver as f64), s.string(state.name())?],
                     ToClient::Ctrl(w) => vec![s.string("ctrl")?, w_snap::<E>(s, &w)?],
                     ToClient::Msg { from, origin, mut data } => {
-                        let (v, ports, _) = dom.receive_clone(s, &mut data)?;
-                        let v = s.engine().raw_local(&v);
-                        let ports: Vec<Local<'_>> = ports.into_iter().map(|p| dom.obj_local(s, p)).collect();
-                        vec![s.string("msg")?, v, s.new_array(&ports)?, w_snap::<E>(s, &Some(from))?, s.string(&origin)?]
+                        let bytes = 16usize.saturating_add(data.cost());
+                        let got = dom.receive_clone(s, &mut data)?;
+                        msg = Some((origin, bytes, got));
+                        vec![s.string("msg")?, w_snap::<E>(s, &Some(from))?]
                     }
                 };
-                s.call(f, h, &args)?;
-                Ok(())
+                let out = s.call(f, h, &args)?;
+                // "msg" gives `[container, the ServiceWorker of the sender]`.
+                Ok(match msg {
+                    Some((origin, bytes, got)) => {
+                        let (c, w) = (s.get_str(out, "0")?, s.get_str(out, "1")?);
+                        obj_id::<E>(s, c).zip(obj_id::<E>(s, w)).map(|(c, w)| (c, w, origin, bytes, got))
+                    }
+                    None => None,
+                })
             })?;
+            if let Some((c, w, origin, bytes, (data, ports, error))) = msg {
+                dom.queue_delivered(c, data, ports.into_boxed_slice(), bytes, Some(Box::new(crate::browser_scheduler::Sender { origin, source: Some(w) })), error)?;
+            }
             it.host_checkpoint().map(|_| ())
-        });
-        r
+        })
     }
 
     /// A worker page: dispatch the events of its version that wait, on the clock `now` of its host. Gives the events given.
