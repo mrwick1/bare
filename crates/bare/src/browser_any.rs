@@ -179,6 +179,8 @@ fwd! {
     (&mut) fn take_navigation_request() -> Option<NavigationRequest>;
     (&mut) fn take_reports() -> Vec<Report>;
     (&mut) fn take_scroll_key() -> Option<ScrollKey>;
+    (&mut) fn take_clipboard() -> Option<Vec<(String, Vec<u8>)>>;
+    (&mut) fn take_paste_request() -> bool;
     (&) fn tasks_held() -> bool;
     (&) fn waiting_loads(out: &mut Vec<crate::page::Waiting>);
     (&) fn waiting_requests(out: &mut Vec<crate::page::Waiting>);
@@ -205,6 +207,7 @@ fwd_try! {
     (&mut) fn ui_drag_select(caret: u32) -> UiOutcome;
     (&mut) fn ui_insert_text(text: &str) -> UiOutcome;
     (&mut) fn ui_key(k: KeyInput, down: bool) -> UiOutcome;
+    (&mut) fn ui_paste(items: Vec<(String, Vec<u8>)>) -> UiOutcome;
     (&mut) fn ui_key_at(k: KeyInput, down: bool, caret: Option<u32>) -> UiOutcome;
     (&mut) fn ui_pointer_button(target: Option<NodeId>, p: Pointer, button: u8, pressed: bool, caret: Option<u32>) -> UiOutcome;
     (&mut) fn ui_pointer_leave(p: Pointer) -> UiOutcome;

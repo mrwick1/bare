@@ -15,15 +15,22 @@
 //! window repeats a held key by itself. An event can ask for a new frame (`Control::redraw`) and for a cursor shape
 //! (`Control::set_cursor`).
 //!
+//! Clipboard: `Control::set_clipboard` makes the window the owner of the selection, with the given data, and `Control::read_clipboard`
+//! reads the selection of another program. The read is answered by one `Event::Clipboard`. The rules for the MIME types are in
+//! `clipboard.rs`. The primary selection (middle click) and drag and drop are not here.
+//!
 //! Timers (S5): `App::tick` runs the work that is due and gives the time of the next work. The loop sleeps in `poll` until that
 //! time at the latest, so page timers and `fetch` tasks run between input events. With no work due, the timeout is none.
 //!
 //! Not here yet: a fractional or integer HiDPI scale (paint draws one pixel for each CSS pixel, see `docs/internal/resources.md`,
-//! "Wayland window"), scroll events, touch, a text input method (IME) and the clipboard.
+//! "Wayland window"), scroll events, touch, a text input method (IME), the primary selection and drag and drop.
 
+pub mod clipboard;
 pub mod input;
 pub mod redraw;
 pub mod slots;
+#[cfg(test)]
+mod clipboard_tests;
 #[cfg(not(target_os = "linux"))]
 mod none;
 #[cfg(target_os = "linux")]
@@ -54,6 +61,8 @@ pub struct Control {
     pub(crate) close: bool,
     pub(crate) redraw: bool,
     pub(crate) cursor: Option<Cursor>,
+    pub(crate) set_clipboard: Option<Vec<(String, std::sync::Arc<[u8]>)>>,
+    pub(crate) read_clipboard: Option<Vec<Vec<String>>>,
 }
 
 impl Control {
@@ -70,6 +79,18 @@ impl Control {
     /// Show this cursor shape over the window from now on. The window keeps it until the next call.
     pub fn set_cursor(&mut self, cursor: Cursor) {
         self.cursor = Some(cursor);
+    }
+
+    /// Own the clipboard with this data, one entry for each MIME type. `text/plain` is offered under all the text names. The data
+    /// is served to other programs until another program copies. A window with no seat or no data device ignores the call.
+    pub fn set_clipboard(&mut self, data: Vec<(String, std::sync::Arc<[u8]>)>) {
+        self.set_clipboard = Some(data);
+    }
+
+    /// Read the clipboard. For each group, the first MIME type of it that the owner offers is read (`clipboard::TEXT`, `clipboard::IMAGE`).
+    /// The answer is one `Event::Clipboard`, also when nothing could be read (no items).
+    pub fn read_clipboard(&mut self, groups: &[&[&str]]) {
+        self.read_clipboard = Some(groups.iter().map(|g| g.iter().map(|m| m.to_string()).collect()).collect());
     }
 }
 

@@ -1180,8 +1180,24 @@ impl Page {
                     self.send_scroll_events();
                 }
             }
+            // The answer to a paste key (`take_paste_request`): fire `paste` with it.
+            Event::Clipboard { items } => {
+                if let Some(r) = self.browser().map(|b| b.ui_paste(items)) {
+                    h.redraw = self.after(r);
+                }
+            }
         }
         h
+    }
+
+    /// What the last copy or cut put on the clipboard (MIME type and bytes), once.
+    pub(crate) fn take_clipboard(&mut self) -> Option<Vec<(String, Vec<u8>)>> {
+        self.browser().and_then(|b| b.take_clipboard())
+    }
+
+    /// Whether a paste key waits for the clipboard, once.
+    pub(crate) fn take_paste_request(&mut self) -> bool {
+        self.browser().is_some_and(|b| b.take_paste_request())
     }
 
     /// Paint the page into its own canvas (headless). The canvas keeps the last frame while the next document is on its way.
@@ -1408,6 +1424,12 @@ impl App for Page {
         }
         if h.redraw {
             ctl.redraw();
+        }
+        if let Some(data) = self.take_clipboard() {
+            ctl.set_clipboard(data.into_iter().map(|(m, b)| (m, b.into())).collect());
+        }
+        if self.take_paste_request() {
+            ctl.read_clipboard(&[bare_window::clipboard::TEXT, bare_window::clipboard::IMAGE]);
         }
     }
 }

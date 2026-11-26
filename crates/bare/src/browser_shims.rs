@@ -4,7 +4,8 @@
 //! `FileReaderSync` (`shims/filereadersync.js`, in a worker only),
 //! `speechSynthesis` and the `SpeechSynthesis*` interfaces (`shims/speech.js`, no voices),
 //! `WritableStream`, `TransformStream`, `TextDecoderStream`, `TextEncoderStream` and `ReadableStream.prototype.pipeTo` and `pipeThrough`
-//! (`shims/streams.js`), `CompressionStream` and `DecompressionStream` (`shims/compression.js`, with the native `codec` here).
+//! (`shims/streams.js`), `CompressionStream` and `DecompressionStream` (`shims/compression.js`, with the native `codec` here), `DataTransfer`, `DataTransferItem`, `DataTransferItemList` and `ClipboardEvent`
+//! (`shims/clipboard.js`; the copy, cut and paste keys use it, see `browser_ui/clipboard.rs`).
 //!
 //! A read of the name finds nothing, so the heap asks the host once (`Heap::browser_name`, `browser_handlers::lazy_key`). The host runs the
 //! source as an indirect eval; the source defines the globals itself. A realm that never reads the names pays nothing: no object, no
@@ -20,7 +21,7 @@ use crate::browser_scoped::*;
 use bare_js_api::{Args, HostFn, Local, Type};
 
 /// `(names that ask for it, the global that the source defines first, source)`.
-const SHIMS: [(&[&str], &str, &str); 11] = [
+const SHIMS: [(&[&str], &str, &str); 12] = [
     (&["animate", "Animation"], "Animation", include_str!("shims/animation.js")),
     (&["Path2D"], "Path2D", include_str!("shims/path2d.js")),
     (&["EventSource"], "EventSource", include_str!("shims/eventsource.js")),
@@ -32,6 +33,7 @@ const SHIMS: [(&[&str], &str, &str); 11] = [
     (&STREAM_NAMES, "WritableStream", include_str!("shims/streams.js")),
     (&["CompressionStream", "DecompressionStream"], "CompressionStream", include_str!("shims/compression.js")),
     (&["caches", "CacheStorage", "Cache"], "caches", include_str!("shims/caches.js")),
+    (&["DataTransfer", "DataTransferItem", "DataTransferItemList", "ClipboardEvent"], "DataTransfer", include_str!("shims/clipboard.js")),
 ];
 
 /// The globals of `shims/streams.js`. `crates/js/src/heap.rs` (`browser_name`) lists the same names.
@@ -62,6 +64,10 @@ pub(crate) fn define<E: Eng>(d: &Dom<E>, it: &mut E::Vm, name: &str) -> R<E, boo
             // The source gives its install function. It takes the native of `browser_websocket.rs`.
             let f = d.add_fn_s_obj(it, crate::browser_websocket::ws_host, "ws", 4, HostFn::Method)?;
             it.call_o(made, E::undef(), &[E::obj_raw(f)])?;
+        } else if sentinel == "DataTransfer" {
+            // The source gives the helper that the copy, cut and paste keys call (`browser_ui/clipboard.rs`).
+            let p = it.persist_value(made);
+            d.st.borrow_mut().ui.clip = Some(p);
         } else if sentinel == "FileReaderSync" {
             let f = d.add_fn_s_obj(it, blob_bytes, "bytes", 1, HostFn::Method)?;
             it.call_o(made, E::undef(), &[E::obj_raw(f)])?;
