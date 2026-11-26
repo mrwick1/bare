@@ -193,7 +193,7 @@ Each slice was measured on Teams against the main of its day. From C3 on, the me
 | C1 shared stub records    | #1147 | idle PSS about -110 MiB (3 runs each)                   |
 | R1 root map dedupe        | #1157 | idle PSS about -19 MiB (3 runs each, near the noise)    |
 | C3 exact tables (part 1)  | #1167 | malloc in use -11.6 MiB                                 |
-| C4a compact pending entry | this  | malloc in use -21.5 MiB                                 |
+| C4a compact pending entry | #1171 | malloc in use -21.5 MiB                                 |
 | C2 exact chunks           | -     | not built: after C1 the spare room is 8.4 MiB           |
 | C3 part 2 (boxed slices)  | -     | not built: a smaller `Code` record, about 8 B per table |
 | C4b frozen scope chains   | -     | not built: `Level` chains held by `Wait` (about 23 MiB) |
