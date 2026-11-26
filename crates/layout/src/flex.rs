@@ -160,7 +160,8 @@ fn children(cx: &Cx, node: NodeId, mut statics: impl FnMut(NodeId, NodeId)) -> V
 
 /// Lay out the content of a flex container in `space` (its content box). The fragments are relative to the border box
 /// of the container: the content box starts at `bp.left`, `bp.top`.
-pub(crate) fn layout(cx: &mut Cx, node: NodeId, space: Space, bp: Sides) -> Kids {
+/// `limits`: the `min-height` and `max-height` of the content box, which the caller resolved against the containing block.
+pub(crate) fn layout(cx: &mut Cx, node: NodeId, space: Space, bp: Sides, (lo, hi): (f32, f32)) -> Kids {
     let style = cx.tree.style(node);
     let direction = keyword(style, P::FlexDirection);
     let row = matches!(direction, K::Row | K::RowReverse);
@@ -170,11 +171,6 @@ pub(crate) fn layout(cx: &mut Cx, node: NodeId, space: Space, bp: Sides) -> Kids
     let gap = |p, base| resolve(cx, style.get(p), base).unwrap_or(0.0).max(0.0);
     let (column_gap, row_gap) = (gap(P::ColumnGap, Some(space.width)), gap(P::RowGap, space.height));
     let (main_gap, cross_gap) = if row { (column_gap, row_gap) } else { (row_gap, column_gap) };
-    // The min and max height of the container, for a height that is not known yet.
-    let border_box = style.get(P::BoxSizing) == Value::Keyword(K::BorderBox);
-    let content = |v: f32| if border_box { (v - bp.vertical()).max(0.0) } else { v };
-    let lo = resolve(cx, style.get(P::MinHeight), None).map_or(0.0, content);
-    let hi = resolve(cx, style.get(P::MaxHeight), None).map_or(f32::INFINITY, content);
     let align_items = match keyword(style, P::AlignItems) {
         K::Normal => K::Stretch,
         k => k,
