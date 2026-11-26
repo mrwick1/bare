@@ -106,11 +106,31 @@ pub struct Lazy {
     spans: Vec<(usize, usize)>,
 }
 
-/// A function that waits at the code index `ci`, and the unit that holds its text.
+/// A function that waits at the code index `ci`, and the unit that holds its text. It keeps the parts of its [`Child`] that the stub
+/// does not have: the stub's record in [`Codes`] has its name (`design-code-memory.md`, C4). 24 B, not 64 B and a name.
 struct Wait {
-    ci: usize,
-    unit: usize,
-    child: Option<Child>,
+    ci: u32,
+    unit: u32,
+    id: FnId,
+    chain: Option<Rc<crate::compile::Level>>,
+    self_name: bool,
+    /// The function was compiled (or its compile failed): the entry stays, so no entry moves.
+    done: bool,
+}
+
+impl Wait {
+    fn new(ci: usize, unit: usize, ch: Child) -> Wait {
+        debug_assert!(ch.ready.is_none(), "a ready child has no stub");
+        Wait { ci: ci as u32, unit: unit as u32, id: ch.id, chain: ch.chain, self_name: ch.self_name, done: false }
+    }
+}
+
+/// The text of a shared atom (a function name: it came from a `&str`, so it has no lone surrogate).
+fn atom_text(s: crate::string::Str) -> Box<str> {
+    match s.chars().expect("a shared atom is flat") {
+        Chars::One(b) => b.iter().map(|&c| c as char).collect(),
+        Chars::Two(u) => String::from_utf16_lossy(u).into(),
+    }
 }
 
 impl Lazy {
@@ -129,14 +149,14 @@ impl Lazy {
 
     /// The unit of the code `ci`: its stub's unit, else the last span at or before it.
     fn unit_of(&self, ci: usize) -> Option<usize> {
-        match self.pending.binary_search_by_key(&ci, |w| w.ci) {
-            Ok(at) => Some(self.pending[at].unit),
+        match self.pending.binary_search_by_key(&ci, |w| w.ci as usize) {
+            Ok(at) => Some(self.pending[at].unit as usize),
             Err(_) => Some(self.spans.get(self.spans.partition_point(|&(b, _)| b <= ci).checked_sub(1)?)?.1),
         }
     }
 
     fn wait(&mut self, unit: usize, pending: impl IntoIterator<Item = (usize, Child)>) {
-        self.pending.extend(pending.into_iter().map(|(ci, ch)| Wait { ci, unit, child: Some(ch) }));
+        self.pending.extend(pending.into_iter().map(|(ci, ch)| Wait::new(ci, unit, ch)));
         debug_assert!(self.pending.windows(2).all(|w| w[0].ci < w[1].ci), "the stubs are added in the order of their indexes");
     }
 }
@@ -146,9 +166,14 @@ const VERIFY_COMPILED: bool = cfg!(any(debug_assertions, feature = "verify-compi
 
 impl LazyCompile for Lazy {
     fn compile(&mut self, codes: &Codes, ci: usize) -> Result<(), String> {
-        let at = self.pending.binary_search_by_key(&ci, |w| w.ci).map_err(|_| "no function waits at this code")?;
+        let at = self.pending.binary_search_by_key(&ci, |w| w.ci as usize).map_err(|_| "no function waits at this code")?;
         let w = &mut self.pending[at];
-        let (u, ch) = (w.unit, w.child.take().ok_or("this function was compiled already")?);
+        if std::mem::replace(&mut w.done, true) {
+            return Err("this function was compiled already".into());
+        }
+        let name = codes.name_len(ci).0.map(atom_text);
+        let ch = Child { id: w.id, chain: w.chain.take(), self_name: w.self_name, name, ready: None };
+        let u = w.unit as usize;
         let base = codes.len();
         let unit = &mut self.units[u];
         let source = unit.source.as_deref().unwrap_or(PRELUDE);
@@ -224,7 +249,7 @@ impl LazyCompile for Lazy {
             crate::verify::verify_at(&code, codes.len(), codes.len() + 1)?;
         }
         let ci = codes.push_all(vec![code]);
-        self.pending.push(Wait { ci, unit: u, child: Some(Child { id, chain: None, self_name: false, name: Some(name.into()), ready: None }) });
+        self.pending.push(Wait { ci: ci as u32, unit: u as u32, id, chain: None, self_name: false, done: false });
         Ok(ci)
     }
 
@@ -601,3 +626,7 @@ mod regexp_test_fast_tests;
 #[cfg(test)]
 #[path = "stub_records_tests.rs"]
 mod stub_records_tests;
+
+#[cfg(test)]
+#[path = "lazy_entry_tests.rs"]
+mod lazy_entry_tests;
