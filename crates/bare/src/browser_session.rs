@@ -422,6 +422,13 @@ struct Used {
     ended: Option<SessionStop>,
 }
 
+/// The document of a frame whose `src` is a `blob:` URL of its parent: the bytes and type of the Blob, as a 200 reply at `url`.
+pub(crate) fn blob_document(url: &str, body: &[u8], ty: &str) -> Result<DocumentResponse, String> {
+    let ct = Some(ty).filter(|t| !t.is_empty());
+    let html = if is_html(ct) { encoding::decode(body, ct) } else { non_html_document(ct, url, body)? };
+    Ok(DocumentResponse { url: url.to_string(), html, status: 200, isolation_requested: None })
+}
+
 fn is_html(content_type: Option<&str>) -> bool {
     let m = content_type.unwrap_or("").split(';').next().unwrap_or("").trim();
     m.eq_ignore_ascii_case("text/html")
