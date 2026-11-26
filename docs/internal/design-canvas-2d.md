@@ -1,6 +1,6 @@
 # Design: a real canvas 2D context
 
-Status: design for review. No code is built from it yet.
+Status: option B with the lazy record, chosen by the owner on 2026-11-26. Section 6 is the plan.
 
 ## Problem
 
@@ -216,48 +216,99 @@ sync and encodes on the page thread. JPEG quality follows the standard: a number
 PNG settings: `toDataURL` output differs between browsers, so no page can depend on exact bytes. `Compression::Fast` with the
 `Sub` filter is the measured choice for captures (`png.rs`). Use it.
 
-## 6. Plan
+## 6. Plan (owner decision, 2026-11-26: option B with the lazy record of option C)
 
-Each step is one PR. Tests go in new files `crates/bare/src/browser_canvas_<topic>_tests.rs`. The expected values come from Chrome
-(same script, `getImageData` or `toDataURL` decoded). An edge pixel may differ by a small tolerance (for example 2 per channel);
-interior pixels must match exactly. `tools/fixtures` has no WPT canvas tests (verified); step 1 adds a small set of WPT-style cases,
-written by hand.
+The owner chose option B: no tiny-skia. The raster code is our own, in `bare-paint`. The lazy command list of option C stays: a
+canvas that nobody reads never allocates pixels.
 
-1. **Context object and host state.** A real `CanvasRenderingContext2D` with prototype accessors (`fillStyle`, `strokeStyle`,
-   `lineWidth`, `globalAlpha`, `globalCompositeOperation`, `font`, `textAlign`, `textBaseline`, `lineCap`, `lineJoin`, `miterLimit`,
-   `imageSmoothingEnabled`). Setters validate and normalize as Chrome does. `save` and `restore`. Tests: get/set round trips, invalid
-   values are ignored, `instanceof`. No pixel change.
-2. **Record and tiny-skia raster (option C core).** `Record`, `Op`, the read points, and the move of `fillRect`, `strokeRect`,
-   `clearRect` onto it, anti-aliased. `getImageData` reads real pixels. Transforms. Tests: the current raster tests with Chrome edge
-   values; `getImageData` after `fillRect`; transform cases; a canvas that is never read allocates no pixels (a counter).
-3. **Paths and clip.** All path calls, `fill` and `stroke` with all line styles, `setLineDash`, `clip`, `Path2D`, `isPointInPath`,
-   `isPointInStroke`. Tests: shapes from Chrome, evenodd, dashed strokes, clip then fill.
-4. **Images.** `drawImage` (3, 5 and 9 arguments) from `<img>` and from a canvas; `putImageData` with a dirty
-   rect; `imageSmoothingEnabled`; copy on write of a canvas source. Tests: scale down a decoded PNG and compare with Chrome;
-   self-draw (`drawImage(canvas)` on its own canvas).
-5. **Encoders.** `toDataURL` and `toBlob` for PNG and WebP, and JPEG if J1 or J2 is chosen. Async encode for `toBlob`. Tests:
-   round trip through `bare_image` decode; the type and quality rules; the WhatsApp case as a unit test (draw a PNG, encode, decode,
-   same pixels).
-6. **Composite modes and text.** The Porter-Duff modes; `fillText`, `strokeText`, full `TextMetrics`. Tests: one case per mode
-   from Chrome; text bounds within a tolerance (the fonts differ from Chrome's).
-7. **ImageBitmap and createImageBitmap.** From `<img>`, canvas, `Blob` (decode on a worker), `ImageData`; resize options; `close`.
-   Tests: sizes, the promise order, `drawImage(bitmap)`.
-8. **OffscreenCanvas on the main thread** (`getContext("2d")`, `convertToBlob`, `transferToImageBitmap`). The worker form waits
-   for worker scripts (`design-workers.md`).
-9. **Gradients, patterns, shadows** (last; only if a journey needs them).
+### Data structures
 
-Each step also checks the WhatsApp photo journey by hand (without the live profile: a saved page that draws a picture and
-re-encodes it).
+- **Surface:** `Vec<u32>`, one premultiplied pixel per `u32` as `0xAARRGGBB`. This is RGBA8 premultiplied in another byte order. It
+  is the order of the page painter, so paint needs no swizzle. Size `4 * w * h` bytes, made at the first raster only.
+- **Path:** a flat polygon list in device pixels: `Vec<(f32, f32)>` with a NaN point between contours. The context applies the
+  transform when it records, and it flattens curves and arcs into lines (tolerance 0.25 px). `fill` and `stroke` share one built
+  path.
+- **Stroker:** it turns a polyline into polygons: one quad per segment, joins (miter, round, bevel), caps (butt, round, square),
+  dashes. The result is filled with the nonzero rule.
+- **Rasterizer:** an edge list sorted by top y, and an active edge list per scanline. Each pixel row has 4 sub-scanlines (as in
+  Skia's supersampler). Each sub-scanline gives exact horizontal coverage. Nonzero and evenodd. Output: one row of 8-bit coverage
+  per scanline, only over the span of the active edges.
+- **Paint source:** a solid color (premultiplied), a linear, radial or conic gradient (a 256-entry color table), or an image
+  (pattern or `drawImage`) sampled through the inverse transform, nearest or bilinear. `drawImage` is a fill of the destination
+  quad with an image source, so transforms and clip work the same for shapes and images.
+- **Blend:** one function per composite mode on premultiplied pixels, with coverage, `globalAlpha` and the clip mask.
+- **Clip:** `Option<Arc<Vec<u8>>>`, an 8-bit mask of the canvas size. `clip()` rasters the path into a new mask and multiplies it
+  with the old one. It is made at play time only.
+- **Record:** per canvas, `ops: Vec<Draw>` and `base: Option<Arc<Vec<u32>>>`. A `Draw` holds all it needs (path, rule, source,
+  alpha, mode, clip): play does not read the script state. `putImageData` records its bytes.
 
-Cost rows to add (to `tools/js/cost_rows.txt`, in step 2):
+### Algorithms and complexity
 
-- `examples/browser_load canvas 1` and `10`: a script that draws N rectangles, paths and one `drawImage` on a 512x512 canvas and reads
-  it once with `getImageData`. It measures record plus one raster.
-- `examples/browser_load canvasidle 1` and `10`: the same draws and no read. It must show near-zero raster instructions. It guards the
+- Record: `O(path points)` per call. No pixel work.
+- Raster of a fill: `O(E log E)` to sort the edges, plus `O(H * 4 * A)` for the active edges `A`, plus `O(covered pixels)`.
+  Today's `fill_poly` is `O(H * E)`.
+- `drawImage`: `O(destination pixels)`.
+- Read: a read plays the ops on top of `base` and keeps the result as the new `base`. The reads are paint (`Pixels::lazy`),
+  `getImageData`, `toDataURL`, `toBlob`, `createImageBitmap`, and `drawImage` with this canvas as its source.
+- Copy on write: `base` is an `Arc`. A draw op that uses a canvas as its source holds the `Arc`. A later raster of the source calls
+  `Arc::make_mut`, so it copies only when an op still holds the old pixels.
+- Drop of dead ops: `clearRect` or an opaque fill of the whole canvas, at the identity transform with no clip, drops the ops
+  before it and `base`.
+- Memory bound: when `ops` holds more than 64 KiB, the next draw plays them into `base`. The raster cost does not change. It moves
+  earlier.
+
+### Memory
+
+- An unread canvas: only its ops. Zero pixel bytes.
+- A read canvas: `4 * w * h` for `base`, plus one `0xAARRGGBB` copy (not premultiplied) for each frame that paint reads.
+- Size limits (default for open question 3): Chrome's, 32,767 px per side and 268,435,456 px in total (hypothesis on the exact
+  numbers). A larger canvas, or a failed allocation (`try_reserve`), gives a blank canvas, not a script error, as in Chrome.
+
+### Encoders
+
+- PNG: RGBA, not premultiplied, `Compression::Fast`, `Sub` filter (default for open question 6: any stable output).
+- JPEG: not built. The `jpeg-encoder` crate (0.7.1) is `(MIT OR Apache-2.0) AND IJG`. IJG is outside the allowed licences. The
+  owner decides later. Until then `image/jpeg` gives PNG, as the standard says for a type that is not supported. The encoder has
+  one place for a JPEG branch.
+- `toBlob` encodes on the page thread and calls the callback in a new task. Hypothesis for a later step: encode on the picture
+  worker threads.
+
+### Text (default for open question 4)
+
+`fillText` and `strokeText` take the glyph outlines from `ab_glyph`, transform them, and fill them like any path. One path for
+all text. The glyph mask cache is a later step if a journey needs it.
+
+### Paint input (default for open question 5)
+
+Paint keeps its input: `Pixels::lazy` makes a `0xAARRGGBB` copy, not premultiplied, once per frame that changed. A later PR can
+drop the copy.
+
+### Steps
+
+Each step is one PR. Tests go in new files `crates/bare/src/browser_canvas_<topic>_tests.rs`. Expected values come from Chrome.
+An edge pixel may differ by a small tolerance. Interior pixels match exactly.
+
+1. **What a photo upload needs** (WhatsApp Web): the record, the read points, `getImageData`, `putImageData`, `drawImage` (3, 5
+   and 9 arguments) from `<img>`, a canvas and an `ImageBitmap`, `toDataURL`, `toBlob`, `createImageBitmap` from `<img>`, canvas,
+   `ImageBitmap`, `ImageData` and `Blob`. The cost rows `canvas` and `canvasidle` (below). Live check: a page draws a decoded
+   picture on a canvas, calls `toBlob`, and the result decodes back to the same size and close pixels.
+2. **Paths, clip and transforms:** all path calls, `fill` and `stroke` with all line styles, `setLineDash`, `clip`, `Path2D`,
+   `isPointInPath`, `isPointInStroke`, `save`, `restore`, the transform calls.
+3. **Composite modes and the drawing state as accessors** that validate and normalize as Chrome does.
+4. **Text:** `fillText`, `strokeText`, full `TextMetrics`.
+5. **OffscreenCanvas** on the main thread.
+6. **Gradients and patterns.**
+
+Cost rows (added in step 1, to `tools/js/cost_rows.txt`):
+
+- `examples/browser_load canvas 1` and `10`: N rectangles and one `drawImage` on a 512x512 canvas, read once with `getImageData`.
+- `examples/browser_load canvasidle 1` and `10`: the same draws, no read. It shows near zero raster instructions. It guards the
   lazy design.
-- Peak memory: the `canvasidle` case also prints peak RSS, which must not grow with the canvas size.
 
 ## 7. Open questions for the owner
+
+Answers (2026-11-26): 1 is no (option B). 2 is open (see "Encoders"). 3 to 6 have no owner answer. Section 6 uses the
+defaults of the brief: Chrome's size limits, one text path, today's paint input, any stable output.
 
 1. tiny-skia as a new dependency (+292 KB, 3.1 s clean build): yes or no? If no, option B and a much longer plan.
 2. JPEG: J1 (crate), J2 (own encoder) or J3 (PNG only)?
