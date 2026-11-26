@@ -901,7 +901,11 @@ impl Engine for Realm {
     }
 
     fn run_script<'s>(&mut self, source: &str) -> Result<Local<'s>, Error<'s>> {
-        self.a_run_script(source)
+        self.a_run_script(source, None)
+    }
+
+    fn run_script_named<'s>(&mut self, source: &str, name: &str) -> Result<Local<'s>, Error<'s>> {
+        self.a_run_script(source, Some(name))
     }
 
     fn compile_function<'s>(&mut self, name: &str, params: &str, body: &str) -> Result<Local<'s>, Error<'s>> {

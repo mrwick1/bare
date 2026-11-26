@@ -178,6 +178,7 @@ pub trait Ops<E: Eng>: Sized {
     fn eval_function_o(&mut self) -> Result<E::Obj, Fault<E>>;
     fn eval_global_o(&mut self, v: E::Raw) -> Result<E::Raw, Fault<E>>;
     fn run_script_o(&mut self, source: &str) -> Result<E::Raw, Fault<E>>;
+    fn run_script_named_o(&mut self, source: &str, name: &str) -> Result<E::Raw, Fault<E>>;
     fn call_scoped_o(&mut self, f: E::Raw, this: E::Raw, args: &[E::Raw], scope: &[E::Obj]) -> Result<E::Raw, Fault<E>>;
     fn queue_microtask_o(&mut self, cb: E::Raw) -> Result<(), Fault<E>>;
     fn host_scope_o<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T, Fault<E>>) -> Result<T, Fault<E>>;

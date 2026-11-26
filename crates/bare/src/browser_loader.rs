@@ -446,7 +446,9 @@ impl<E: Eng> Dom<E> {
             s.pending_bytes.set(s.pending_bytes.get().saturating_sub(text.len()));
             it.host_scope_o(|it| crate::browser_frames::activate(self, it))?;
             let was = s.current.replace(Some(node));
-            let r = it.run_script_o(&text);
+            // An inline script: Chrome names its stack frames with the document URL.
+            let doc = self.cur_rec().map(|r| r.href()).unwrap_or_default();
+            let r = it.run_script_named_o(&text, doc.split('#').next().unwrap_or(""));
             s.current.set(was);
             match r {
                 Ok(_) => {}
@@ -1320,8 +1322,8 @@ impl<E: Eng> Run<'_, E> {
     /// Run one script in the realm with `currentScript` set. A throw is reported and ends only this script. `currentScript` stays
     /// set through the microtask checkpoint of the script (HTML "clean up after running script"), then it is cleared. The dynamic
     /// inline scripts that this script queued run first, as before; they leave `currentScript` to this one for the checkpoint.
-    fn run_one(&mut self, node: NodeId, source: &str, what: &str) -> Flow {
-        let r = self.exec_one(node, source, what).and_then(|_| self.run_queued_inline()).and_then(|_| {
+    fn run_one(&mut self, node: NodeId, source: &str, what: &str, name: Option<&str>) -> Flow {
+        let r = self.exec_one(node, source, what, name).and_then(|_| self.run_queued_inline()).and_then(|_| {
             self.dom.scripts.current.set(Some(node));
             self.checkpoint("microtask checkpoint")
         });
@@ -1329,14 +1331,23 @@ impl<E: Eng> Run<'_, E> {
         r
     }
 
-    /// `run_one` without the checkpoint. It leaves `currentScript` set.
-    fn exec_one(&mut self, node: NodeId, source: &str, what: &str) -> Flow {
+    /// `run_one` without the checkpoint. It leaves `currentScript` set. `name`: the URL of an external script; `None` is the document URL
+    /// (an inline script), as in Chrome stack frames.
+    fn exec_one(&mut self, node: NodeId, source: &str, what: &str, name: Option<&str>) -> Flow {
         self.budget()?;
         let dom = self.dom.clone();
         if let Err(e) = self.b.it.host_scope_o(|it| crate::browser_frames::activate(&dom, it)) { return self.abort(e, what); }
         self.dom.scripts.current.set(Some(node));
         let t = bare_net::trace::on().then(Instant::now);
-        let r = self.b.run_script(source);
+        let doc_url;
+        let name = match name {
+            Some(n) => n,
+            None => {
+                doc_url = self.dom.cur_rec().map(|r| r.href()).unwrap_or_default();
+                doc_url.split('#').next().unwrap_or("")
+            }
+        };
+        let r = self.b.run_script_named(source, name);
         if let Some(t) = t {
             bare_net::trace::mark(|| format!("script {what}"), t.elapsed().as_micros() as u64);
         }
@@ -1380,7 +1391,7 @@ impl<E: Eng> Run<'_, E> {
                 }
                 continue;
             }
-            let r = self.exec_one(node, &text, "dynamic inline script");
+            let r = self.exec_one(node, &text, "dynamic inline script", None);
             self.dom.scripts.current.set(None);
             r?;
         }
@@ -1425,10 +1436,11 @@ impl<E: Eng> Run<'_, E> {
     }
 
     /// An external script has its result: run it and send `load`, or send `error`. Nothing failed is ever run.
-    fn finish_external(&mut self, node: NodeId, what: &str, text: Result<String, String>) -> Flow {
+    /// `name`: the URL of the script for its stack frames.
+    fn finish_external(&mut self, node: NodeId, what: &str, name: &str, text: Result<String, String>) -> Flow {
         match text {
             Ok(text) => {
-                self.run_one(node, &text, what)?;
+                self.run_one(node, &text, what, Some(name))?;
                 self.after_js()?;
                 self.fire(EvTarget::Node::<E>(node), "load", false)?;
             }
@@ -1462,14 +1474,14 @@ impl<E: Eng> Run<'_, E> {
                     self.finish_module(p.node, &format!("inline module #{}", p.n), &base, Ok(text), false)?;
                     return self.after_js();
                 }
-                self.run_one(p.node, &text, &format!("inline script #{}", p.n))?;
+                self.run_one(p.node, &text, &format!("inline script #{}", p.n), None)?;
                 self.after_js()
             }
             Source::Data => {
                 // Fetch's "data: URL processor": the body as UTF-8. A classic script does not check the MIME type here.
                 let src = { let doc = self.dom.doc.borrow(); doc.find_atom("src").and_then(|a| doc.attr(p.node, a)).unwrap_or_default().trim_matches(|c: char| c.is_ascii_whitespace()).to_string() };
                 let text = crate::images::data_url(&src).map(|b| String::from_utf8_lossy(&b).into_owned()).ok_or_else(|| "a data: URL that does not decode".to_string());
-                self.finish_external(p.node, &format!("data: script #{}", p.n), text)
+                self.finish_external(p.node, &format!("data: script #{}", p.n), &src, text)
             }
             Source::External(t) => {
                 let what = label(&self.disc.targets[t].url);
@@ -1514,7 +1526,8 @@ impl<E: Eng> Run<'_, E> {
                     self.finish_module(p.node, &what, &url, text, true)?;
                     return self.after_js();
                 }
-                self.finish_external(p.node, &what, text)
+                let name = self.disc.targets[t].url.to_string();
+                self.finish_external(p.node, &what, &name, text)
             }
         }
     }
@@ -1530,8 +1543,8 @@ impl<E: Eng> Run<'_, E> {
         self.budget()?;
         self.feed_if_ran()?;
         match next {
-            Ext::Fail(node) => self.finish_external(node, "dynamic script", Err("empty or bad src".into()))?,
-            Ext::Text(node, text) => self.finish_external(node, "blob script", text)?,
+            Ext::Fail(node) => self.finish_external(node, "dynamic script", "", Err("empty or bad src".into()))?,
+            Ext::Text(node, text) => self.finish_external(node, "blob script", "<anonymous>", text)?,
             Ext::Fetch(node, url) => {
                 let what = label(&url);
                 let module = self.dom.scripts.modules.borrow().nodes.contains(&node);
@@ -1551,7 +1564,7 @@ impl<E: Eng> Run<'_, E> {
                     self.finish_module(node, &what, &target.url, text, true)?;
                     self.after_js()?;
                 } else {
-                    self.finish_external(node, &what, text)?;
+                    self.finish_external(node, &what, &target.url.to_string(), text)?;
                 }
             }
         }

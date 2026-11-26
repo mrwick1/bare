@@ -108,6 +108,12 @@ pub trait LazyCompile {
     fn page_source_of(&self, _ci: usize) -> Option<&str> {
         None
     }
+    /// Name the text of the top level code `ci` (its URL) for the stack frames of all its functions.
+    fn set_name(&mut self, _ci: usize, _name: &str) {}
+    /// The name of the text that the code `ci` came from, `None` for a text with no name.
+    fn name_of(&self, _ci: usize) -> Option<&str> {
+        None
+    }
     /// Compile `src` as a script and add it at the end of `codes`. Gives the index of its top level code: a function with no
     /// parameters (`api.rs`, `Realm::run_text`).
     fn script_in(

@@ -266,6 +266,9 @@ impl Ops<New> for Realm {
     fn run_script_o(&mut self, source: &str) -> Result<Value, Fault<New>> {
         run_v(self, |r| r.run_script(source))
     }
+    fn run_script_named_o(&mut self, source: &str, name: &str) -> Result<Value, Fault<New>> {
+        run_v(self, |r| r.run_script_named(source, name))
+    }
     fn call_scoped_o(&mut self, f: Value, this: Value, args: &[Value], scope: &[NV]) -> Result<Value, Fault<New>> {
         run_v(self, |r| {
             let (fl, tl) = (lc(r, f), lc(r, this));
