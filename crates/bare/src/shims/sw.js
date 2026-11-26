@@ -19,6 +19,8 @@
     clientPost: 14,
     trust: 16,
     focus: 17,
+    show: 20,
+    notes: 21,
   };
   var UVC = ["imports", "all", "none"];
   var TOKEN = {};
@@ -183,6 +185,35 @@
         return Promise.reject(e);
       }
       return Promise.resolve(sw(OP.unregister, s.id));
+    }
+    showNotification(title, options) {
+      try {
+        var s = st(this);
+        if (arguments.length < 1)
+          throw new TypeError(
+            "Failed to execute 'showNotification' on 'ServiceWorkerRegistration': 1 argument required, but only 0 present.",
+          );
+        sw(OP.show, s.id, title, options);
+        return Promise.resolve();
+      } catch (e) {
+        return Promise.reject(e);
+      }
+    }
+    getNotifications(filter) {
+      try {
+        var s = st(this);
+        var t = "";
+        if (filter !== undefined && filter !== null) {
+          if (typeof filter !== "object" && typeof filter !== "function")
+            throw new TypeError(
+              "Failed to execute 'getNotifications' on 'ServiceWorkerRegistration': The provided value is not of type 'GetNotificationOptions'.",
+            );
+          if (filter.tag !== undefined) t = String(filter.tag);
+        }
+        return Promise.resolve(sw(OP.notes, s.id, t));
+      } catch (e) {
+        return Promise.reject(e);
+      }
     }
   }
   tag(ServiceWorkerRegistration, "ServiceWorkerRegistration");
@@ -405,9 +436,17 @@
       }
     }
     function end(s) {
-      if (--s.pending === 0 && !s.active && s.id !== undefined)
-        sw(OP.done, s.id, s.ok);
+      if (--s.pending === 0 && !s.active && s.id !== undefined) finish(s);
     }
+    // The event ended: tell the host. A `notificationclick` lets a window take the focus until then.
+    function finish(s) {
+      if (s.click) {
+        s.click = false;
+        interact--;
+      }
+      sw(OP.done, s.id, s.ok);
+    }
+    var interact = 0;
     class ExtendableMessageEvent extends ExtendableEvent {
       constructor(type, init) {
         super(type, init);
@@ -437,8 +476,39 @@
         });
       }
     }
+    var N = new WeakMap();
+    class NotificationEvent extends ExtendableEvent {
+      constructor(type, init) {
+        if (arguments.length < 2)
+          throw new TypeError(
+            "Failed to construct 'NotificationEvent': 2 arguments required, but only " +
+              arguments.length +
+              " present.",
+          );
+        if (!(init && init.notification instanceof Notification))
+          throw new TypeError(
+            "Failed to construct 'NotificationEvent': Failed to read the 'notification' property from 'NotificationEventInit': Required member is undefined.",
+          );
+        super(type, init);
+        N.set(this, {
+          n: init.notification,
+          a: init.action === undefined ? "" : String(init.action),
+        });
+      }
+      get notification() {
+        var s = N.get(this);
+        if (!s) throw new TypeError("Illegal invocation");
+        return s.n;
+      }
+      get action() {
+        var s = N.get(this);
+        if (!s) throw new TypeError("Illegal invocation");
+        return s.a;
+      }
+    }
     tag(ExtendableEvent, "ExtendableEvent");
     tag(ExtendableMessageEvent, "ExtendableMessageEvent");
+    tag(NotificationEvent, "NotificationEvent");
 
     class Client {
       constructor() {
@@ -483,7 +553,7 @@
         } catch (e) {
           return Promise.reject(e);
         }
-        if (!sw(OP.focus, s.id))
+        if (interact < 1 || !sw(OP.focus, s.id))
           return reject(
             "InvalidAccessError",
             "Failed to execute 'focus' on 'WindowClient': Not allowed to focus a window.",
@@ -639,6 +709,7 @@
     define("ServiceWorkerRegistration", ServiceWorkerRegistration);
     define("ExtendableEvent", ExtendableEvent);
     define("ExtendableMessageEvent", ExtendableMessageEvent);
+    define("NotificationEvent", NotificationEvent);
     define("Client", Client);
     define("WindowClient", WindowClient);
     define("Clients", Clients);
@@ -647,10 +718,14 @@
       var s = E.get(ev);
       s.id = id;
       s.active = true;
+      if (ev.type === "notificationclick") {
+        s.click = true;
+        interact++;
+      }
       sw(OP.trust, ev);
       self.dispatchEvent(ev);
       s.active = false;
-      if (s.pending === 0) sw(OP.done, id, s.ok);
+      if (s.pending === 0) finish(s);
     }
     return {
       // `r`: the registration snapshot, `w`: this worker. The rest depends on `kind`.
@@ -669,6 +744,8 @@
               origin: new URL(c[1]).origin,
             }),
           );
+        else if (kind === "notificationclick" || kind === "notificationclose")
+          fire(id, new NotificationEvent(kind, { notification: a, action: b }));
         else if (kind === "state") setState(a, b);
       },
     };

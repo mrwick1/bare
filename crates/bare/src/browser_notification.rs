@@ -26,7 +26,12 @@
 //!   "notifications" has the state of `Notification.permission`; another known name is "prompt"; an unknown name rejects with a
 //!   `TypeError`, as in Chrome. A status with a listener is a root. `Browser::set_permission` fires a trusted `change` at each live
 //!   status whose state moved. There are no `Permissions` and `PermissionStatus` globals.
-//! - Not here: `ServiceWorkerRegistration.showNotification`, an OS notification.
+//! - `ServiceWorkerRegistration.showNotification(title, options)` (`show_persistent`) reads the same options; `actions` keeps the first
+//!   `maxActions`. The notification lives in the session (`sw_hub.rs`), not in a realm, and a page and a registration notification share
+//!   the ids. `getNotifications({tag})` gives a new `Notification` object for each (`persistent`): its `close()` closes the shared
+//!   notification with no event. A click or a close by the user fires `notificationclick` or `notificationclose` in the service worker
+//!   (`browser_sw.rs`). In a service worker global `new Notification` throws a `TypeError`, as in Chrome.
+//! - Not here: an OS notification.
 
 use crate::browser::*;
 use crate::browser_handlers::{handler_get, handler_set};
@@ -52,8 +57,6 @@ pub(crate) struct NotificationHost<E: Eng> {
     shown: RefCell<Vec<<E as Eng>::Obj>>,
     /// The event log that an agent drains (`Browser::take_notification_events`). No cap (owner decision, 2026-11-26).
     events: RefCell<Vec<NotificationEvent>>,
-    /// The id of the last shown notification.
-    next_id: Cell<u64>,
     /// The prototype and the constructor, once made. Roots.
     made: Cell<Option<[<E as Eng>::Obj; 2]>>,
     /// `navigator.permissions` and the `PermissionStatus` prototype, once made. Roots.
@@ -84,6 +87,10 @@ struct Note<E: Eng> {
     /// The permission was "granted" at the constructor.
     granted: bool,
     state: State,
+    /// The id of the session notification of a `getNotifications` object (0 for a page notification).
+    pid: u64,
+    /// The buttons of a session notification.
+    actions: Vec<NotificationAction>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -110,6 +117,8 @@ pub struct NotificationInfo {
     pub silent: bool,
     /// `timestamp` of the notification: ms since the epoch.
     pub at_ms: f64,
+    /// The buttons (a service worker notification only).
+    pub actions: Vec<NotificationAction>,
 }
 
 /// An entry of the event log (`Browser::take_notification_events`). `kind` is "shown", "replaced", "closed", "clicked" or
@@ -221,6 +230,9 @@ fn make<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, E::Obj> {
 /// `new Notification(title, options)`: the options as Chrome reads them (`NotificationOptions`, members in name order).
 fn ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
     const WHO: &str = "Failed to construct 'Notification'";
+    if d.sw.version.get() != 0 {
+        return Err(s.type_error(&format!("{WHO}: Illegal constructor. Use ServiceWorkerRegistration.showNotification() instead.")));
+    }
     let default = d.notification.made.get().expect("made")[0];
     let default = d.obj_local(s, default);
     let proto = s.proto_from_new_target(default)?;
@@ -230,15 +242,36 @@ fn ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) ->
     };
     let title = d.string_arg_s(s, a0)?;
     let opts = arg_s::<E>(s, a, 1);
+    let (mut n, data, vibrate) = options(d, s, title, opts, WHO)?;
+    if !n.actions.is_empty() {
+        return Err(s.type_error(&format!("{WHO}: Actions are only supported for persistent notifications shown using ServiceWorkerRegistration.showNotification().")));
+    }
+    check(s, &n, vibrate, WHO)?;
+    if let Some(v) = data {
+        let c = crate::browser_navigation_state::clone_with(d, s, v, &[])?.0;
+        n.data = s.engine().raw(c);
+    }
+    n.granted = state(d, "notifications") == "granted";
+    old_v::<E>(s, |it| {
+        let o = d.obj(it, proto)?;
+        d.st.borrow_mut().add_target(it, o, Owner::Notification(o));
+        d.notification.notes.borrow_mut().insert(o, n);
+        d.schedule(d.now_ms(), Task::Notification(o))?;
+        Ok(E::obj_raw(o))
+    })
+}
+
+/// Read `NotificationOptions` (members in name order) into a new note. Gives the note, `data` (when present) and whether `vibrate`
+/// is present. `who` starts the error messages.
+fn options<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, title: String, opts: Local<'s>, who: &str) -> Res<'s, (Note<E>, Option<Local<'s>>, bool)> {
     let null = s.null();
-    let mut n = Note::<E> { id: 0, title, body: String::new(), tag: String::new(), icon: String::new(), badge: String::new(), lang: String::new(), dir: "auto", data: s.engine().raw(null), silent: None, renotify: false, require: false, timestamp: s.wall_now_ms().trunc(), granted: false, state: State::Pending };
+    let mut n = Note::<E> { id: 0, title, body: String::new(), tag: String::new(), icon: String::new(), badge: String::new(), lang: String::new(), dir: "auto", data: s.engine().raw(null), silent: None, renotify: false, require: false, timestamp: s.wall_now_ms().trunc(), granted: false, state: State::Pending, pid: 0, actions: Vec::new() };
     let mut data = None;
     let mut vibrate = false;
-    let mut persistent_only = false;
     match s.type_of(opts) {
         Type::Undefined | Type::Null => {}
         Type::Object | Type::Function => {
-            persistent_only = !actions_member(d, s, opts, WHO)?.is_empty();
+            n.actions = actions_member(d, s, opts, who)?;
             n.badge = url_member(d, s, opts, "badge")?;
             n.body = text_member(d, s, opts, "body")?;
             let v = s.get_str(opts, "data")?;
@@ -252,7 +285,7 @@ fn ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) ->
                     "auto" => "auto",
                     "ltr" => "ltr",
                     "rtl" => "rtl",
-                    _ => return Err(s.type_error(&format!("{WHO}: Failed to read the 'dir' property from 'NotificationOptions': The provided value '{t}' is not a valid enum value of type NotificationDirection."))),
+                    _ => return Err(s.type_error(&format!("{who}: Failed to read the 'dir' property from 'NotificationOptions': The provided value '{t}' is not a valid enum value of type NotificationDirection."))),
                 };
             }
             n.icon = url_member(d, s, opts, "icon")?;
@@ -272,27 +305,66 @@ fn ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) ->
             let v = s.get_str(opts, "vibrate")?;
             vibrate = s.type_of(v) != Type::Undefined;
         }
-        _ => return Err(s.type_error(&format!("{WHO}: parameter 2 is not of type 'NotificationOptions'."))),
+        _ => return Err(s.type_error(&format!("{who}: parameter 2 is not of type 'NotificationOptions'."))),
     }
-    if persistent_only {
-        return Err(s.type_error(&format!("{WHO}: Actions are only supported for persistent notifications shown using ServiceWorkerRegistration.showNotification().")));
-    }
+    Ok((n, data, vibrate))
+}
+
+/// The checks of Chrome after the options are read.
+fn check<'s, E: Eng>(s: &mut Sc<'s, E>, n: &Note<E>, vibrate: bool, who: &str) -> Res<'s, ()> {
     if n.silent == Some(true) && vibrate {
-        return Err(s.type_error(&format!("{WHO}: Silent notifications must not specify vibration patterns.")));
+        return Err(s.type_error(&format!("{who}: Silent notifications must not specify vibration patterns.")));
     }
     if n.renotify && n.tag.is_empty() {
-        return Err(s.type_error(&format!("{WHO}: Notifications which set the renotify flag must specify a non-empty tag.")));
+        return Err(s.type_error(&format!("{who}: Notifications which set the renotify flag must specify a non-empty tag.")));
     }
-    if let Some(v) = data {
-        let c = crate::browser_navigation_state::clone_with(d, s, v, &[])?.0;
-        n.data = s.engine().raw(c);
+    Ok(())
+}
+
+/// `registration.showNotification(title, options)` of the registration `reg` (`browser_sw.rs`), as Chrome checks it: the options, an
+/// active worker, the grant, then `check`. The notification goes into the session list.
+pub(crate) fn show_persistent<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, reg: u64, title: Local<'s>, opts: Local<'s>) -> Res<'s, ()> {
+    const WHO: &str = "Failed to execute 'showNotification' on 'ServiceWorkerRegistration'";
+    let title = d.string_arg_s(s, title)?;
+    let (mut n, data, vibrate) = options(d, s, title, opts, WHO)?;
+    let hub = d.nav.s.borrow().store.sw_hub();
+    if !hub.borrow().has_active(reg) {
+        return Err(s.type_error(&format!("{WHO}: No active registration available on the ServiceWorkerRegistration.")));
     }
-    n.granted = state(d, "notifications") == "granted";
+    if state(d, "notifications") != "granted" {
+        return Err(s.type_error(&format!("{WHO}: No notification permission has been granted for this origin.")));
+    }
+    check(s, &n, vibrate, WHO)?;
+    n.actions.truncate(2);
+    let data = match data {
+        Some(v) if s.type_of(v) != Type::Null => Some(std::cell::RefCell::new(crate::browser_navigation_state::clone_state_with(d, s, v, &[])?)),
+        _ => None,
+    };
+    let origin = crate::browser_basics::doc_origin(d);
+    let mut h = hub.borrow_mut();
+    let id = h.note_id();
+    h.show_note(crate::sw_hub::PNote { id, reg, origin, title: n.title, body: n.body, tag: n.tag, icon: n.icon, badge: n.badge, lang: n.lang, dir: n.dir, silent: n.silent, renotify: n.renotify, require: n.require, timestamp: n.timestamp, actions: n.actions, data });
+    Ok(())
+}
+
+/// A new `Notification` object of this realm for the session notification `p` (`getNotifications`, a `notificationclick`).
+pub(crate) fn persistent<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, p: &crate::sw_hub::PNote) -> Res<'s, Local<'s>> {
+    let proto = match d.notification.made.get() {
+        Some(m) => m[0],
+        None => {
+            old::<E, _>(s, |it| make(d, it))?;
+            d.notification.made.get().expect("made")[0]
+        }
+    };
+    let data = match &p.data {
+        Some(c) => crate::browser_navigation_state::materialize(d, s, &mut c.borrow_mut())?,
+        None => s.null(),
+    };
+    let n = Note::<E> { id: p.id, title: p.title.clone(), body: p.body.clone(), tag: p.tag.clone(), icon: p.icon.clone(), badge: p.badge.clone(), lang: p.lang.clone(), dir: p.dir, data: s.engine().raw(data), silent: p.silent, renotify: p.renotify, require: p.require, timestamp: p.timestamp, granted: true, state: State::Gone, pid: p.id, actions: p.actions.clone() };
     old_v::<E>(s, |it| {
         let o = d.obj(it, proto)?;
         d.st.borrow_mut().add_target(it, o, Owner::Notification(o));
         d.notification.notes.borrow_mut().insert(o, n);
-        d.schedule(d.now_ms(), Task::Notification(o))?;
         Ok(E::obj_raw(o))
     })
 }
@@ -411,8 +483,7 @@ impl<E: Eng> Dom<E> {
     /// Put `o` in the list. An old notification with the same tag leaves the list with no event ("replaced").
     fn show_note(&self, o: E::Obj) {
         let h = &self.notification;
-        let id = h.next_id.get() + 1;
-        h.next_id.set(id);
+        let id = self.nav.s.borrow().store.sw_hub().borrow_mut().note_id();
         let mut notes = h.notes.borrow_mut();
         let tag = notes[&o].tag.clone();
         if !tag.is_empty() {
@@ -531,6 +602,12 @@ fn timestamp_get<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: 
 /// `close()`: a shown or pending notification leaves the list, and a task fires `close`. Else nothing.
 fn close<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
     let o = d.note_of(s, this)?;
+    let pid = d.notification.notes.borrow()[&o].pid;
+    if pid != 0 {
+        let origin = crate::browser_basics::doc_origin(d);
+        d.nav.s.borrow().store.sw_hub().borrow_mut().close_note(pid, &origin);
+        return Ok(s.undefined());
+    }
     let closed = old::<E, _>(s, |_| Ok(d.close_note(o, true)))?;
     if closed {
         lift::<E, _>(s, d.schedule(d.now_ms(), Task::Notification(o)))?;
@@ -578,10 +655,21 @@ fn max_actions<'s, E: Eng>(_: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<
     Ok(s.number(2.0))
 }
 
-/// A page notification has no actions: a new frozen empty array.
+/// The buttons as a new frozen array of frozen `{action, title, icon}` objects (always empty for a page notification).
 fn actions_get<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
-    d.note_of(s, this)?;
-    let a = s.new_array(&[])?;
+    let o = d.note_of(s, this)?;
+    let list = d.notification.notes.borrow()[&o].actions.clone();
+    let mut items = Vec::with_capacity(list.len());
+    for x in &list {
+        let it = s.new_object()?;
+        for (k, v) in [("action", &x.action), ("title", &x.title), ("icon", &x.icon)] {
+            let v = s.string(v)?;
+            s.define_str(it, k, v, Attrs { writable: true, enumerable: true, configurable: true })?;
+        }
+        s.set_integrity(it, true)?;
+        items.push(it);
+    }
+    let a = s.new_array(&items)?;
     s.set_integrity(a, true)?;
     Ok(a)
 }
@@ -713,37 +801,67 @@ fn status_hset<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Ar
 }
 
 impl<E: Eng> crate::browser::Browser<E> {
-    /// The live notifications of the page, oldest first.
+    /// The live notifications of the page and of the service workers of its origin, oldest first.
     pub fn notifications(&self) -> Vec<NotificationInfo> {
         let h = &self.dom.notification;
         let origin = crate::browser_basics::doc_origin(&self.dom);
         let notes = h.notes.borrow();
-        h.shown
+        let mut out: Vec<NotificationInfo> = h
+            .shown
             .borrow()
             .iter()
             .map(|o| {
                 let n = &notes[o];
-                NotificationInfo { id: n.id, origin: origin.clone(), title: n.title.clone(), body: n.body.clone(), tag: n.tag.clone(), icon: n.icon.clone(), silent: n.silent == Some(true), at_ms: n.timestamp }
+                NotificationInfo { id: n.id, origin: origin.clone(), title: n.title.clone(), body: n.body.clone(), tag: n.tag.clone(), icon: n.icon.clone(), silent: n.silent == Some(true), at_ms: n.timestamp, actions: Vec::new() }
             })
-            .collect()
+            .collect();
+        let hub = self.dom.nav.s.borrow().store.sw_hub();
+        if hub.borrow().has_regs() {
+            out.extend(hub.borrow().note_infos(&origin));
+            out.sort_by_key(|n| n.id);
+        }
+        out
     }
 
-    /// The event log since the last call (all of it: there is no cap).
+    /// The event log since the last call (all of it: there is no cap), with the events of the service worker notifications of the
+    /// origin.
     pub fn take_notification_events(&mut self) -> Vec<NotificationEvent> {
-        std::mem::take(&mut *self.dom.notification.events.borrow_mut())
+        let mut out = std::mem::take(&mut *self.dom.notification.events.borrow_mut());
+        let origin = crate::browser_basics::doc_origin(&self.dom);
+        out.extend(self.dom.nav.s.borrow().store.sw_hub().borrow_mut().take_log(&origin));
+        out
     }
 
     /// The number of entries in the event log, which this does not drain.
     pub fn notification_event_count(&self) -> usize {
-        self.dom.notification.events.borrow().len()
+        let origin = crate::browser_basics::doc_origin(&self.dom);
+        self.dom.notification.events.borrow().len() + self.dom.nav.s.borrow().store.sw_hub().borrow().log_count(&origin)
     }
 
     /// The user clicks the live notification `id`: a trusted, cancelable `click` fires at it, and the log says "clicked". It stays in
     /// the list, as in Chrome. A click that no listener cancels brings the page back from the background (the standard: the user agent
     /// focuses the window). Gives whether a listener cancelled the click, or `None` for no live notification `id`.
     pub fn click_notification(&mut self, id: u64) -> R<E, Option<bool>> {
+        self.click_notification_action(id, "")
+    }
+
+    /// `click_notification` on the button `action` ("" for the notification itself). A service worker notification fires
+    /// `notificationclick` in its worker, which starts when it does not run (this page hosts it); it gives `Some(false)`. A page
+    /// notification has no buttons.
+    pub fn click_notification_action(&mut self, id: u64, action: &str) -> R<E, Option<bool>> {
         let dom = self.dom.clone();
-        let Some(o) = live_note(&dom, id) else { return Ok(None) };
+        let Some(o) = live_note(&dom, id) else {
+            let origin = crate::browser_basics::doc_origin(&dom);
+            let hub = dom.nav.s.borrow().store.sw_hub();
+            let ok = hub.borrow_mut().click_note(id, &origin, action);
+            if ok {
+                crate::browser_sw::become_host(&dom);
+            }
+            return Ok(ok.then_some(false));
+        };
+        if !action.is_empty() {
+            return Ok(None);
+        }
         let ev = event(&dom, "clicked", &dom.notification.notes.borrow()[&o]);
         dom.notification.events.borrow_mut().push(ev);
         let canceled = self.fire_from_host(&dom, o, "click", true)?;
@@ -757,7 +875,15 @@ impl<E: Eng> crate::browser::Browser<E> {
     /// `id` was live.
     pub fn close_notification(&mut self, id: u64) -> R<E, bool> {
         let dom = self.dom.clone();
-        let Some(o) = live_note(&dom, id) else { return Ok(false) };
+        let Some(o) = live_note(&dom, id) else {
+            let origin = crate::browser_basics::doc_origin(&dom);
+            let hub = dom.nav.s.borrow().store.sw_hub();
+            let ok = hub.borrow_mut().user_close_note(id, &origin);
+            if ok {
+                crate::browser_sw::become_host(&dom);
+            }
+            return Ok(ok);
+        };
         dom.close_note(o, false);
         self.fire_from_host(&dom, o, "close", false).map(|_| true)
     }

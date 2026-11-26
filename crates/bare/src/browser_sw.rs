@@ -80,6 +80,12 @@ fn become_client<E: Eng>(d: &Dom<E>, control: bool) -> u64 {
     id
 }
 
+/// An agent clicked or closed a service worker notification of this page's origin: the page becomes a client, so its turns can host
+/// the worker that gets the event.
+pub(crate) fn become_host<E: Eng>(d: &Dom<E>) {
+    become_client(d, false);
+}
+
 /// A document loaded: when a registration with an active worker matches its URL, the page is a controlled client. One length check
 /// when the session has no registration.
 pub(crate) fn navigated<E: Eng>(d: &Dom<E>) {
@@ -286,8 +292,28 @@ fn sw_host<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>)
             }
             Ok(s.undefined())
         }
-        // focus(uuid) -> bool: needs a user activation (a notification click), which no event gives yet
-        17 => Ok(s.boolean(false)),
+        // focus(uuid) -> bool: the shim calls it only in a `notificationclick` (Chrome's "allow window interaction")
+        17 => {
+            let uuid = d.arg_str_s(s, a, 1)?;
+            let ok = hub.borrow_mut().focus(&uuid);
+            Ok(s.boolean(ok))
+        }
+        // show(registration id, title, options)
+        20 => {
+            let (reg, title, opts) = (num::<E>(s, a, 1) as u64, arg_s::<E>(s, a, 2), arg_s::<E>(s, a, 3));
+            crate::browser_notification::show_persistent(d, s, reg, title, opts)?;
+            Ok(s.undefined())
+        }
+        // notes(registration id, tag) -> [Notification]
+        21 => {
+            let tag = d.arg_str_s(s, a, 2)?;
+            let list = hub.borrow().notes_of(num::<E>(s, a, 1) as u64, &tag);
+            let mut out = Vec::with_capacity(list.len());
+            for n in &list {
+                out.push(crate::browser_notification::persistent(d, s, n)?);
+            }
+            s.new_array(&out)
+        }
         _ => Ok(s.undefined()),
     }
 }
@@ -391,8 +417,18 @@ impl<E: Eng> Browser<E> {
         }
         let items = hub.borrow_mut().take_inbox(client);
         // A page with no shim yet reads the state when it makes it: the changes are not needed.
-        let items = if dom.sw.helper.borrow().is_some() { items } else { Vec::new() };
+        let shim = dom.sw.helper.borrow().is_some();
         for item in items {
+            if let ToClient::Focus = item {
+                work += 1;
+                if let Err(e) = self.set_background(false) {
+                    crate::browser_console::push_text(&dom, &mut self.it, crate::browser_console::ConsoleLevel::Error, &format!("service worker: focus failed: {e:?}"));
+                }
+                continue;
+            }
+            if !shim {
+                continue;
+            }
             work += 1;
             if let Err(e) = self.sync_item(item) {
                 crate::browser_console::push_text(&dom, &mut self.it, crate::browser_console::ConsoleLevel::Error, &format!("service worker: a change was dropped: {e:?}"));
@@ -428,6 +464,7 @@ impl<E: Eng> Browser<E> {
                     ToClient::Reg { snap, found } => vec![s.string("reg")?, reg_snap::<E>(s, &snap)?, s.boolean(found)],
                     ToClient::State { ver, state } => vec![s.string("state")?, s.number(ver as f64), s.string(state.name())?],
                     ToClient::Ctrl(w) => vec![s.string("ctrl")?, w_snap::<E>(s, &w)?],
+                    ToClient::Focus => return Ok(None),
                     ToClient::Msg { from, origin, mut data } => {
                         let bytes = 16usize.saturating_add(data.cost());
                         let got = dom.receive_clone(s, &mut data)?;
@@ -491,6 +528,12 @@ impl<E: Eng> Browser<E> {
                             };
                             args.push(c);
                             "message"
+                        }
+                        EvKind::Note { click, note, action } => {
+                            let n = crate::browser_notification::persistent(&dom, s, &note)?;
+                            args.push(n);
+                            args.push(s.string(&action)?);
+                            if click { "notificationclick" } else { "notificationclose" }
                         }
                     };
                     args[1] = s.string(kind)?;
