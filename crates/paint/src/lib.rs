@@ -16,6 +16,7 @@ pub mod hit;
 #[cfg(test)]
 mod hit_generated_tests;
 pub mod layer;
+pub mod jpeg;
 pub mod png;
 pub mod raster2d;
 #[cfg(test)]

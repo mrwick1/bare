@@ -12,4 +12,5 @@ ab_glyph = "0.2"
 bare-css = { path = "../css" }
 bare-html = { path = "../html" }
 bare-layout = { path = "../layout" }
+jpeg-encoder = "0.7.1"
 png = "0.18"

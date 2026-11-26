@@ -114,6 +114,12 @@ Taffy (MIT), Servo and Chrome (`NGLayoutResult`) keep the result of a box for th
 | [Noto Serif](https://github.com/notofonts/latin-greek-cyrillic) Regular and Bold, cut down by `pyftsubset` to the characters of the Noto Sans subsets | SIL OFL 1.1 | copied data: `data/fonts/NotoSerif-*-subset.ttf`, built into `bare-paint`, read on the first serif letter | 30 KB each (binary +84 KB with the advance tables). License text: `data/fonts/OFL.txt` (the same copyright line) |
 | [Noto Sans Symbols2](https://github.com/notofonts/symbols) (the Regular file of the system package), cut down to 14 characters by `pyftsubset` | SIL OFL 1.1 | copied data: `data/fonts/NotoSansSymbols2-subset.ttf`, built into `bare-paint` as the fallback face for `✓ ✔ ✕ ✖ ✗ ✘ ★ ☆ ☰ ⚠ ✉ ✎ ✚` | 4 KB (S4 topic 3). License text: `data/fonts/OFL-Symbols2.txt` (the same OFL 1.1, with the copyright line of this font) |
 
+### Adopted for the canvas JPEG encoder (2026-11-26)
+
+| Part | License | Used as | Measured |
+| --- | --- | --- | --- |
+| [jpeg-encoder](https://github.com/vstroebel/jpeg-encoder) 0.7.1 | (MIT OR Apache-2.0) AND IJG (owner accepted IJG, 2026-11-26) | crate: JPEG for `toDataURL` and `toBlob` (`crates/paint/src/jpeg.rs`). The forward DCT (`src/fdct.rs`, `src/avx2/fdct.rs`) is IJG code. The notice is `crates/paint/LICENSE-IJG`. | No dependencies, 3,974 lines, +211,944 B of stripped binary, 1.9 to 2.2 s clean release build. 1600 by 1200: 27.4 ms at quality 92, 16.5 ms at 80 |
+
 ### Adopted for S4 topic 2 (2026-11-05)
 
 | Part | License | Used as | Measured |

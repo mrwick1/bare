@@ -5,8 +5,8 @@
 //! - Draws: `fillRect`, `strokeRect`, `clearRect` (anti-aliased), `drawImage` (3, 5 and 9 arguments) from an `<img>`, a canvas and an
 //!   `ImageBitmap` (bilinear, or nearest when `imageSmoothingEnabled` is false), `putImageData` with a dirty rectangle. A solid
 //!   `fillStyle` or `strokeStyle` (a CSS color) with `globalAlpha`. Paths, the transform and text do nothing yet.
-//! - Reads: `getImageData` gives the pixels, not premultiplied. `toDataURL` and `toBlob` give PNG for every type: `image/jpeg` waits
-//!   for an encoder (the owner decides). `toBlob` encodes on the page thread and calls back in a new task.
+//! - Reads: `getImageData` gives the pixels, not premultiplied. `toDataURL` and `toBlob` give JPEG for `image/jpeg` (`bare_paint::jpeg`)
+//!   and PNG for every other type. `toBlob` encodes on the page thread and calls back in a new task.
 //! - `ImageData` is the HTML Standard interface, lazy (`browser_lazy.rs`). One `ImageData` holds at most [`MAX_BYTES`] (64 MiB): a
 //!   larger one throws a `RangeError` (the same class as a failed allocation in Chrome; the message is ours).
 //! - A canvas over Chrome's size limits (`raster2d::fits`) has no pixels: it draws nothing and reads as blank.
@@ -675,22 +675,22 @@ fn put_image_data<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a:
 // ------------------------------------------------------------------------------------------ encoders
 
 /// The bytes of the canvas `el` in `ty` and its type. `None`: a canvas of no pixels (`data:,` and a `null` Blob).
-/// PNG for every type. `image/jpeg` is the place of a JPEG encoder: none is built yet (the licence of `jpeg-encoder` waits for an owner
-/// decision, `docs/internal/design-canvas-2d.md` section 6), so it gives PNG, as the standard says for a type it does not support.
-fn encode<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, el: Local<'s>, ty: &str, _quality: Option<f64>) -> Res<'s, Option<(Vec<u8>, &'static str)>> {
+/// `image/jpeg` at `quality` (0 to 1, else Chrome's 0.92) with the pixels on black. PNG for every other type, as the standard says for a
+/// type it does not support.
+fn encode<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, el: Local<'s>, ty: &str, quality: Option<f64>) -> Res<'s, Option<(Vec<u8>, &'static str)>> {
     let n = d.el_s(s, el)?;
     let Some(rec) = record_of(d, s, el, n)? else { return Ok(None) };
-    let (w, h, rgba) = {
-        let mut r = lock(&rec);
-        let (w, h) = (r.w, r.h);
-        (w, h, r.rgba(0, 0, w, h))
-    };
-    let png = |rgba: &[u8]| bare_paint::png::encode_rgba(w, h, rgba).ok();
-    let out = match ty.to_ascii_lowercase().as_str() {
-        "image/jpeg" => png(&rgba).map(|b| (b, "image/png")),
-        _ => png(&rgba).map(|b| (b, "image/png")),
-    };
-    Ok(out)
+    let mut r = lock(&rec);
+    let (w, h) = (r.w, r.h);
+    if ty.eq_ignore_ascii_case("image/jpeg") {
+        let q = (quality.unwrap_or(0.92) * 100.0).round().max(1.0) as u8;
+        if let Some(b) = bare_paint::jpeg::encode(w, h, r.flush().map(|p| &p[..]), q) {
+            return Ok(Some((b, "image/jpeg")));
+        }
+    }
+    let rgba = r.rgba(0, 0, w, h);
+    drop(r);
+    Ok(bare_paint::png::encode_rgba(w, h, &rgba).ok().map(|b| (b, "image/png")))
 }
 
 /// The type and quality arguments of `toDataURL` and `toBlob` at `at` and `at + 1`.
