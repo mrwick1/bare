@@ -597,3 +597,7 @@ mod forin_snapshot_tests;
 #[cfg(test)]
 #[path = "regexp_test_fast_tests.rs"]
 mod regexp_test_fast_tests;
+
+#[cfg(test)]
+#[path = "stub_records_tests.rs"]
+mod stub_records_tests;

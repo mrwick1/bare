@@ -69,7 +69,7 @@ impl Realm {
                 return Err(self.error(kind, text));
             }
         };
-        self.fn_info.extend((self.fn_info.len()..self.prog.len()).map(|i| crate::interp::code_info(&self.prog[i])));
+        self.fn_info.extend((self.fn_info.len()..self.prog.len()).map(|i| crate::interp::code_info(&self.prog, i)));
         Ok(ci)
     }
 
