@@ -178,6 +178,8 @@ mod browser_navigation_url;
 #[cfg(test)]
 mod browser_navigation_url_colon_tests;
 #[cfg(test)]
+mod browser_navigation_url_protocol_tests;
+#[cfg(test)]
 mod browser_navigation_tests;
 #[cfg(test)]
 mod browser_clone_tests;
@@ -479,6 +481,8 @@ mod browser_notification_show_tests;
 #[cfg(test)]
 mod browser_notification_click_tests;
 #[cfg(test)]
+mod browser_background_tests;
+#[cfg(test)]
 mod browser_create_document_tests;
 #[cfg(test)]
 mod browser_input_target_ranges_tests;
@@ -532,3 +536,5 @@ mod browser_shared_wait_tests;
 
 #[cfg(test)]
 mod browser_threaded_worker_tests;
+#[cfg(test)]
+mod browser_worker_filereadersync_tests;

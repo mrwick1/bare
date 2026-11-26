@@ -1047,7 +1047,7 @@ impl Server {
     /// Web notifications of the live page (`docs/internal/design-notifications.md`). `list` (default): the events that the agent did not
     /// read (this reads them), then the live notifications. `wait`: the same, after the first new event (up to `timeout_ms`). `click`
     /// and `close` with `id`: as the user. `grant`, `deny`, `reset`: the notification permission of `origin` (default: the origin of
-    /// the page). A profile keeps it.
+    /// the page). A profile keeps it. `background` with `on` (default true): the page goes to the background or comes back.
     fn notifications(&mut self, args: &Value) -> Result<String, String> {
         use bare_drive::Permission;
         let op = args.get("op").and_then(Value::as_str).unwrap_or("list");
@@ -1066,7 +1066,12 @@ impl Server {
                     Some(false) => Ok(format!("closed #{id}")),
                 };
             }
-            _ => return Err(format!("op: {op} is not list, wait, click, close, grant, deny or reset")),
+            "background" => {
+                let on = args.get("on").and_then(Value::as_bool).unwrap_or(true);
+                self.live_mut(args)?.session.set_background(on)?;
+                return Ok(if on { "background on: the page is hidden and has no focus; its timers run at whole seconds" } else { "background off: the page is visible and has focus" }.into());
+            }
+            _ => return Err(format!("op: {op} is not list, wait, click, close, grant, deny, reset or background")),
         };
         // An origin is scheme://host[:port]: a whole URL is cut there.
         let origin = args.get("origin").and_then(Value::as_str).map(|u| match u.find("://") {
@@ -1847,8 +1852,8 @@ fn tools() -> Value {
         },
         {
             "name": "notifications",
-            "description": "Web notifications of the live page (new Notification). op list (default): the events since the last list or wait (shown, replaced, closed, clicked, permission-requested), then the live notifications, one line each with #id, title and body. op wait: the same, at the first new event; timeout_ms (default 30000). op click id=N: the user clicks it (a trusted click; the page usually focuses its chat). op close id=N: the user closes it. op grant, deny or reset: the notification permission of origin (default: the origin of the page). With no decision a page sees \"denied\". A profile keeps the decision. A page reads the permission when it asks: reload it or use its own \"turn on\" link after a grant. An act receipt names each new notification.",
-            "inputSchema": {"type": "object", "properties": {"session": S, "op": {"type": "string", "enum": ["list", "wait", "click", "close", "grant", "deny", "reset"]}, "id": {"type": "integer"}, "origin": {"type": "string"}, "timeout_ms": {"type": "integer"}}},
+            "description": "Web notifications of the live page (new Notification). op list (default): the events since the last list or wait (shown, replaced, closed, clicked, permission-requested), then the live notifications, one line each with #id, title and body. op wait: the same, at the first new event; timeout_ms (default 30000). op click id=N: the user clicks it (a trusted click; the page usually focuses its chat). op close id=N: the user closes it. op grant, deny or reset: the notification permission of origin (default: the origin of the page). With no decision a page sees \"denied\". A profile keeps the decision. A page reads the permission when it asks: reload it or use its own \"turn on\" link after a grant. An act receipt names each new notification. op background on=true (default) or on=false: the page goes to the background (as another tab in front: visibilityState hidden, hasFocus false, blur and visibilitychange; timers run at whole seconds, network messages are not delayed) or comes back. Many chat pages notify only when hidden. A click on a notification that the page does not cancel brings it back. A new document starts in front.",
+            "inputSchema": {"type": "object", "properties": {"session": S, "op": {"type": "string", "enum": ["list", "wait", "click", "close", "grant", "deny", "reset", "background"]}, "id": {"type": "integer"}, "origin": {"type": "string"}, "timeout_ms": {"type": "integer"}, "on": {"type": "boolean"}}},
         },
         {
             "name": "console",

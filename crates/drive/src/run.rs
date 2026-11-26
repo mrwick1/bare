@@ -586,6 +586,17 @@ impl Session {
         })?
     }
 
+    /// Put the page in the background (`on`) or bring it back, as a switch of tabs (`Browser::set_background`). A new document
+    /// starts in front.
+    pub fn set_background(&mut self, on: bool) -> Result<(), String> {
+        self.host.run(move |p| {
+            let Some(b) = p.browser() else { return Err(p.no_document()) };
+            let r = b.set_background(on).map_err(|e| format!("{e:?}"));
+            p.touched();
+            r
+        })?
+    }
+
     /// The URL of the page of now.
     pub fn url(&mut self) -> Option<String> {
         self.host.run(|p| p.url()).ok().flatten()
