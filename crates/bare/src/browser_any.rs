@@ -204,6 +204,7 @@ fwd_try! {
     (&mut) fn ui_drag_select(caret: u32) -> UiOutcome;
     (&mut) fn ui_insert_text(text: &str) -> UiOutcome;
     (&mut) fn ui_key(k: KeyInput, down: bool) -> UiOutcome;
+    (&mut) fn ui_key_at(k: KeyInput, down: bool, caret: Option<u32>) -> UiOutcome;
     (&mut) fn ui_pointer_button(target: Option<NodeId>, p: Pointer, button: u8, pressed: bool, caret: Option<u32>) -> UiOutcome;
     (&mut) fn ui_pointer_leave(p: Pointer) -> UiOutcome;
     (&mut) fn ui_pointer_move(target: Option<NodeId>, p: Pointer) -> UiOutcome;
