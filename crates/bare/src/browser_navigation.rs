@@ -594,7 +594,7 @@ fn loc_set<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, a: Args<'
         if part == Part::Hash {
             // unlike `URL.hash`, an empty value gives an empty fragment, not none
             c.set_fragment(&v);
-        } else if let Err(e) = part.set(&mut c, &v) {
+        } else if let Err(e) = part.set(&mut c, &v).and_then(|()| if c.is_alt() { Err(nu::UErr::Scheme) } else { Ok(()) }) {
             return Err(pr::uerr(d, s, e, "Invalid URL", true));
         }
         if part == Part::Hash && c.frag == before.frag {
