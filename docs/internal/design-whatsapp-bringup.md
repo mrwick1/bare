@@ -3,7 +3,7 @@
 Goal: run WhatsApp Web (`https://web.whatsapp.com/`) in `bare`. Link `bare` as a new device by QR. Then read the chat list,
 read a conversation and send a text message. This file is the running record. Update it as the work moves.
 
-Last updated: 2026-11-25.
+Last updated: 2026-11-26. Work is paused (owner, 2026-11-26).
 
 ## How to run the live journey
 
@@ -216,3 +216,69 @@ list loaded. The chat opened. A text message sent and got two ticks (`ack` 2, de
 
 Open: the worker error "Unrecognized algorithm name" from SubtleCrypto. Service workers are not supported (not fatal). A
 layout panic came once after the page stopped: "layout only asks for the style of a box" (`crates/layout/src/boxes.rs:132`).
+
+## Status on 2026-11-26 (paused)
+
+Owner scope (2026-11-26): send and receive messages, listen to notifications, send media. For received media: view it in
+the page. If that fails, download it to a temporary folder, view it and delete it, when that saves memory.
+
+Live builds: main from `bec30b32` to `a7fa6b36`, profile `wa3`. The profile opens with no new QR scan.
+
+| Feature | State | Evidence |
+| --- | --- | --- |
+| Send text | Works | `ack` 2 (delivered). |
+| Receive text and picture live | Works | A text and a JPEG (250x375) came into the open chat with no reload. |
+| Read messages | Works | Through the store and the rendered chat. |
+| Download a received picture | Works | Viewer download, 11,698 bytes (#1121). |
+| Send a document | Works | `bare-test.txt`, `ack` 2 (#1125). |
+| Send a photo | Works | JPEG 4,123 bytes, 320x120, caption, `ack` 2 (#1129, #1130). |
+| Notifications | Works | First notification in the bare-mcp `notifications` list with the page in background mode. |
+| Send a video | Fails | The preview spinner does not end. Send stays off. |
+| Send an audio file | Fails | Same spinner as video. |
+
+### Fixes merged on 2026-11-25 and 2026-11-26
+
+- #1113: XHR `responseText` decodes x-user-defined.
+- #1115, #1116, #1117, #1118, #1120, #1121: crypto, task aborts, layout, `blob:` images, ResizeObserver, fixed boxes.
+- #1124: an unsupported feature throws `NotSupportedError`. The page goes on.
+- #1125: an `ArrayBuffer` or typed-array request body sends its bytes. Before, media upload got HTTP 415 (hash mismatch).
+- #1126: `DataCloneError` names the type that failed.
+- #1122, #1127, #1129, #1130: canvas 2D on bare's own painter, lazy raster, `drawImage`, `getImageData`, `toBlob`, PNG and
+  JPEG (`jpeg-encoder`, IJG notice). Step 2 of the canvas plan is stopped (owner).
+- #1131: `MessagePort` and `MessageChannel` have their `Symbol.toStringTag`.
+- #1133, #1136 to #1139, #1141: notifications. Permission per origin in the profile. Default stays "denied". A bare-mcp
+  tool `notifications` (grant, deny, reset, list, wait, click, close, background).
+- #1134: an uploaded file gets its media or office type from its extension.
+- #1140: stack frames show the script URL.
+- #1143: `FileReaderSync` in workers.
+- #1148, #1151, #1154, #1156, #1159, #1161, #1163, #1166, #1168: service workers (design S2), notification actions,
+  Cache API, `fetch()` and navigation interception.
+
+### Notifications: the cause
+
+WhatsApp's own setting "Messages: Show notifications" was off on this device (`getGlobalNotificationsEnabled()` false).
+Hypothesis: WhatsApp saved it off when the device linked, because `bare` answered "denied" then. The fix was the setting in
+WhatsApp: Settings (the "You" button), Notifications, Messages, Show notifications. Message notifications use
+`new Notification`. Only test and call notifications use the service worker.
+
+Steps for a live check:
+
+1. `notifications {"op":"grant","origin":"https://web.whatsapp.com"}`, then open the page again with the profile.
+2. `notifications {"op":"background","on":true}`.
+3. `notifications {"op":"wait","timeout_ms":900000}`. The wait blocks the other tool calls of the session.
+
+### Open items
+
+- Video and audio send: the preview waits on a `<video>` element from a `blob:` URL. `bare` has no media decoder, so the
+  element fires `error` (code 4) as Chrome does for a source it cannot play. The cause of the endless spinner is not found.
+- Worker errors, cause not found:
+  - `MessagePort object could not be cloned.` at `iMur7JVH-Cm.js:25256:1554`. WhatsApp lists the port in the transfer
+    list. Tests of that pattern pass in `bare`.
+  - `Cannot read properties of undefined (reading 'operation')` at `Fz8l-_vrIk3.js:437:4283`. This is the search-index
+    worker (`WAWebFtsWorkerDelegate`): a message with no `command` reaches `enqueue`.
+- Groups and Status notifications are off in WhatsApp's settings. The owner said to turn them on. This is not done.
+- Service workers: WhatsApp's `/sw.js` is not checked live. Scripts, images, XHR, workers and frames do not go to the
+  service worker yet.
+- The caption box of the photo editor has no label for the `label=` locator. Use `find role=textbox` and a ref.
+- A paint bug: old search text showed over the "Messages" row in the notification settings.
+- Not tested: a notification click, a message from a chat that is not open, voice notes recorded in the page.
