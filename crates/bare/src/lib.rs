@@ -490,6 +490,8 @@ mod browser_notification_show_tests;
 #[cfg(test)]
 mod browser_notification_click_tests;
 #[cfg(test)]
+mod browser_notification_actions_tests;
+#[cfg(test)]
 mod browser_background_tests;
 #[cfg(test)]
 mod browser_create_document_tests;

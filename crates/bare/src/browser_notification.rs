@@ -5,11 +5,12 @@
 //! `notifications`; `docs/internal/design-notifications.md`).
 //!
 //! - `Notification` is an accessor of the global until the first read, as `Worker` is (`browser_worker.rs`).
-//! - `new Notification(title[, options])` reads `NotificationOptions` in name order: `badge` and `icon` (resolved against the
-//!   document), `body`, `data` (a structured clone), `dir` (an enum: another value is a `TypeError`), `lang`, `renotify`,
-//!   `requireInteraction`, `silent` (null when absent), `tag`, `timestamp` (default: the wall clock) and only the presence of `vibrate`.
-//!   `renotify` with an empty tag, and `silent` with `vibrate`, throw a `TypeError`, as in Chrome. `actions`, `image` and `vibrate`
-//!   are not kept.
+//! - `new Notification(title[, options])` reads `NotificationOptions` in name order: `actions` (a sequence of `NotificationAction`),
+//!   `badge` and `icon` (resolved against the document), `body`, `data` (a structured clone), `dir` (an enum: another value is a
+//!   `TypeError`), `lang`, `renotify`, `requireInteraction`, `silent` (null when absent), `tag`, `timestamp` (default: the wall clock)
+//!   and only the presence of `vibrate`. A non-empty `actions` throws a `TypeError`: only a service worker notification has actions,
+//!   as in Chrome. `renotify` with an empty tag, and `silent` with `vibrate`, throw a `TypeError` too. `image` and `vibrate` are not
+//!   kept. The `actions` getter gives a new frozen empty array.
 //! - A task after the constructor shows it when the permission was "granted" at the constructor: a live notification with the same
 //!   tag leaves the list with no event (the log says "replaced"), the new one joins it, and `show` fires. Without the grant, `error`
 //!   fires. No event object is made when nobody listens.
@@ -20,12 +21,12 @@
 //!   `Browser::set_permission`. `Notification.permission` is "granted" only for a decision "granted" in a secure context. Else it is
 //!   "denied": with no decision too (owner decision, 2026-11-26), so a page never sees "default". `requestPermission([callback])`
 //!   shows no prompt: it gives the state, and with no decision it logs "permission-requested". A function callback gets the state at
-//!   once, not in a later task. A value that is not a function is ignored. `Notification.maxActions` is 0.
+//!   once, not in a later task. A value that is not a function is ignored. `Notification.maxActions` is 2, as in Chrome.
 //! - `navigator.permissions.query({name})` resolves a new `PermissionStatus` (an `EventTarget` with `name`, `state` and `onchange`).
 //!   "notifications" has the state of `Notification.permission`; another known name is "prompt"; an unknown name rejects with a
 //!   `TypeError`, as in Chrome. A status with a listener is a root. `Browser::set_permission` fires a trusted `change` at each live
 //!   status whose state moved. There are no `Permissions` and `PermissionStatus` globals.
-//! - Not here: `ServiceWorkerRegistration.showNotification`, `actions`, an OS notification.
+//! - Not here: `ServiceWorkerRegistration.showNotification`, an OS notification.
 
 use crate::browser::*;
 use crate::browser_handlers::{handler_get, handler_set};
@@ -187,8 +188,9 @@ fn make<E: Eng>(d: &Dom<E>, it: &mut E::Vm) -> R<E, E::Obj> {
         s.define(p, tag, t, Attrs { writable: false, enumerable: false, configurable: true })?;
         Ok(obj_id::<E>(s, f).expect("a function"))
     })?;
-    let getters: [(&str, HS<E>); 12] = [
+    let getters: [(&str, HS<E>); 13] = [
         ("title", title),
+        ("actions", actions_get),
         ("dir", dir_get),
         ("lang", lang_get),
         ("body", body),
@@ -232,9 +234,11 @@ fn ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) ->
     let mut n = Note::<E> { id: 0, title, body: String::new(), tag: String::new(), icon: String::new(), badge: String::new(), lang: String::new(), dir: "auto", data: s.engine().raw(null), silent: None, renotify: false, require: false, timestamp: s.wall_now_ms().trunc(), granted: false, state: State::Pending };
     let mut data = None;
     let mut vibrate = false;
+    let mut persistent_only = false;
     match s.type_of(opts) {
         Type::Undefined | Type::Null => {}
         Type::Object | Type::Function => {
+            persistent_only = !actions_member(d, s, opts, WHO)?.is_empty();
             n.badge = url_member(d, s, opts, "badge")?;
             n.body = text_member(d, s, opts, "body")?;
             let v = s.get_str(opts, "data")?;
@@ -270,6 +274,9 @@ fn ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) ->
         }
         _ => return Err(s.type_error(&format!("{WHO}: parameter 2 is not of type 'NotificationOptions'."))),
     }
+    if persistent_only {
+        return Err(s.type_error(&format!("{WHO}: Actions are only supported for persistent notifications shown using ServiceWorkerRegistration.showNotification().")));
+    }
     if n.silent == Some(true) && vibrate {
         return Err(s.type_error(&format!("{WHO}: Silent notifications must not specify vibration patterns.")));
     }
@@ -288,6 +295,66 @@ fn ctor<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) ->
         d.schedule(d.now_ms(), Task::Notification(o))?;
         Ok(E::obj_raw(o))
     })
+}
+
+/// A `NotificationAction`: `action`, `title`, and `icon` resolved against the document.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NotificationAction {
+    pub action: String,
+    pub title: String,
+    pub icon: String,
+}
+
+/// `options.actions`, read as WebIDL reads a `sequence<NotificationAction>`: an undefined member is an empty list, a value that is not
+/// iterable is a `TypeError`, and each item reads `action` (required), `icon` and `title` (required) in name order. `who` starts the
+/// error messages.
+pub(crate) fn actions_member<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, opts: Local<'s>, who: &str) -> Res<'s, Vec<NotificationAction>> {
+    let v = s.get_str(opts, "actions")?;
+    if s.type_of(v) == Type::Undefined {
+        return Ok(Vec::new());
+    }
+    let ctx = format!("{who}: Failed to read the 'actions' property from 'NotificationOptions'");
+    let iter = if matches!(s.type_of(v), Type::Object | Type::Function) { s.iter_open(v)? } else { None };
+    let Some(mut iter) = iter else {
+        return Err(s.type_error(&format!("{ctx}: The provided value cannot be converted to a sequence.")));
+    };
+    let mut out = Vec::new();
+    loop {
+        let step = match s.iter_next(&mut iter) {
+            Ok(Some(x)) => action_item(d, s, x, &ctx).map(Some),
+            Ok(None) => Ok(None),
+            Err(e) => Err(e),
+        };
+        match step {
+            Ok(Some(a)) => out.push(a),
+            Ok(None) => return Ok(out),
+            Err(e) => return Err(s.iter_fail(&mut iter, e)),
+        }
+    }
+}
+
+/// One `NotificationAction` dictionary of `actions_member`.
+fn action_item<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, x: Local<'s>, ctx: &str) -> Res<'s, NotificationAction> {
+    let empty = matches!(s.type_of(x), Type::Undefined | Type::Null);
+    if !empty && !matches!(s.type_of(x), Type::Object | Type::Function) {
+        return Err(s.type_error(&format!("{ctx}: The provided value is not of type 'NotificationAction'.")));
+    }
+    let missing = |s: &mut Sc<'s, E>, m: &str| Err(s.type_error(&format!("{ctx}: Failed to read the '{m}' property from 'NotificationAction': Required member is undefined.")));
+    if empty {
+        return missing(s, "action");
+    }
+    let v = s.get_str(x, "action")?;
+    if s.type_of(v) == Type::Undefined {
+        return missing(s, "action");
+    }
+    let action = d.string_arg_s(s, v)?;
+    let icon = url_member(d, s, x, "icon")?;
+    let v = s.get_str(x, "title")?;
+    if s.type_of(v) == Type::Undefined {
+        return missing(s, "title");
+    }
+    let title = d.string_arg_s(s, v)?;
+    Ok(NotificationAction { action, title, icon })
 }
 
 /// An option member as a string. A missing member is "".
@@ -508,7 +575,15 @@ fn permission<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'
 }
 
 fn max_actions<'s, E: Eng>(_: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
-    Ok(s.number(0.0))
+    Ok(s.number(2.0))
+}
+
+/// A page notification has no actions: a new frozen empty array.
+fn actions_get<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, this: Local<'s>, _: Args<'s>) -> Res<'s, Local<'s>> {
+    d.note_of(s, this)?;
+    let a = s.new_array(&[])?;
+    s.set_integrity(a, true)?;
+    Ok(a)
 }
 
 /// The promise resolves at once with the state. A function callback gets it too, before the promise. With no decision of the
