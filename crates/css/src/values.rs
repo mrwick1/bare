@@ -873,6 +873,9 @@ pub(crate) fn length(value: f32, unit: &str) -> Option<Length> {
     } else if is("ex") {
         // The x-height of Noto Sans Mono, the one font (`OS/2` `sxHeight` 536 of 1000).
         Some(Length::Em(value * 0.536))
+    } else if is("cap") {
+        // The cap height of the same fonts (`OS/2` `sCapHeight` 714 of 1000).
+        Some(Length::Em(value * 0.714))
     } else if is("ch") {
         Some(Length::Em(value * 0.5))
     } else {
