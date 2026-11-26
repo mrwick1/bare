@@ -53,6 +53,10 @@ mod control_tests;
 #[cfg(test)]
 mod page_tests;
 #[cfg(test)]
+mod page_textarea_wrap_tests;
+#[cfg(test)]
+mod page_textarea_scroll_tests;
+#[cfg(test)]
 mod page_pseudo_style_tests;
 #[cfg(test)]
 mod browser_rects_pseudo_tests;
@@ -66,6 +70,10 @@ mod page_live_iframe_tests;
 mod paint_trace_tests;
 #[cfg(test)]
 mod browser_ui_tests;
+#[cfg(test)]
+mod browser_ui_word_delete_tests;
+#[cfg(test)]
+mod browser_ui_host_lines_tests;
 mod browser_scroll;
 #[cfg(test)]
 mod browser_scroll_tests;
@@ -169,6 +177,8 @@ mod browser_navigation_storage;
 mod browser_navigation_url;
 #[cfg(test)]
 mod browser_navigation_url_colon_tests;
+#[cfg(test)]
+mod browser_navigation_url_protocol_tests;
 #[cfg(test)]
 mod browser_navigation_tests;
 #[cfg(test)]
@@ -528,3 +538,5 @@ mod browser_shared_wait_tests;
 
 #[cfg(test)]
 mod browser_threaded_worker_tests;
+#[cfg(test)]
+mod browser_worker_filereadersync_tests;

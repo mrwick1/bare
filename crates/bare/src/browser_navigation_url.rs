@@ -9,6 +9,7 @@
 //! - HTTP host names use the IDNA conversion of `bare_url`; other schemes keep their host gates;
 //! - `parse` accepts only `http` and `https`. Any other scheme is `UErr::Scheme` (a script may still see it as a cross-origin
 //!   refusal, as `pushState` does). `parse_any` is for the `URL` class: it also reads other schemes into an `Alt` (see there).
+//! - `set_protocol` switches between the special schemes (`http`, `https`, `ws`, `wss`, `ftp`) and ignores other switches. `file` stays gated, and so does user info on a `ws`, `wss` or `ftp` result.
 
 use bare_url::{Scheme, Url};
 
@@ -310,7 +311,7 @@ fn query_encode(v: &str) -> Result<String, UErr> {
 
 impl Rec {
     /// A record made by `parse_any` for a scheme other than `http` and `https` (see `Alt::into_url`).
-    fn is_alt(&self) -> bool {
+    pub(crate) fn is_alt(&self) -> bool {
         self.u.port == 0 && self.u.host.is_empty()
     }
     fn alt(&self) -> Option<Alt> {
@@ -494,23 +495,34 @@ impl Rec {
             self.u.port = p;
         }
     }
+    /// WHATWG allows a switch from one special scheme (`http`, `https`, `ws`, `wss`, `ftp`) to another. Any other switch changes nothing.
+    /// `file` is gated. A `ws`, `wss` or `ftp` result is an `Alt` record: `Location` refuses it.
     pub fn set_protocol(&mut self, v: &str) -> Result<(), UErr> {
-        if self.is_alt() {
-            return Ok(());
-        }
         let name = clean(v);
         let name = name.split(':').next().unwrap_or("").to_ascii_lowercase();
-        let new = match name.as_str() {
-            "http" => Scheme::Http,
-            "https" => Scheme::Https,
-            "ftp" | "ws" | "wss" | "file" => return Err(UErr::Scheme),
-            _ => return Ok(()),
-        };
-        // The port is "null" in a URL that shows the default port: it follows the new scheme.
-        if self.u.port == self.u.scheme.default_port() {
-            self.u.port = new.default_port();
+        let special = |n: &str| matches!(n, "http" | "https" | "ws" | "wss" | "ftp");
+        let old = self.protocol().trim_end_matches(':').to_string();
+        if name == "file" {
+            return Err(UErr::Scheme);
         }
-        self.u.scheme = new;
+        if !special(&name) || !special(&old) || name == old {
+            return Ok(());
+        }
+        let (host, port, pq) = match self.alt() {
+            Some(a) => match a.host {
+                Some(h) => (h, a.port, a.pq),
+                None => return Ok(()),
+            },
+            None => (self.u.host.clone(), Some(self.u.port).filter(|&p| p != self.u.scheme.default_port()), self.u.path.clone()),
+        };
+        if self.userinfo.as_ref().is_some_and(|i| !i.0.is_empty() || !i.1.is_empty()) && !matches!(name.as_str(), "http" | "https") {
+            return Err(UErr::Gate("user info in a URL"));
+        }
+        let port = port.map_or(String::new(), |p| format!(":{p}"));
+        let mut r = parse_any(&format!("{name}://{host}{port}{pq}"), None)?;
+        r.frag = self.frag.take();
+        r.userinfo = self.userinfo.take();
+        *self = r;
         Ok(())
     }
 }

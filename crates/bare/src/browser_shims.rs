@@ -1,6 +1,7 @@
 //! Web APIs that are written in JavaScript and made at the first read of one of their names: `Element.prototype.animate` and `Animation`
 //! (`shims/animation.js`), `Path2D` (`shims/path2d.js`), `indexedDB` and the `IDB*` interfaces (`shims/idb.js`), `EventSource` (`shims/eventsource.js`),
 //! `WebSocket` and `CloseEvent` (`shims/websocket.js`, the network side in `browser_websocket.rs`), `FileReader` (`shims/filereader.js`),
+//! `FileReaderSync` (`shims/filereadersync.js`, in a worker only),
 //! `speechSynthesis` and the `SpeechSynthesis*` interfaces (`shims/speech.js`, no voices),
 //! `WritableStream`, `TransformStream`, `TextDecoderStream`, `TextEncoderStream` and `ReadableStream.prototype.pipeTo` and `pipeThrough`
 //! (`shims/streams.js`), `CompressionStream` and `DecompressionStream` (`shims/compression.js`, with the native `codec` here).
@@ -19,12 +20,13 @@ use crate::browser_scoped::*;
 use bare_js_api::{Args, HostFn, Local, Type};
 
 /// `(names that ask for it, the global that the source defines first, source)`.
-const SHIMS: [(&[&str], &str, &str); 10] = [
+const SHIMS: [(&[&str], &str, &str); 11] = [
     (&["animate", "Animation"], "Animation", include_str!("shims/animation.js")),
     (&["Path2D"], "Path2D", include_str!("shims/path2d.js")),
     (&["EventSource"], "EventSource", include_str!("shims/eventsource.js")),
     (&["WebSocket", "CloseEvent"], "WebSocket", include_str!("shims/websocket.js")),
     (&["FileReader"], "FileReader", include_str!("shims/filereader.js")),
+    (&["FileReaderSync"], "FileReaderSync", include_str!("shims/filereadersync.js")),
     (&["speechSynthesis", "SpeechSynthesis", "SpeechSynthesisUtterance", "SpeechSynthesisEvent", "SpeechSynthesisErrorEvent"], "speechSynthesis", include_str!("shims/speech.js")),
     (&["indexedDB"], "indexedDB", include_str!("shims/idb.js")),
     (&STREAM_NAMES, "WritableStream", include_str!("shims/streams.js")),
@@ -40,6 +42,13 @@ const STREAM_NAMES: [&str; 7] = ["WritableStream", "WritableStreamDefaultWriter"
 pub(crate) fn define<E: Eng>(d: &Dom<E>, it: &mut E::Vm, name: &str) -> R<E, bool> {
     let Some(&(_, sentinel, src)) = SHIMS.iter().find(|s| s.0.contains(&name) || (name.starts_with("IDB") && s.1 == "indexedDB")) else { return Ok(false) };
     let g = it.global_object();
+    // A window has no `FileReaderSync`. `browser_worker::install_scope` defines `DedicatedWorkerGlobalScope` on a worker global.
+    if sentinel == "FileReaderSync" {
+        let w = d.key(it, "DedicatedWorkerGlobalScope")?;
+        if it.h_peek_own(g, w)?.is_none() {
+            return Ok(false);
+        }
+    }
     let k = d.key(it, sentinel)?;
     if it.h_peek_own(g, k)?.is_none() {
         // Not `js_str`: the source is part of the host, not script data, and it is not charged.
@@ -53,6 +62,9 @@ pub(crate) fn define<E: Eng>(d: &Dom<E>, it: &mut E::Vm, name: &str) -> R<E, boo
             // The source gives its install function. It takes the native of `browser_websocket.rs`.
             let f = d.add_fn_s_obj(it, crate::browser_websocket::ws_host, "ws", 4, HostFn::Method)?;
             it.call_o(made, E::undef(), &[E::obj_raw(f)])?;
+        } else if sentinel == "FileReaderSync" {
+            let f = d.add_fn_s_obj(it, blob_bytes, "bytes", 1, HostFn::Method)?;
+            it.call_o(made, E::undef(), &[E::obj_raw(f)])?;
         } else if sentinel == "indexedDB" {
             // The source gives its install function. It takes the store of `browser_idb.rs`.
             let f = d.add_fn_s_obj(it, crate::browser_idb::idb_host, "idb", 1, HostFn::Method)?;
@@ -60,6 +72,13 @@ pub(crate) fn define<E: Eng>(d: &Dom<E>, it: &mut E::Vm, name: &str) -> R<E, boo
         }
     }
     Ok(true)
+}
+
+/// `bytes(blob)` of `shims/filereadersync.js`: a new ArrayBuffer with the bytes of a Blob or a File, else undefined.
+fn blob_bytes<'s, E: Eng>(d: &Dom<E>, s: &mut Sc<'s, E>, _: Local<'s>, a: Args<'s>) -> Res<'s, Local<'s>> {
+    let Some(b) = a.get(0).and_then(|v| obj_id::<E>(s, v)).and_then(|o| crate::browser_web::blob_bytes(d, o)) else { return Ok(s.undefined()) };
+    s.charge((b.len() / 64) as u64)?;
+    s.new_array_buffer(b.to_vec())
 }
 
 /// The most bytes that one `DecompressionStream` gives. A small bomb that grows past it is a `TypeError`, after this much work.
