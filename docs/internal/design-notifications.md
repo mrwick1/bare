@@ -1,6 +1,6 @@
 # Design: web notifications that an agent can read
 
-Status: draft for owner review (2026-11-26). No code is built.
+Status: accepted by the owner (2026-11-26), with the decisions in section 8. The plan in section 7 is in build.
 
 ## 1. Problem
 
@@ -119,9 +119,7 @@ Design A for agents, with C as a later flag for the `bare` window. A is the only
 zero on pages that do not use notifications, and in proportion to the notifications on pages that do. B gives no click and
 loses entries. C needs a desktop.
 
-Retention: the brief asks for a log with no cap that the agent drains. CLAUDE.md says a cap that guards a slow algorithm is a
-design smell; here the cap guards against an agent that never reads. Proposal: no cap on unread events (200 bytes each).
-Open question 2 asks the owner.
+Retention: no cap on unread events (owner decision). The agent drains the log.
 
 ## 5. Who grants the permission
 
@@ -134,12 +132,11 @@ Options:
 
 Proposal: option 1, set with `notifications op=grant`. A session with no profile keeps the grant in memory. The file is a list of
 `(origin, permission name, state)` in the same frame (magic, payload, CRC-32), so other permissions (`clipboard-read`,
-`geolocation`) fit later. `requestPermission()` with no decision resolves "default", as a dismissed prompt, and logs a
-`permission-requested` event, so the agent sees that the page asked. The agent then grants and the page asks again
-(WhatsApp has a "Turn on" link in its banner).
+`geolocation`) fit later. `requestPermission()` with no decision resolves "denied" and logs a `permission-requested` event, so the agent sees that the
+page asked. The agent then grants and the page asks again (WhatsApp has a "Turn on" link in its banner).
 
-Default with no decision: "default" (Chrome), not "denied" as today. Teams reads the permission (see the module comment); it must
-still work with "default" (to verify in the Teams journey).
+Default with no decision: "denied", as before (owner decision). A page never sees "default". Only an explicit grant gives
+"granted". So the Teams journey does not change.
 
 ## 6. A page in the background
 
@@ -155,12 +152,12 @@ Notifications matter most when the chat is not in view.
   page has focus (hypothesis, as Chrome users see). So an agent needs a way to put the page in the background:
   `notifications op=background on|off`. It sets `visibilityState` "hidden", `hasFocus()` false, and fires `visibilitychange`
   and `blur`. A click on a notification sets it back to "visible", as Chrome does when it focuses the tab.
-- Throttling as a cost saving: a hidden page could align its timers to 1 s, as Chrome does. That saves CPU on an idle
-  WhatsApp page. It is not part of this design. Open question 4.
+- Throttling as a cost saving: a hidden page aligns its timers to 1 s, as Chrome does (owner decision). That saves CPU on an
+  idle WhatsApp page. WebSocket messages, fetch replies and other network tasks are not aligned. Step 5 builds it.
 
 ## 7. Plan (one PR each)
 
-1. **Permission state.** `Notification.permission` and `requestPermission` read a per-origin decision (default "default").
+1. **Permission state.** `Notification.permission` and `requestPermission` read a per-origin decision (default "denied").
    `navigator.permissions.query` with `PermissionStatus` (`notifications` only; other names "prompt"). Insecure context:
    "denied". Tests, Chrome as the reference: the three states, the callback form, `query` state mapping, `change` event.
 2. **Profile and grant.** `permissions.bin` in the profile and in `StorageState` (so `save_state` keeps it). bare-mcp tool
@@ -172,23 +169,22 @@ Notifications matter most when the chat is not in view.
 4. **Agent tool.** `notifications op=list|wait|click|close`, the receipt line in `act`, and the bare-drive step
    `expect notification`. `click` fires a trusted `click` with user activation. Tests: a test page that makes a notification
    from a timer; `wait` returns it; `click` runs `onclick`; `window.focus()` in it works.
-5. **Background.** `op=background on|off`: `visibilityState`, `hasFocus`, `visibilitychange`, `blur`, `focus`. Tests:
-   events and values in Chrome order.
-6. Later, if the owner wants it: the OS path behind a flag (Design C).
+5. **Background.** `op=background on|off`: `visibilityState`, `hasFocus`, `visibilitychange`, `blur`, `focus`. Timers of a
+   hidden page align to 1 s. Tests: events and values in Chrome order; timer alignment.
+6. Later: the OS path behind a flag (Design C). Not built now (owner decision).
 
 Cost rows: steps 1, 3 and 5 touch the host. Run the rows of `examples/platform_load` and `examples/handler_load`
 (`tools/js/cost_rows.txt`), which cover `navigator` and event handlers. The `Notification` global stays lazy, so other rows
 should not move. Steps 2 and 4 touch only bare-mcp, bare-drive and the profile: no cost row covers them. A Vex change is not
 expected.
 
-## 8. Open questions for the owner
+## 8. Owner decisions (2026-11-26)
 
-1. Default permission with no decision: "default" as Chrome (proposed), or keep "denied" until the agent grants?
-2. Retention of unread notification events: no cap (proposed, about 200 bytes each), or a cap like the console (500)?
-3. Grant path: a profile setting set by `notifications op=grant` (proposed), or also an `open` argument?
-4. Should a hidden page align its timers to 1 s, as Chrome does, to save CPU? It would delay a timer-driven notification
-   by up to 1 s, not a WebSocket-driven one.
-5. Should the OS notification path (Design C) be built for the `bare` window, and on which platforms?
-6. Service workers: WhatsApp may prefer `ServiceWorkerRegistration.showNotification`. This design covers only page
-   notifications. If WhatsApp needs a service worker for them, that is a separate design (`design-workers.md` covers
-   dedicated workers only).
+1. Default permission with no decision: keep "denied". Only an explicit grant, per origin and kept in the profile
+   (`permissions.bin`), gives "granted".
+2. Unread notification events: no cap.
+3. Grant path: the profile setting, set by `notifications op=grant`. No `open` argument.
+4. A hidden page aligns its timers to 1 s, as Chrome does. WebSocket-driven work is not delayed.
+5. The OS notification path (Design C): later, not now.
+6. Service workers: out of scope. If WhatsApp notifies only through `ServiceWorkerRegistration.showNotification`, this
+   document records it.

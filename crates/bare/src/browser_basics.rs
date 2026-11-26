@@ -254,7 +254,7 @@ pub(crate) fn secure<E: Eng>(d: &Dom<E>) -> bool {
 }
 
 /// The origin of the document, serialized: "null" while no URL is configured.
-fn doc_origin<E: Eng>(d: &Dom<E>) -> String {
+pub(crate) fn doc_origin<E: Eng>(d: &Dom<E>) -> String {
     let nav = d.nav.s.borrow();
     if let Some(e) = nav.entries.get(nav.cur) {
         return e.url.origin();
