@@ -381,14 +381,21 @@ fn grow_fbs(fbs: &mut Vec<Option<Box<Feedback>>>, n: usize) {
 /// The feedback of code `ci`, made at its first run. A slot of a code that never ran costs one word (`design-feedback-table.md`).
 #[inline(always)]
 fn feedback<'a>(fbs: &'a mut Vec<Option<Box<Feedback>>>, n: usize, ci: usize, code: &Code) -> &'a mut Feedback {
+    if !matches!(fbs.get(ci), Some(Some(f)) if f.ready && f.caches.len() == code.sites.len()) {
+        make_feedback(fbs, n, ci, code);
+    }
+    // SAFETY: the check above or `make_feedback` made slot `ci`.
+    unsafe { fbs.get_unchecked_mut(ci).as_deref_mut().unwrap_unchecked() }
+}
+
+/// Make slot `ci` and its feedback: the first run of the code, or the program grew.
+#[cold]
+#[inline(never)]
+fn make_feedback(fbs: &mut Vec<Option<Box<Feedback>>>, n: usize, ci: usize, code: &Code) {
     if ci >= fbs.len() {
         grow_fbs(fbs, n);
     }
-    let fb = fbs[ci].get_or_insert_with(Box::default);
-    if !fb.ready || fb.caches.len() != code.sites.len() {
-        fb.init(code);
-    }
-    fb
+    fbs[ci].get_or_insert_with(Box::default).init(code);
 }
 
 /// How `gen_op` ends: the first frame of the run returned (`Done`), or `ci`, `fp` and `pc` are the caller's (`reload!` follows).
