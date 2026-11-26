@@ -448,8 +448,14 @@ impl Session {
                 }
             };
             let end = bare_net::vclock::instant() + limit;
+            let doc = p.generation();
             let mut v = v;
             let out = loop {
+                // The code started a navigation, and the promise went with the old document: its handle is not valid in the new one.
+                if p.generation() != doc {
+                    let _ = p.wait_load(end.saturating_duration_since(bare_net::vclock::instant()));
+                    return Err(format!("the page navigated before the promise settled\nnavigated: {}", safe_url(&p.url().unwrap_or_default())));
+                }
                 let b = p.browser().ok_or("no document")?;
                 match b.promise_step(&v, EVAL_MAX) {
                     bare::browser_any::Step::Done(s) => break s,
