@@ -382,22 +382,24 @@ fn show_interactive(url: &str, viewport: (f32, f32), profile: Option<&str>) -> i
                 return 1;
             }
         };
-        let mut page = match bare::page::Page::open_in_with(&url, size, &session_client(), state.as_ref(), None, profile) {
+        let net = session_client();
+        let page = match bare::page::Page::open_in_with(&url, size, &net, state.as_ref(), None, profile) {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("error: {e}");
                 return 1;
             }
         };
+        let mut shell = bare::shell::Shell::new(page, &url, net, size);
         let config = bare_window::Config { title: format!("bare: {url}"), app_id: "bare".into(), size };
         let opened = bare_window::Window::open(&config).inspect(|w| {
             let waker = w.waker();
-            page.wake_on_done(move || waker.wake());
+            shell.wake_on_done(move || waker.wake());
         });
-        match opened.and_then(|w| w.run(&mut page)) {
+        match opened.and_then(|w| w.run(&mut shell)) {
             Ok(stats) => {
                 if std::env::var_os("BARE_WINDOW_STATS").is_some() {
-                    eprintln!("{stats:?}, first frame {:?}", page.first_frame);
+                    eprintln!("{stats:?}, first frame {:?}", shell.page().first_frame);
                 }
                 0
             }

@@ -385,6 +385,9 @@ impl State {
             self.cursor = c;
             self.apply_cursor();
         }
+        if let Some(title) = ctl.title {
+            self.window.set_title(title);
+        }
         if let Some(data) = ctl.set_clipboard {
             self.copy(data);
         }
