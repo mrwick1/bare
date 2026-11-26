@@ -806,6 +806,11 @@ impl Code {
         Some(SaveList { sent, mode, regs: rest.get(3..)?.get(..len as usize)? })
     }
 
+    /// The code is a stub: one `Op::Lazy` word (`script.rs`: `stub`).
+    pub fn is_stub(&self) -> bool {
+        self.words.len() == 1 && decode(&self.words, 0).is_ok_and(|(i, _)| i.op == Op::Lazy)
+    }
+
     /// The handler for an exception thrown at word `pc`.
     pub fn handler_at(&self, pc: u32) -> Option<&Handler> {
         self.handlers.iter().find(|h| h.start <= pc && pc < h.end)
