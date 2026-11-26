@@ -9,7 +9,8 @@
 //!
 //! **Root map.** The compiler gives each safepoint of a function (an allocation, a call, a loop back edge) the set of registers that
 //! hold a value that the program can still read. A [`RootMaps`] is that set for one function: a bitmap of the registers for each
-//! safepoint, kept in one `Vec<u64>` and found by the `pc` of the safepoint with a binary search. No frame stores its map: a frame
+//! safepoint, kept in one `Vec<u64>` and found by the `pc` of the safepoint with a binary search. [`RootMaps::seal`] keeps each distinct
+//! bitmap once and gives each safepoint a 2 B index: about half of the maps of a function repeat (`design-code-memory.md`, R1). No frame stores its map: a frame
 //! stores its `pc`, and the search runs only during a collection. A register that is not in the map is dead or not written yet. The
 //! collector never reads it, so a frame needs no fill at a call (design 6.10 item 4) and the register may hold the pointer of a cell
 //! that the last collection freed.
@@ -39,8 +40,10 @@ pub struct RootMaps {
     regs: usize,
     /// The `pc` of each safepoint, in increasing order.
     pcs: Vec<u32>,
-    /// `regs.div_ceil(64)` words for each safepoint, in the order of `pcs`. Bit `r` of the words is register `r`.
+    /// `regs.div_ceil(64)` words for each map. Bit `r` of the words is register `r`. With no `index`, map `i` is the map of `pcs[i]`.
     words: Vec<u64>,
+    /// The map of each safepoint, in the order of `pcs`, after [`RootMaps::seal`]. Empty: one map for each safepoint.
+    index: Vec<u16>,
 }
 
 /// The live registers of one safepoint.
@@ -50,20 +53,48 @@ pub struct Map<'a>(&'a [u64]);
 impl RootMaps {
     /// Maps for a function with `regs` registers.
     pub fn new(regs: usize) -> RootMaps {
-        RootMaps { regs, pcs: Vec::new(), words: Vec::new() }
+        RootMaps { regs, pcs: Vec::new(), words: Vec::new(), index: Vec::new() }
     }
 
     pub(crate) fn with_capacity(regs: usize, maps: usize) -> RootMaps {
-        RootMaps { regs, pcs: Vec::with_capacity(maps), words: Vec::with_capacity(maps * regs.div_ceil(64)) }
+        RootMaps { regs, pcs: Vec::with_capacity(maps), words: Vec::with_capacity(maps * regs.div_ceil(64)), index: Vec::new() }
     }
 
     pub(crate) fn single_word(regs: usize, pcs: Vec<u32>, words: Vec<u64>) -> RootMaps {
         debug_assert!((1..=64).contains(&regs) && pcs.len() == words.len());
-        RootMaps { regs, pcs, words }
+        RootMaps { regs, pcs, words, index: Vec::new() }
+    }
+
+    /// Keep each distinct map once, when that is smaller, and drop the spare capacity. The compiler calls it when the maps are complete.
+    pub(crate) fn seal(mut self) -> RootMaps {
+        let w = self.per_map();
+        let n = self.pcs.len();
+        if w > 0 && n > 1 && self.index.is_empty() {
+            let mut seen: std::collections::HashMap<&[u64], u16> = std::collections::HashMap::with_capacity(n);
+            let (mut words, mut index) = (Vec::new(), Vec::with_capacity(n));
+            for m in self.words.chunks_exact(w) {
+                let next = seen.len();
+                if next > u16::MAX as usize {
+                    break;
+                }
+                let k = *seen.entry(m).or_insert_with(|| {
+                    words.extend_from_slice(m);
+                    next as u16
+                });
+                index.push(k);
+            }
+            if index.len() == n && words.len() * 8 + n * 2 < self.words.len() * 8 {
+                (self.words, self.index) = (words, index);
+            }
+        }
+        self.pcs.shrink_to_fit();
+        self.words.shrink_to_fit();
+        self
     }
 
     pub(crate) fn add_words(&mut self, pc: u32, bits: &[u64]) {
         assert!(self.pcs.last().is_none_or(|&last| last < pc), "safepoints are added in the order of pc");
+        assert!(self.index.is_empty(), "the maps are sealed");
         let width = self.per_map();
         assert!(bits.len() <= width);
         debug_assert!(bits.len() < width || self.regs % 64 == 0 || bits.last().unwrap() >> (self.regs % 64) == 0);
@@ -81,6 +112,7 @@ impl RootMaps {
     /// the register count of the function.
     pub fn add(&mut self, pc: u32, live: impl IntoIterator<Item = usize>) {
         assert!(self.pcs.last().is_none_or(|&l| l < pc), "safepoints are added in the order of pc");
+        assert!(self.index.is_empty(), "the maps are sealed");
         self.pcs.push(pc);
         let at = self.words.len();
         self.words.resize(at + self.per_map(), 0);
@@ -93,6 +125,7 @@ impl RootMaps {
     /// The map of the safepoint at `pc`.
     pub fn find(&self, pc: u32) -> Option<Map<'_>> {
         let i = self.pcs.binary_search(&pc).ok()?;
+        let i = self.index.get(i).map_or(i, |&k| k as usize);
         let w = self.per_map();
         Some(Map(&self.words[i * w..(i + 1) * w]))
     }
@@ -109,7 +142,7 @@ impl RootMaps {
 
     /// Bytes of the maps (compile-time memory).
     pub fn bytes(&self) -> usize {
-        self.pcs.capacity() * 4 + self.words.capacity() * 8
+        self.pcs.capacity() * 4 + self.words.capacity() * 8 + self.index.capacity() * 2
     }
 }
 
@@ -236,3 +269,7 @@ fn collect_then_alloc(heap: &mut Heap, shapes: &mut Shapes, atoms: &mut Atoms, r
 #[allow(unsafe_code)]
 #[path = "roots_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "roots_dedup_tests.rs"]
+mod dedup_tests;

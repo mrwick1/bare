@@ -970,7 +970,8 @@ impl<'a> Fc<'a> {
                 roots.add_words(asm.pcs[idx], &self.root_bits[start..end]);
             }
             roots
-        };
+        }
+        .seal();
         for h in &self.handlers {
             let (s, e) = (asm.pcs[h.start], asm.pcs[h.end]);
             if s < e {
