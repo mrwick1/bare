@@ -688,7 +688,7 @@ fn browser_name(u: &[u16]) -> bool {
         Some(80) => named!("Path2D"),
         Some(112) => named!("parent") || named!("postMessage") || named!("print") || named!("prompt"),
         Some(116) => named!("top") || named!("toDataURL") || named!("transform"),
-        Some(103) => named!("getContext") || named!("getBBox") || named!("getCTM") || named!("getScreenCTM") || named!("getTotalLength") || named!("getPointAtLength") || named!("getComputedTextLength") || named!("getSubStringLength"),
+        Some(103) => named!("getContext") || named!("getAnimations") || named!("getBBox") || named!("getCTM") || named!("getScreenCTM") || named!("getTotalLength") || named!("getPointAtLength") || named!("getComputedTextLength") || named!("getSubStringLength"),
         Some(119) => named!("width") || named!("write") || named!("writeln"),
         Some(104) => named!("height") || named!("hasFocus") || named!("hidden"),
         Some(118) => named!("viewBox") || named!("visibilityState"),
