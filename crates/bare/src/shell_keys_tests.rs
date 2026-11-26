@@ -54,6 +54,10 @@ fn two_key_commands_wait_one_second() {
     assert_eq!(press(&mut k, "t", t + Duration::from_millis(900)), (true, vec![Act::NextPage]));
     press(&mut k, "g", t);
     assert_eq!(press(&mut k, "T", t), (true, vec![Act::PrevPage]));
+    // The Shift key of `T` is not a key of the command.
+    press(&mut k, "g", t);
+    assert_eq!(press(&mut k, "Shift", t), (false, vec![]));
+    assert_eq!(press(&mut k, "T", t), (true, vec![Act::PrevPage]));
     // After the timeout the second key is a first key: `t` opens the command line.
     press(&mut k, "g", t);
     assert_eq!(press(&mut k, "t", t + Duration::from_millis(1100)), (true, vec![Act::Redraw]));

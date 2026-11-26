@@ -163,6 +163,14 @@ impl Keys {
         }
     }
 
+    /// Back to NORMAL, with no hint and no pending key (a click or the wheel ended the mode).
+    pub fn reset(&mut self) {
+        if self.mode != Mode::Insert {
+            self.mode = Mode::Normal;
+        }
+        (self.pending, self.labels, self.typed) = (None, Vec::new(), String::new());
+    }
+
     /// Open the command line with `text` already in it.
     pub fn command_line(&mut self, text: &str) {
         self.begin(Mode::Command, ':', text);
@@ -207,6 +215,10 @@ impl Keys {
     }
 
     fn normal(&mut self, k: Key, now: Instant) -> Out {
+        // A modifier key alone (the Shift of `gT`) does not end a two-key command.
+        if matches!(k.key, "Shift" | "Control" | "Alt" | "Meta" | "AltGraph" | "CapsLock") {
+            return Out::default();
+        }
         if k.mods() {
             self.pending = None;
             return Out::default();
