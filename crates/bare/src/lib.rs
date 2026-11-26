@@ -133,6 +133,8 @@ mod browser_streams_tests;
 #[cfg(test)]
 mod browser_streams_shim_tests;
 #[cfg(test)]
+mod browser_datatransfer_tests;
+#[cfg(test)]
 mod browser_compression_tests;
 #[cfg(test)]
 mod browser_fetch_tests;

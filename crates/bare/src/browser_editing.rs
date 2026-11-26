@@ -325,6 +325,11 @@ impl<E: Eng> Dom<E> {
 
     /// `insertText`: replace the selection with `text`, the caret after it. False when the selection is not in an editing host.
     pub(crate) fn insert_text(&self, it: &mut E::Vm, text: &str) -> R<E, bool> {
+        self.insert_text_as(it, text, "insertText")
+    }
+
+    /// `insert_text` with another `inputType` for the `input` event (`insertFromPaste`).
+    pub(crate) fn insert_text_as(&self, it: &mut E::Vm, text: &str, kind: &str) -> R<E, bool> {
         let Some((a, host)) = self.editing(it)? else { return Ok(false) };
         if text.is_empty() {
             return Ok(false);
@@ -382,7 +387,20 @@ impl<E: Eng> Dom<E> {
             None => (node, at + len),
         };
         caret(self, it, a.sel, node, end)?;
-        self.input_event(it, host, "insertText", Some(text))?;
+        self.input_event(it, host, kind, if kind == "insertText" { Some(text) } else { None })?;
+        Ok(true)
+    }
+
+    /// Delete a non-collapsed selection in an editing host, then fire `input` with `inputType` `kind` (`deleteByCut`). The caller fired
+    /// `beforeinput`. False when the selection is collapsed or not in a host.
+    pub(crate) fn delete_selected(&self, it: &mut E::Vm, kind: &str) -> R<E, bool> {
+        let Some((a, host)) = self.editing(it)? else { return Ok(false) };
+        if a.start == a.end {
+            return Ok(false);
+        }
+        let (c, o) = self.cut_selection(it, &a)?;
+        caret(self, it, a.sel, c, o)?;
+        self.input_event(it, host, kind, None)?;
         Ok(true)
     }
 

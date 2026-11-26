@@ -159,7 +159,17 @@ pub(crate) struct UiState {
     pub(crate) sel_drag: Option<(NodeId, u32)>,
     /// The last user input was the pointer, not a key: a focus that follows it shows no focus ring (`:focus-visible`), except in a text field.
     pub(crate) by_pointer: bool,
+    /// The helper of `shims/clipboard.js` (`browser_ui/clipboard.rs`), once the shim ran.
+    pub(crate) clip: Option<bare_js_api::Persistent>,
+    /// What the last copy or cut put on the clipboard, for the window to take (`Browser::take_clipboard`).
+    pub(crate) clip_out: Option<Vec<(String, Vec<u8>)>>,
+    /// The last key was a paste: the window must read the clipboard and call `Browser::ui_paste`.
+    pub(crate) paste_wanted: bool,
+    /// The `DataTransfer` of the paste that runs, for `InputEvent.dataTransfer` of its `beforeinput` and `input`.
+    pub(crate) paste_dt: Option<bare_js_api::Persistent>,
 }
+
+mod clipboard;
 
 // ------------------------------------------------------------------------------------------ getters
 
@@ -839,6 +849,9 @@ impl<E: Eng> Dom<E> {
     }
 
     fn key_default(&self, it: &mut E::Vm, k: &KeyInput) -> R<E, ()> {
+        if let Some(cmd) = clipboard::command(k) {
+            return self.clip_key(it, cmd);
+        }
         let focus = self.current_focus(it)?;
         let t = self.focus_target(it)?;
         let edit = focus.filter(|&f| self.editable(f));
@@ -1028,7 +1041,7 @@ impl<E: Eng> Dom<E> {
         // `maxlength`: the typed text is cut to fit, and nothing happens when none of it fits.
         let fitted;
         let text = match (kind, text, self.max_length(n)) {
-            ("insertText" | "insertLineBreak", Some(t), Some(max)) => {
+            ("insertText" | "insertLineBreak" | "insertFromPaste", Some(t), Some(max)) => {
                 fitted = crate::browser_submit::fit_units(t, max.saturating_sub(u16_len(&value) - (to - from)));
                 if fitted.is_empty() {
                     return Ok(());
